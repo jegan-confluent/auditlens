@@ -1,0 +1,177 @@
+version: '3.8'
+
+services:
+  audit-forwarder:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    container_name: audit-forwarder-v2
+    restart: unless-stopped
+    environment:
+      # Source Kafka (Audit Log Cluster)
+      - AUDIT_BOOTSTRAP=${AUDIT_BOOTSTRAP}
+      - AUDIT_API_KEY=${AUDIT_API_KEY}
+      - AUDIT_API_SECRET=${AUDIT_API_SECRET}
+      - AUDIT_TOPIC=${AUDIT_TOPIC:-confluent-audit-log-events}
+      - GROUP_ID=${GROUP_ID:-audit-forwarder-v2}
+
+      # Destination Kafka
+      - DEST_BOOTSTRAP=${DEST_BOOTSTRAP}
+      - DEST_API_KEY=${DEST_API_KEY}
+      - DEST_API_SECRET=${DEST_API_SECRET}
+      - DEST_TOPIC=${DEST_TOPIC:-audit-logs-processed}
+
+      # Schema Registry
+      - SCHEMA_REGISTRY_URL=${SCHEMA_REGISTRY_URL}
+      - SCHEMA_REGISTRY_KEY=${SCHEMA_REGISTRY_KEY}
+      - SCHEMA_REGISTRY_SECRET=${SCHEMA_REGISTRY_SECRET}
+
+      # S3 Sink (optional)
+      - S3_ENABLED=${S3_ENABLED:-false}
+      - S3_BUCKET=${S3_BUCKET:-}
+      - S3_PREFIX=${S3_PREFIX:-confluent-audit-logs/}
+      - S3_REGION=${S3_REGION:-us-west-2}
+      - S3_FORMAT=${S3_FORMAT:-parquet}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
+
+      # GCS Sink (optional)
+      - GCS_ENABLED=${GCS_ENABLED:-false}
+      - GCS_BUCKET=${GCS_BUCKET:-}
+      - GCS_PREFIX=${GCS_PREFIX:-confluent-audit-logs/}
+      - GCS_PROJECT_ID=${GCS_PROJECT_ID:-}
+
+      # Processing
+      - BATCH_SIZE=${BATCH_SIZE:-500}
+      - NUM_WORKERS=${NUM_WORKERS:-3}
+      - OFFSET_FILE=/app/data/offsets.json
+
+      # Enabled sinks (comma-separated: kafka,s3,gcs)
+      - ENABLED_SINKS=${ENABLED_SINKS:-kafka}
+
+      # DLQ
+      - DLQ_ENABLED=${DLQ_ENABLED:-true}
+      - DLQ_TOPIC=${DLQ_TOPIC:-audit-forwarder-dlq}
+
+      # Observability
+      - METRICS_PORT=8000
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - LOG_FORMAT=${LOG_FORMAT:-json}
+
+      # MCP
+      - MCP_ENABLED=${MCP_ENABLED:-true}
+
+    volumes:
+      - forwarder_data:/app/data
+      # Mount GCS credentials if using GCS
+      - ${GCS_CREDENTIALS_FILE:-/dev/null}:/app/gcs-credentials.json:ro
+    ports:
+      - "8000:8000"  # Metrics
+      - "8001:8001"  # Health
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+    networks:
+      - monitoring
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+
+  prometheus:
+    image: prom/prometheus:v2.48.0
+    container_name: audit-prometheus
+    restart: unless-stopped
+    volumes:
+      - ../../prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ../../prometheus/alerts:/etc/prometheus/alerts:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=15d'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--web.enable-lifecycle'
+    ports:
+      - "9090:9090"
+    networks:
+      - monitoring
+    depends_on:
+      - audit-forwarder
+
+  grafana:
+    image: grafana/grafana:10.2.2
+    container_name: audit-grafana
+    restart: unless-stopped
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ../../grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../../grafana/dashboards:/var/lib/grafana/dashboards:ro
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_SERVER_ROOT_URL=${GRAFANA_ROOT_URL:-http://localhost:3000}
+      - GF_INSTALL_PLUGINS=grafana-clock-panel
+    ports:
+      - "3000:3000"
+    networks:
+      - monitoring
+    depends_on:
+      - prometheus
+
+  loki:
+    image: grafana/loki:2.9.3
+    container_name: audit-loki
+    restart: unless-stopped
+    ports:
+      - "3100:3100"
+    command: -config.file=/etc/loki/local-config.yaml
+    volumes:
+      - loki_data:/loki
+    networks:
+      - monitoring
+
+  promtail:
+    image: grafana/promtail:2.9.3
+    container_name: audit-promtail
+    restart: unless-stopped
+    volumes:
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ../../promtail-config.yml:/etc/promtail/config.yml:ro
+    command: -config.file=/etc/promtail/config.yml
+    networks:
+      - monitoring
+    depends_on:
+      - loki
+
+  # Optional: Redis for query caching
+  redis:
+    image: redis:7-alpine
+    container_name: audit-redis
+    restart: unless-stopped
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - monitoring
+    profiles:
+      - cache
+
+networks:
+  monitoring:
+    driver: bridge
+
+volumes:
+  forwarder_data:
+  prometheus_data:
+  grafana_data:
+  loki_data:
+  redis_data:

@@ -1,0 +1,57 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: audit-forwarder
+  namespace: audit-forwarder
+  labels:
+    app.kubernetes.io/name: audit-forwarder
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "8000"
+spec:
+  type: ClusterIP
+  ports:
+    - name: metrics
+      port: 8000
+      targetPort: metrics
+      protocol: TCP
+    - name: health
+      port: 8001
+      targetPort: health
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: audit-forwarder
+
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: audit-forwarder
+  namespace: audit-forwarder
+  labels:
+    app.kubernetes.io/name: audit-forwarder
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: audit-forwarder
+  endpoints:
+    - port: metrics
+      interval: 15s
+      path: /metrics
+  namespaceSelector:
+    matchNames:
+      - audit-forwarder
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: audit-forwarder
+  namespace: audit-forwarder
+  labels:
+    app.kubernetes.io/name: audit-forwarder
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: audit-forwarder

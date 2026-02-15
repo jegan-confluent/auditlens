@@ -1,0 +1,302 @@
+-- Find duplicates (this query should work)
+SELECT 
+  `id`,
+  COUNT(*) AS duplicate_count,
+  MIN(`time`) AS first_occurrence,
+  MAX(`time`) AS last_occurrence
+FROM `jegan_auditlog_dockersetup`
+GROUP BY `id`
+HAVING COUNT(*) > 1
+ORDER BY duplicate_count DESC, `id`;
+
+
+
+
+
+CREATE TABLE `team-global`.`csta_global_cluster`.`jegan_auditlog_dockersetup_deduped` (
+  -- Primary key first
+  `id`                 VARCHAR(2147483647) NOT NULL,
+  -- All other columns
+  `key`                VARBINARY(2147483647),
+  `aclHost`            VARCHAR(2147483647),
+  `aclPermissionType`  VARCHAR(2147483647),
+  `authzResourceName`  VARCHAR(2147483647),
+  `clientId`           VARCHAR(2147483647),
+  `clientIp`           VARCHAR(2147483647),
+  `connectionId`       VARCHAR(2147483647),
+  `correlationId`      VARCHAR(2147483647),
+  `correlation_id`     VARCHAR(2147483647),
+  `data_json`          VARCHAR(2147483647) COMMENT 'Original `data` object serialized as JSON',
+  `datacontenttype`    VARCHAR(2147483647),
+  `granted`            BOOLEAN,
+  `identity`           VARCHAR(2147483647),
+  `methodName`         VARCHAR(2147483647),
+  `operation`          VARCHAR(2147483647),
+  `patternType`        VARCHAR(2147483647),
+  `principal`          VARCHAR(2147483647),
+  `principalResourceId`VARCHAR(2147483647),
+  `rbacRole`           VARCHAR(2147483647),
+  `rbacScope`          VARCHAR(2147483647),
+  `requestId`          VARCHAR(2147483647),
+  `resourceName`       VARCHAR(2147483647),
+  `resourceType`       VARCHAR(2147483647),
+  `resultData`         VARCHAR(2147483647) COMMENT 'Promoted from `data.result.data`',
+  `resultStatus`       VARCHAR(2147483647) COMMENT 'Promoted from `data.result.status`',
+  `serviceName`        VARCHAR(2147483647),
+  `source`             VARCHAR(2147483647) NOT NULL,
+  `specversion`        VARCHAR(2147483647) NOT NULL,
+  `subject`            VARCHAR(2147483647),
+  `time`               VARCHAR(2147483647),
+  `type`               VARCHAR(2147483647) NOT NULL,
+  `principal_email`    VARCHAR(2147483647),
+  PRIMARY KEY (`id`) NOT ENFORCED
+)
+DISTRIBUTED BY HASH(`id`) INTO 12 BUCKETS
+WITH (
+  'connector'             = 'confluent',
+  'key.format'            = 'json-registry',
+  'value.format'          = 'json-registry',
+  'changelog.mode'        = 'append',
+  'kafka.cleanup-policy'  = 'compact',
+  'kafka.retention.time'  = '30 d',
+  'scan.bounded.mode'     = 'unbounded',
+  'scan.startup.mode'     = 'earliest-offset'
+);
+
+
+
+
+
+-- Insert statement (following the original approach)
+INSERT INTO `team-global`.`csta_global_cluster`.`jegan_auditlog_dockersetup_deduped`
+SELECT
+  -- 1. id first
+  id,
+  -- 2–11. the original raw fields
+  `key`,
+  aclHost,
+  aclPermissionType,
+  authzResourceName,
+  clientId,
+  clientIp,
+  COALESCE(
+    JSON_VALUE(data_json, '$.requestMetadata.connection_id'),
+    connectionId
+  ) AS connectionId,
+  correlationId,
+  correlation_id,
+  -- 12–14. more raw fields
+  data_json,
+  datacontenttype,
+  granted,
+  -- 15. identity from JSON
+  JSON_VALUE(data_json, '$.authenticationInfo.identity') AS `identity`,
+  -- 16–18. methodName, operation, patternType
+  methodName,
+  operation,
+  patternType,
+  -- 19–21. principal info
+  COALESCE(
+    principal,
+    JSON_VALUE(data_json, '$.authenticationInfo.principal')
+  ) AS principal,
+  JSON_VALUE(data_json, '$.authenticationInfo.principalResourceId') AS principalResourceId,
+  -- 22–23
+  rbacRole,
+  rbacScope,
+  requestId,
+  -- 24–27. resource & result fields
+  resourceName,
+  resourceType,
+  resultData,
+  resultStatus,
+  -- 28
+  serviceName,
+  -- 29–33. source, specversion, subject, time, type
+  `source`,
+  specversion,
+  subject,
+  `time`,
+  `type`,
+  -- 34. principal_email last
+  JSON_VALUE(data_json, '$.authenticationInfo.principal.email') AS principal_email
+FROM (
+  SELECT
+    *,
+    ROW_NUMBER() OVER (
+      PARTITION BY id
+      -- You can modify this ORDER BY clause as needed
+      ORDER BY TO_TIMESTAMP(`time`, 'yyyy-MM-dd''T''HH:mm:ss.SSSSSSSSS''Z''')
+    ) AS rn
+  FROM `jegan_auditlog_dockersetup`
+) t
+WHERE rn = 1;
+
+
+
+May 5th
+Latest Creation Steps.
+
+-- Create the deduplicated table
+CREATE TABLE `team-global`.`csta_global_cluster`.`jegan_auditlog_dockersetup_deduped` (
+  -- Primary key first
+  `id`                 VARCHAR(2147483647) NOT NULL,
+  -- All other columns
+  `key`                VARBINARY(2147483647),
+  `aclHost`            VARCHAR(2147483647),
+  `aclPermissionType`  VARCHAR(2147483647),
+  `authzResourceName`  VARCHAR(2147483647),
+  `clientId`           VARCHAR(2147483647),
+  `clientIp`           VARCHAR(2147483647),
+  `connectionId`       VARCHAR(2147483647),
+  `correlationId`      VARCHAR(2147483647),
+  `correlation_id`     VARCHAR(2147483647),
+  `data_json`          VARCHAR(2147483647) COMMENT 'Original `data` object serialized as JSON',
+  `datacontenttype`    VARCHAR(2147483647),
+  `granted`            BOOLEAN,
+  `identity`           VARCHAR(2147483647),
+  `methodName`         VARCHAR(2147483647),
+  `operation`          VARCHAR(2147483647),
+  `patternType`        VARCHAR(2147483647),
+  `principal`          VARCHAR(2147483647),
+  `principalResourceId`VARCHAR(2147483647),
+  `rbacRole`           VARCHAR(2147483647),
+  `rbacScope`          VARCHAR(2147483647),
+  `requestId`          VARCHAR(2147483647),
+  `resourceName`       VARCHAR(2147483647),
+  `resourceType`       VARCHAR(2147483647),
+  `resultData`         VARCHAR(2147483647) COMMENT 'Promoted from `data.result.data`',
+  `resultStatus`       VARCHAR(2147483647) COMMENT 'Promoted from `data.result.status`',
+  `serviceName`        VARCHAR(2147483647),
+  `source`             VARCHAR(2147483647) NOT NULL,
+  `specversion`        VARCHAR(2147483647) NOT NULL,
+  `subject`            VARCHAR(2147483647),
+  `time`               VARCHAR(2147483647),
+  `type`               VARCHAR(2147483647) NOT NULL,
+  `principal_email`    VARCHAR(2147483647),
+  PRIMARY KEY (`id`) NOT ENFORCED
+)
+DISTRIBUTED BY HASH(`id`) INTO 12 BUCKETS
+WITH (
+  'connector'             = 'confluent',
+  'key.format'            = 'json-registry',
+  'value.format'          = 'json-registry',
+  'changelog.mode'        = 'append',
+  'kafka.cleanup-policy'  = 'compact',
+  'kafka.retention.time'  = '30 d',
+  'scan.bounded.mode'     = 'unbounded',
+  'scan.startup.mode'     = 'earliest-offset'
+);
+
+
+
+-- Simple INSERT without deduplication (rely on PRIMARY KEY)
+INSERT INTO `team-global`.`csta_global_cluster`.`jegan_auditlog_dockersetup_deduped`
+SELECT
+  id,
+  `key`,
+  aclHost,
+  aclPermissionType,
+  authzResourceName,
+  clientId,
+  clientIp,
+  connectionId,
+  correlationId,
+  correlation_id,
+  data_json,
+  datacontenttype,
+  granted,
+  'identity',
+  methodName,
+  operation,
+  patternType,
+  principal,
+  principalResourceId,
+  rbacRole,
+  rbacScope,
+  requestId,
+  resourceName,
+  resourceType,
+  resultData,
+  resultStatus,
+  serviceName,
+  source,
+  specversion,
+  subject,
+  'time',
+  type,
+  JSON_VALUE(data_json, '$.authenticationInfo.principal.email') AS principal_email
+FROM `jegan_auditlog_dockersetup`;
+
+
+
+View:
+
+
+CREATE VIEW `team-global`.`csta_global_cluster`.`auth_security_events` AS
+SELECT
+  -- When: Timestamp information (simplified)
+  id AS event_id,
+  TRY_CAST(`time` AS TIMESTAMP(3)) AS event_ts,
+  
+  -- Using EXTRACT for date parts with safer casting
+  EXTRACT(YEAR FROM TRY_CAST(`time` AS TIMESTAMP(3))) AS event_year,
+  EXTRACT(MONTH FROM TRY_CAST(`time` AS TIMESTAMP(3))) AS event_month,
+  EXTRACT(DAY FROM TRY_CAST(`time` AS TIMESTAMP(3))) AS event_day,
+  EXTRACT(HOUR FROM TRY_CAST(`time` AS TIMESTAMP(3))) AS event_hour,
+  
+  -- Classification
+  'Authentication Event' AS event_category,
+  CASE
+    WHEN JSON_VALUE(data_json, '$.result.status') = 'UNAUTHENTICATED' THEN 'Authentication Failure'
+    WHEN JSON_VALUE(data_json, '$.result.status') = 'FAILURE' THEN 'Authentication Failure'
+    WHEN JSON_VALUE(data_json, '$.result.status') = 'SUCCESS' THEN 'Authentication Success'
+    ELSE 'Other Authentication Status'
+  END AS event_type,
+  
+  -- Who: User identification
+  COALESCE(
+    principal,
+    JSON_VALUE(data_json, '$.authenticationInfo.principal')
+  ) AS principal_id,
+  JSON_VALUE(data_json, '$.authenticationInfo.principal.email') AS user_email,
+  JSON_VALUE(data_json, '$.authenticationInfo.principalResourceId') AS user_resource_id,
+  
+  -- Where: Cluster and environment information
+  resourceName AS resource_name,
+  CASE 
+    WHEN resourceName LIKE '%/kafka=%' THEN 
+      SUBSTRING(resourceName, POSITION('/kafka=' IN resourceName) + 7)
+    ELSE NULL
+  END AS kafka_cluster_id,
+  
+  CASE 
+    WHEN `source` LIKE '%/environment=%' THEN 
+      SUBSTRING(
+        `source`, 
+        POSITION('/environment=' IN `source`) + 12,
+        CASE 
+          WHEN POSITION('/cloud-cluster=' IN `source`) > 0 THEN 
+            POSITION('/cloud-cluster=' IN `source`) - POSITION('/environment=' IN `source`) - 12
+          ELSE 
+            CHAR_LENGTH(`source`) - POSITION('/environment=' IN `source`) - 12
+        END
+      )
+    ELSE NULL
+  END AS environment_id,
+  
+  -- Authentication details
+  JSON_VALUE(data_json, '$.authenticationInfo.metadata.identifier') AS api_key,
+  JSON_VALUE(data_json, '$.authenticationInfo.metadata.mechanism') AS auth_mechanism,
+  JSON_VALUE(data_json, '$.result.status') AS auth_status,
+  JSON_VALUE(data_json, '$.result.message') AS status_message,
+  
+  -- Client information
+  clientIp AS source_ip,
+  connectionId AS connection_id,
+  JSON_VALUE(data_json, '$.requestMetadata.network_id') AS network_id,
+  
+  -- Original data
+  data_json AS raw_event
+FROM `team-global`.`csta_global_cluster`.`jegan_auditlog_dockersetup_deduped`
+WHERE methodName = 'kafka.Authentication';

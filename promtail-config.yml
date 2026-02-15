@@ -1,0 +1,48 @@
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  # SECURITY: File-based log collection instead of Docker socket
+  # Services write logs to ./logs directory which Promtail reads
+  - job_name: audit-forwarder
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: audit-forwarder
+          container: audit-forwarder
+          __path__: /var/log/audit/audit-forwarder*.log
+
+  - job_name: dashboard
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: dashboard
+          container: dashboard
+          __path__: /var/log/audit/dashboard*.log
+
+  - job_name: prometheus
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: prometheus
+          container: prometheus
+          __path__: /var/log/audit/prometheus*.log
+
+  - job_name: grafana
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: grafana
+          container: grafana
+          __path__: /var/log/audit/grafana*.log

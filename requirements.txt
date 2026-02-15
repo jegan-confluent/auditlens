@@ -1,0 +1,45 @@
+# Kafka and Schema Registry
+# Pinned versions for security and reproducibility
+# Last updated: 2025-12-08
+
+# Kafka client with schema registry support
+confluent-kafka[json,avro]==2.6.0
+
+# Environment and configuration
+python-dotenv==1.0.1
+
+# HTTP client with HTTP/2 support
+httpx==0.26.0
+
+# Core dependencies
+attrs==23.2.0
+cachetools==5.3.3
+typing-extensions==4.12.2
+
+# Authentication
+authlib==1.3.1
+
+# HTTP requests (used by confluent-kafka)
+requests==2.32.3
+
+# JSON schema validation
+referencing==0.35.1
+jsonschema==4.23.0
+
+# Data validation
+pydantic==2.9.2
+
+# RFC validation
+rfc3339-validator==0.1.4
+
+# Prometheus metrics
+prometheus-client==0.21.0
+
+# Retry logic for webhooks
+tenacity==9.0.0
+
+# Fast JSON parsing (2-3x faster than json)
+orjson==3.10.12
+
+# YAML config parsing (for classification rules)
+PyYAML==6.0.2

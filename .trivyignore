@@ -1,0 +1,8 @@
+# Trivy Security Scanner Ignore List
+# Only add vulnerabilities here after careful review and documentation
+# Format: CVE-YYYY-XXXXX
+
+# Example: Vulnerability accepted due to no fix available
+# CVE-2024-12345
+
+# Add ignored vulnerabilities below with justification comments

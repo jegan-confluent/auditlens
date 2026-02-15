@@ -1,0 +1,55 @@
+# Example Terraform variables for GCP deployment
+# Copy this file to terraform.tfvars and fill in your values
+
+# Project Configuration
+project_name = "audit-forwarder"
+environment  = "dev"
+
+# GCP Configuration
+project_id = "your-gcp-project-id"
+region     = "us-central1"
+
+# VPC Configuration (for Cloud Run VPC connector)
+vpc_network = "default"
+vpc_subnet  = "default"
+
+# Cloud Run Configuration
+cpu           = "1"
+memory        = "1Gi"
+min_instances = 1
+max_instances = 5
+image_tag     = "latest"
+
+# Allow unauthenticated (set to false for production)
+allow_unauthenticated = false
+
+# Confluent Cloud Configuration
+confluent_cloud_api_key    = "YOUR_CLOUD_API_KEY"
+confluent_cloud_api_secret = "YOUR_CLOUD_API_SECRET"
+
+# Audit Log Cluster (Source)
+audit_bootstrap  = "pkc-xxxxx.us-central1.gcp.confluent.cloud:9092"
+audit_topics     = "confluent-audit-log-events"
+audit_api_key    = "YOUR_AUDIT_API_KEY"
+audit_api_secret = "YOUR_AUDIT_API_SECRET"
+
+# Destination Cluster
+dest_bootstrap  = "pkc-xxxxx.us-central1.gcp.confluent.cloud:9092"
+dest_topic      = "audit-logs-processed"
+dest_api_key    = "YOUR_DEST_API_KEY"
+dest_api_secret = "YOUR_DEST_API_SECRET"
+dlq_topic       = "audit-logs-dlq"
+
+# Schema Registry
+schema_registry_url    = "https://psrc-xxxxx.us-central1.gcp.confluent.cloud"
+schema_registry_key    = "YOUR_SR_API_KEY"
+schema_registry_secret = "YOUR_SR_API_SECRET"
+
+# GCS Configuration
+audit_log_retention_days = 365
+
+# Logging
+log_level = "INFO"
+
+# Alerting (optional - get IDs from Cloud Monitoring)
+notification_channels = []

@@ -1,0 +1,192 @@
+{
+  "version": "2.0",
+  "rules": [
+    {
+      "skill": "typescript-patterns",
+      "keywords": [
+        "typescript",
+        "type",
+        "interface",
+        "generic",
+        "enum"
+      ]
+    },
+    {
+      "skill": "react-patterns",
+      "keywords": [
+        "component",
+        "hook",
+        "useState",
+        "useEffect",
+        "context",
+        "props"
+      ]
+    },
+    {
+      "skill": "testing-patterns",
+      "keywords": [
+        "test",
+        "jest",
+        "vitest",
+        "playwright",
+        "mock",
+        "coverage"
+      ]
+    },
+    {
+      "skill": "api-patterns",
+      "keywords": [
+        "api",
+        "endpoint",
+        "REST",
+        "GraphQL",
+        "route",
+        "middleware"
+      ]
+    },
+    {
+      "skill": "database-patterns",
+      "keywords": [
+        "database",
+        "SQL",
+        "query",
+        "migration",
+        "schema",
+        "ORM"
+      ]
+    },
+    {
+      "skill": "supabase-patterns",
+      "keywords": [
+        "supabase",
+        "RLS",
+        "RPC",
+        "auth",
+        "storage",
+        "realtime"
+      ]
+    },
+    {
+      "skill": "security-first",
+      "keywords": [
+        "security",
+        "encrypt",
+        "auth",
+        "JWT",
+        "password",
+        "secret"
+      ]
+    },
+    {
+      "skill": "deployment-patterns",
+      "keywords": [
+        "deploy",
+        "CI/CD",
+        "Docker",
+        "Vercel",
+        "AWS",
+        "pipeline"
+      ]
+    },
+    {
+      "skill": "performance-patterns",
+      "keywords": [
+        "performance",
+        "optimize",
+        "cache",
+        "lazy",
+        "bundle"
+      ]
+    },
+    {
+      "skill": "hf-llm-trainer",
+      "keywords": [
+        "fine-tune",
+        "fine-tuning",
+        "training",
+        "SFT",
+        "DPO",
+        "GRPO",
+        "LoRA",
+        "huggingface"
+      ]
+    },
+    {
+      "skill": "hf-dataset-creator",
+      "keywords": [
+        "dataset",
+        "training data",
+        "create dataset",
+        "data format"
+      ]
+    },
+    {
+      "skill": "mcp-builder",
+      "keywords": [
+        "MCP",
+        "model context protocol",
+        "mcp server",
+        "tool server"
+      ]
+    },
+    {
+      "skill": "systematic-debugging",
+      "keywords": [
+        "debug",
+        "bug",
+        "error",
+        "failing",
+        "broken",
+        "not working"
+      ]
+    },
+    {
+      "skill": "test-driven-development",
+      "keywords": [
+        "TDD",
+        "test first",
+        "red green refactor"
+      ]
+    },
+    {
+      "skill": "csv-data-summarizer",
+      "keywords": [
+        "CSV",
+        "analyze data",
+        "data quality",
+        "missing values"
+      ]
+    },
+    {
+      "skill": "claude-agent-sdk",
+      "keywords": [
+        "agent",
+        "agent SDK",
+        "autonomous",
+        "long running",
+        "multi-step"
+      ]
+    },
+    {
+      "skill": "diary-analyzer",
+      "keywords": [
+        "diary",
+        "reflect",
+        "memory",
+        "learnings",
+        "patterns",
+        "rules"
+      ]
+    },
+    {
+      "skill": "memory-consolidation",
+      "keywords": [
+        "memory",
+        "consolidation",
+        "episodic",
+        "procedural",
+        "CoALA"
+      ]
+    }
+  ]
+}

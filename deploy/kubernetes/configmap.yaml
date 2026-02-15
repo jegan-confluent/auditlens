@@ -1,0 +1,51 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: audit-forwarder-config
+  namespace: audit-forwarder
+  labels:
+    app.kubernetes.io/name: audit-forwarder
+data:
+  # Source topic
+  AUDIT_TOPIC: "confluent-audit-log-events"
+  GROUP_ID: "audit-forwarder-v2"
+
+  # Destination topic
+  DEST_TOPIC: "audit-logs-processed"
+
+  # Processing configuration
+  BATCH_SIZE: "500"
+  NUM_WORKERS: "3"
+  OFFSET_FILE: "/app/data/offsets.json"
+
+  # Enabled sinks (comma-separated)
+  ENABLED_SINKS: "kafka"
+
+  # S3 configuration (if enabled)
+  S3_ENABLED: "false"
+  S3_PREFIX: "confluent-audit-logs/"
+  S3_REGION: "us-west-2"
+  S3_FORMAT: "parquet"
+  S3_COMPRESSION: "snappy"
+
+  # GCS configuration (if enabled)
+  GCS_ENABLED: "false"
+  GCS_PREFIX: "confluent-audit-logs/"
+  GCS_FORMAT: "parquet"
+  GCS_COMPRESSION: "snappy"
+
+  # DLQ configuration
+  DLQ_ENABLED: "true"
+  DLQ_TOPIC: "audit-forwarder-dlq"
+
+  # Observability
+  METRICS_PORT: "8000"
+  LOG_LEVEL: "INFO"
+  LOG_FORMAT: "json"
+
+  # MCP server
+  MCP_ENABLED: "true"
+
+  # Query cache
+  CACHE_ENABLED: "false"
+  CACHE_BACKEND: "sqlite"

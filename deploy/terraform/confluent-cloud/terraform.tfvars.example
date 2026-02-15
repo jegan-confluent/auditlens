@@ -1,0 +1,29 @@
+# Example Terraform variables for Confluent Cloud resources
+# Copy this file to terraform.tfvars and fill in your values
+
+# Confluent Cloud API (Organization or Environment Admin)
+confluent_cloud_api_key    = "YOUR_CLOUD_API_KEY"
+confluent_cloud_api_secret = "YOUR_CLOUD_API_SECRET"
+
+# Environment
+environment_id = "env-xxxxx"
+environment    = "dev"
+
+# Audit Log Cluster (Source)
+# This is the dedicated cluster that receives audit logs
+audit_cluster_id           = "lkc-audit"
+audit_cluster_admin_key    = "ADMIN_KEY_FOR_AUDIT_CLUSTER"
+audit_cluster_admin_secret = "ADMIN_SECRET_FOR_AUDIT_CLUSTER"
+
+# Destination Cluster
+# This is where processed logs will be written
+dest_cluster_id           = "lkc-dest"
+dest_cluster_admin_key    = "ADMIN_KEY_FOR_DEST_CLUSTER"
+dest_cluster_admin_secret = "ADMIN_SECRET_FOR_DEST_CLUSTER"
+
+# Topics
+dest_topic         = "audit-logs-processed"
+dlq_topic          = "audit-logs-dlq"
+topic_partitions   = 6
+topic_retention_ms = 604800000  # 7 days
+dlq_retention_ms   = 2592000000 # 30 days

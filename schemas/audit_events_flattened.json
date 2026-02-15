@@ -1,0 +1,178 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AuditEventFlattened",
+  "description": "Flattened Confluent Cloud audit log event based on v1.2 schema",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "Unique event identifier (UUID from CloudEvents)"
+    },
+    "specversion": {
+      "type": ["string", "null"],
+      "description": "CloudEvents spec version"
+    },
+    "source": {
+      "type": ["string", "null"],
+      "description": "CRN of event origin"
+    },
+    "subject": {
+      "type": ["string", "null"],
+      "description": "CRN of affected resource"
+    },
+    "type": {
+      "type": ["string", "null"],
+      "description": "Event type (io.confluent.kafka.server/authentication, etc.)"
+    },
+    "time": {
+      "type": ["string", "null"],
+      "description": "RFC 3339 timestamp of event"
+    },
+    "datacontenttype": {
+      "type": ["string", "null"],
+      "description": "Content type (application/json)"
+    },
+    "serviceName": {
+      "type": ["string", "null"],
+      "description": "CRN of service receiving request"
+    },
+    "methodName": {
+      "type": ["string", "null"],
+      "description": "Operation type (e.g., kafka.Authentication, CreateKafkaCluster)"
+    },
+    "resourceName": {
+      "type": ["string", "null"],
+      "description": "Name of the specific resource"
+    },
+    "principal": {
+      "type": ["string", "null"],
+      "description": "Authenticated principal (e.g., User:12345)"
+    },
+    "principalResourceId": {
+      "type": ["string", "null"],
+      "description": "Principal resource ID (e.g., u-yw9507, sa-xxxxx)"
+    },
+    "identity": {
+      "type": ["string", "null"],
+      "description": "Full identity CRN"
+    },
+    "granted": {
+      "type": ["boolean", "null"],
+      "description": "Was authorization granted?"
+    },
+    "operation": {
+      "type": ["string", "null"],
+      "description": "Authorization operation (Alter, Create, Delete, etc.)"
+    },
+    "resourceType": {
+      "type": ["string", "null"],
+      "description": "Type of resource (Topic, Cluster, Group, etc.)"
+    },
+    "authzResourceName": {
+      "type": ["string", "null"],
+      "description": "Authorization resource name"
+    },
+    "patternType": {
+      "type": ["string", "null"],
+      "description": "LITERAL or PREFIX"
+    },
+    "rbacRole": {
+      "type": ["string", "null"],
+      "description": "RBAC role (OrganizationAdmin, EnvironmentAdmin, etc.)"
+    },
+    "rbacScope": {
+      "type": ["string", "null"],
+      "description": "RBAC scope"
+    },
+    "aclPermissionType": {
+      "type": ["string", "null"],
+      "description": "ACL permission type (ALLOW, DENY)"
+    },
+    "aclHost": {
+      "type": ["string", "null"],
+      "description": "ACL host pattern"
+    },
+    "clientId": {
+      "type": ["string", "null"],
+      "description": "Client-supplied identifier"
+    },
+    "clientIp": {
+      "type": ["string", "null"],
+      "description": "Client IP address"
+    },
+    "connectionId": {
+      "type": ["string", "null"],
+      "description": "Authenticated connection ID"
+    },
+    "requestId": {
+      "type": ["string", "null"],
+      "description": "Request identifier"
+    },
+    "correlationId": {
+      "type": ["string", "null"],
+      "description": "Correlation ID for request/response matching"
+    },
+    "correlation_id": {
+      "type": ["string", "null"],
+      "description": "Alternative correlation ID field"
+    },
+    "resultStatus": {
+      "type": ["string", "null"],
+      "description": "Result status (SUCCESS, FAILURE, UNAUTHENTICATED, PERMISSION_DENIED)"
+    },
+    "resultData": {
+      "type": ["string", "null"],
+      "description": "Additional result data as JSON string"
+    },
+    "authMechanism": {
+      "type": ["string", "null"],
+      "description": "Authentication mechanism (SASL_SSL/PLAIN, etc.)"
+    },
+    "authIdentifier": {
+      "type": ["string", "null"],
+      "description": "API key or user ID used for authentication"
+    },
+    "principal_email": {
+      "type": ["string", "null"],
+      "description": "Email of principal if available"
+    },
+    "data_json": {
+      "type": ["string", "null"],
+      "description": "Original data object serialized as JSON"
+    },
+    "criticality": {
+      "type": ["string", "null"],
+      "enum": ["CRITICAL", "HIGH", "MEDIUM", "LOW", null],
+      "description": "Computed event criticality level based on method and result status"
+    },
+    "is_deletion": {
+      "type": ["boolean", "null"],
+      "description": "True if methodName contains 'Delete'"
+    },
+    "is_creation": {
+      "type": ["boolean", "null"],
+      "description": "True if methodName contains 'Create'"
+    },
+    "is_modification": {
+      "type": ["boolean", "null"],
+      "description": "True if methodName contains 'Update' or 'Alter'"
+    },
+    "is_security_event": {
+      "type": ["boolean", "null"],
+      "description": "True if event involves auth failure, permission denied, or access issues"
+    },
+    "organization_id": {
+      "type": ["string", "null"],
+      "description": "Organization ID extracted from CRN source field"
+    },
+    "environment_id": {
+      "type": ["string", "null"],
+      "description": "Environment ID extracted from CRN source field"
+    },
+    "cluster_id": {
+      "type": ["string", "null"],
+      "description": "Cluster ID extracted from CRN source field (kafka, schema-registry, ksqldb, or flink)"
+    }
+  },
+  "required": ["id"]
+}

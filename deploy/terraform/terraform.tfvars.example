@@ -1,0 +1,26 @@
+# ============================================================================
+# Confluent Cloud Audit Log Analyzer - Configuration
+# ============================================================================
+# Copy this file to terraform.tfvars and fill in your values
+# ============================================================================
+
+# Confluent Cloud API credentials (Organization-level)
+# Create at: https://confluent.cloud/settings/api-keys
+confluent_cloud_api_key    = "YOUR_CLOUD_API_KEY"
+confluent_cloud_api_secret = "YOUR_CLOUD_API_SECRET"
+
+# Your Confluent Cloud environment ID
+# Find at: https://confluent.cloud/environments
+environment_id = "env-xxxxx"
+
+# Audit log cluster ID (the cluster where audit logs are stored)
+# This is typically a dedicated audit log cluster
+audit_log_cluster_id = "lkc-xxxxx"
+
+# Flink configuration
+flink_cloud   = "AWS"       # AWS, GCP, or AZURE
+flink_region  = "us-east-1" # Must match or be close to your audit cluster
+flink_max_cfu = 10          # 5-50 CFUs, start with 10
+
+# Project name prefix
+project_name = "audit-analyzer"

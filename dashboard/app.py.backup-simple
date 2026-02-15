@@ -1,0 +1,606 @@
+"""
+Confluent Audit Log Intelligence Dashboard v8.0
+Real-time Kafka Monitoring - No Flink Required
+
+A simplified, cost-effective dashboard for monitoring Confluent Cloud audit events
+in real-time by reading directly from Kafka topics.
+"""
+
+import streamlit as st
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+from datetime import datetime, timedelta
+import time
+import os
+import json
+from dotenv import load_dotenv
+from confluent_kafka import Consumer, KafkaError
+
+# Load environment variables
+load_dotenv(os.path.join(os.path.dirname(__file__), '..', '.env'))
+load_dotenv(os.path.join(os.path.dirname(__file__), '..', '.secrets'))
+
+# Import local modules
+try:
+    from metrics_parser import (
+        get_forwarder_status,
+        get_criticality_distribution,
+        get_anomaly_counts,
+    )
+except ImportError:
+    # Gracefully handle missing metrics_parser
+    def get_forwarder_status():
+        return {'status': 'unknown', 'message': 'Metrics endpoint not available'}
+    def get_criticality_distribution():
+        return {}
+    def get_anomaly_counts():
+        return {}
+
+# =============================================================================
+# CONFIGURATION
+# =============================================================================
+
+VERSION = "8.0"
+DASHBOARD_MODE = "kafka"  # Hard-coded: Kafka Direct only (no Flink required)
+
+# Kafka configuration
+DEST_BOOTSTRAP = os.getenv('DEST_BOOTSTRAP')
+DEST_API_KEY = os.getenv('DEST_API_KEY')
+DEST_API_SECRET = os.getenv('DEST_API_SECRET')
+
+# Topic names (multi-topic routing)
+TOPIC_CRITICAL = os.getenv('AUDIT_TOPIC_CRITICAL', 'audit_events_critical')
+TOPIC_HIGH = os.getenv('AUDIT_TOPIC_HIGH', 'audit_events_high')
+TOPIC_MEDIUM = os.getenv('AUDIT_TOPIC_MEDIUM', 'audit_events_medium')
+TOPIC_LOW = os.getenv('AUDIT_TOPIC_LOW', 'audit_events_low')
+TOPIC_ALL = os.getenv('DEST_TOPIC', 'audit_events_flattened')
+
+# =============================================================================
+# COST ESTIMATES (Updated Daily)
+# =============================================================================
+
+COST_BREAKDOWN = {
+    'mode': 'development',  # or 'production'
+    'monthly_total': 770,
+    'components': {
+        'Destination Cluster (Basic)': 720,
+        'Forwarder Compute': 30,
+        'Dashboard Compute': 20,
+        'Storage (7 days)': 0,  # Included in cluster cost
+    },
+    'savings': {
+        'No Flink (vs Flink)': 401,
+        'No Schema Registry (vs with SR)': 150,
+        'No Prometheus (vs self-hosted)': 65,
+    },
+    'total_savings': 616,
+}
+
+# =============================================================================
+# CLASSIFICATION LOGIC (Synced with audit_forwarder.py)
+# =============================================================================
+
+CRITICAL_METHODS = frozenset({
+    'DeleteKafkaCluster', 'PauseKafkaCluster',
+    'DeleteEnvironment', 'DeleteOrganization',
+    'kafka.DeleteTopics', 'kafka.DeleteRecords',
+    'kafka.DeleteAcls', 'kafka.CreateAcls',
+    'DeleteConnector', 'DeleteKsqldbCluster',
+    'DeleteFlinkCompute', 'DeleteFlinkStatement',
+    'DeleteSchema', 'DeleteSubject',
+    'DeleteServiceAccount',
+    'DeleteIdentityProvider', 'DeleteIdentityPool',
+    'DeleteByokKey',
+})
+
+HIGH_METHODS = frozenset({
+    'CreateApiKey', 'DeleteApiKey', 'UpdateApiKey', 'RotateApiKey',
+    'CreateServiceAccount', 'UpdateServiceAccount',
+    'CreateRoleBinding', 'DeleteRoleBinding',
+    'CreateUser', 'DeleteUser', 'UpdateUser',
+})
+
+SECURITY_FAILURE_STATUSES = frozenset({
+    'UNAUTHENTICATED', 'PERMISSION_DENIED', 'UNAUTHORIZED',
+    'FORBIDDEN', 'INVALID_CREDENTIALS',
+})
+
+# =============================================================================
+# KAFKA DATA LOADER
+# =============================================================================
+
+@st.cache_data(ttl=30)
+def load_events_from_kafka(criticality_filter='All', time_minutes=60, max_events=1000):
+    """
+    Load events directly from Kafka topics (real-time streaming).
+
+    Args:
+        criticality_filter: 'CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'All'
+        time_minutes: How far back to look (not used with latest offset)
+        max_events: Maximum number of events to return
+
+    Returns:
+        DataFrame of events
+    """
+    if not DEST_BOOTSTRAP or not DEST_API_KEY:
+        st.error("⚠️ Kafka connection not configured. Check .env file.")
+        return pd.DataFrame()
+
+    # Select topics based on filter
+    if criticality_filter == 'CRITICAL':
+        topics = [TOPIC_CRITICAL]
+        timeout_seconds = 15
+    elif criticality_filter == 'HIGH':
+        topics = [TOPIC_HIGH]
+        timeout_seconds = 15
+    elif criticality_filter == 'MEDIUM':
+        topics = [TOPIC_MEDIUM]
+        timeout_seconds = 20
+    elif criticality_filter == 'LOW':
+        topics = [TOPIC_LOW] if TOPIC_LOW else []
+        timeout_seconds = 30
+    else:  # 'All'
+        topics = [TOPIC_CRITICAL, TOPIC_HIGH, TOPIC_MEDIUM]
+        timeout_seconds = 45
+
+    if not topics:
+        return pd.DataFrame()
+
+    consumer_config = {
+        'bootstrap.servers': DEST_BOOTSTRAP,
+        'security.protocol': 'SASL_SSL',
+        'sasl.mechanism': 'PLAIN',
+        'sasl.username': DEST_API_KEY,
+        'sasl.password': DEST_API_SECRET,
+        'group.id': f'dashboard-viewer-{int(time.time())}',  # Unique group ID
+        'auto.offset.reset': 'latest',  # Only get recent events
+        'enable.auto.commit': False,
+    }
+
+    consumer = Consumer(consumer_config)
+    consumer.subscribe(topics)
+
+    events = []
+    start_time = time.time()
+
+    try:
+        with st.spinner(f'📡 Fetching events from Kafka ({timeout_seconds}s timeout)...'):
+            while len(events) < max_events and (time.time() - start_time) < timeout_seconds:
+                msg = consumer.poll(timeout=1.0)
+
+                if msg is None:
+                    continue
+
+                if msg.error():
+                    if msg.error().code() != KafkaError._PARTITION_EOF:
+                        st.warning(f"Kafka error: {msg.error()}")
+                    continue
+
+                try:
+                    event_data = json.loads(msg.value().decode('utf-8'))
+                    events.append(event_data)
+                except json.JSONDecodeError as e:
+                    st.warning(f"Failed to decode event: {e}")
+                    continue
+
+    finally:
+        consumer.close()
+
+    if not events:
+        return pd.DataFrame()
+
+    # Convert to DataFrame
+    df = pd.DataFrame(events)
+
+    # Parse time column if it exists
+    if 'time' in df.columns:
+        df['time'] = pd.to_datetime(df['time'], errors='coerce')
+        df = df.sort_values('time', ascending=False)
+
+    return df
+
+# =============================================================================
+# EVENT CLASSIFICATION (Re-classify if needed)
+# =============================================================================
+
+def classify_event(event):
+    """Re-classify event to ensure consistency."""
+    method_name = event.get('methodName', '')
+    result_status = str(event.get('resultStatus', '')).upper()
+    granted = event.get('granted')
+
+    # Priority 1: Security failures
+    if result_status in SECURITY_FAILURE_STATUSES:
+        return 'CRITICAL'
+
+    # Priority 2: Denied access on sensitive methods
+    if granted is False and method_name in CRITICAL_METHODS:
+        return 'CRITICAL'
+
+    # Priority 3: Method-based classification
+    if method_name in CRITICAL_METHODS:
+        return 'CRITICAL'
+    if method_name in HIGH_METHODS:
+        return 'HIGH'
+
+    # Default to existing classification or LOW
+    return event.get('criticality', 'LOW')
+
+# =============================================================================
+# STREAMLIT UI
+# =============================================================================
+
+# Page configuration
+st.set_page_config(
+    page_title=f"Audit Intelligence v{VERSION}",
+    page_icon="🔒",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Custom CSS
+st.markdown("""
+<style>
+    .main-header {
+        font-size: 2.5rem;
+        font-weight: bold;
+        color: #1f77b4;
+        margin-bottom: 0.5rem;
+    }
+    .sub-header {
+        font-size: 1.2rem;
+        color: #666;
+        margin-bottom: 2rem;
+    }
+    .metric-card {
+        background-color: #f0f2f6;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        margin: 0.5rem 0;
+    }
+    .cost-badge {
+        background-color: #28a745;
+        color: white;
+        padding: 0.25rem 0.75rem;
+        border-radius: 1rem;
+        font-size: 0.9rem;
+        font-weight: bold;
+    }
+    .version-badge {
+        background-color: #6c757d;
+        color: white;
+        padding: 0.25rem 0.75rem;
+        border-radius: 0.25rem;
+        font-size: 0.8rem;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# Header
+col1, col2, col3 = st.columns([3, 1, 1])
+with col1:
+    st.markdown(f'<div class="main-header">🔒 Confluent Audit Log Intelligence</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="sub-header">Real-time Kafka monitoring • No Flink required • <span class="cost-badge">Saves $401/month</span></div>', unsafe_allow_html=True)
+with col2:
+    st.markdown(f'<div style="text-align: right; margin-top: 1rem;"><span class="version-badge">v{VERSION} (Kafka Direct)</span></div>', unsafe_allow_html=True)
+with col3:
+    if st.button("🔄 Refresh", use_container_width=True):
+        st.cache_data.clear()
+        st.rerun()
+
+# =============================================================================
+# SIDEBAR
+# =============================================================================
+
+with st.sidebar:
+    st.header("⚙️ Query Settings")
+
+    # Criticality filter
+    criticality = st.selectbox(
+        "Criticality Level",
+        options=['All', 'CRITICAL', 'HIGH', 'MEDIUM', 'LOW'],
+        index=0,
+        help="Filter events by importance level"
+    )
+
+    # Time range (display only, using latest offset)
+    time_range = st.selectbox(
+        "Time Window",
+        options=['15 minutes', '30 minutes', '1 hour', '2 hours', '4 hours'],
+        index=2,
+        help="Approximate time window (fetches latest events)"
+    )
+    time_minutes = int(time_range.split()[0]) if 'hour' not in time_range else int(time_range.split()[0]) * 60
+
+    # Max events
+    max_events = st.slider(
+        "Max Events",
+        min_value=100,
+        max_value=5000,
+        value=1000,
+        step=100,
+        help="Maximum number of events to fetch"
+    )
+
+    # Auto-refresh
+    auto_refresh = st.checkbox(
+        "Auto-refresh (30s)",
+        value=False,
+        help="Automatically reload data every 30 seconds"
+    )
+
+    st.markdown("---")
+
+    # Cost breakdown
+    st.header("💰 Cost Breakdown")
+    st.metric(
+        "Monthly Total",
+        f"${COST_BREAKDOWN['monthly_total']}",
+        delta=f"-${COST_BREAKDOWN['total_savings']} vs Flink"
+    )
+
+    with st.expander("See breakdown"):
+        for component, cost in COST_BREAKDOWN['components'].items():
+            st.caption(f"• {component}: ${cost}")
+
+        st.caption("**Savings:**")
+        for saving, amount in COST_BREAKDOWN['savings'].items():
+            st.caption(f"✅ {saving}: **${amount}**")
+
+    st.markdown("---")
+
+    # Forwarder status
+    st.header("📊 Forwarder Status")
+    try:
+        status = get_forwarder_status()
+        if status.get('status') == 'healthy':
+            st.success("✅ Healthy")
+        elif status.get('status') == 'degraded':
+            st.warning("⚠️ Degraded")
+        else:
+            st.error("❌ Unhealthy")
+
+        if 'processed_total' in status:
+            st.metric("Events Processed", f"{status['processed_total']:,}")
+        if 'processing_rate' in status:
+            st.metric("Processing Rate", f"{status['processing_rate']:.1f}/sec")
+
+    except Exception as e:
+        st.caption(f"Status unavailable: {e}")
+
+# =============================================================================
+# MAIN CONTENT
+# =============================================================================
+
+# Load data
+df = load_events_from_kafka(
+    criticality_filter=criticality,
+    time_minutes=time_minutes,
+    max_events=max_events
+)
+
+# Display info banner
+if df.empty:
+    st.info(f"""
+    ### 📭 No events found
+
+    **Possible reasons:**
+    - No events in the last {time_range}
+    - Topics may be empty (forwarder might not be running)
+    - Try selecting 'All' criticality levels
+
+    **Troubleshooting:**
+    1. Check forwarder is running: `docker ps` or `ps aux | grep audit_forwarder`
+    2. Check topics exist: `confluent kafka topic list`
+    3. Check forwarder logs: `docker logs audit-forwarder`
+    """)
+    st.stop()
+
+# Re-classify events if needed
+if 'criticality' not in df.columns:
+    df['criticality'] = df.apply(classify_event, axis=1)
+
+# Summary metrics
+col1, col2, col3, col4 = st.columns(4)
+with col1:
+    st.metric("📊 Total Events", f"{len(df):,}")
+with col2:
+    critical_count = len(df[df['criticality'] == 'CRITICAL']) if 'criticality' in df.columns else 0
+    st.metric("🚨 Critical", critical_count, delta=None if critical_count == 0 else f"{critical_count} events")
+with col3:
+    high_count = len(df[df['criticality'] == 'HIGH']) if 'criticality' in df.columns else 0
+    st.metric("⚠️ High", high_count)
+with col4:
+    unique_principals = df['principal'].nunique() if 'principal' in df.columns else 0
+    st.metric("👥 Unique Principals", unique_principals)
+
+st.markdown("---")
+
+# Tabs
+tab1, tab2, tab3 = st.tabs(["📋 Events", "📊 Analytics", "🔍 Search"])
+
+# =============================================================================
+# TAB 1: EVENTS TABLE
+# =============================================================================
+
+with tab1:
+    st.subheader("Recent Audit Events")
+
+    # Select columns to display
+    display_columns = []
+    if 'time' in df.columns:
+        display_columns.append('time')
+    if 'criticality' in df.columns:
+        display_columns.append('criticality')
+    if 'methodName' in df.columns:
+        display_columns.append('methodName')
+    if 'principal' in df.columns:
+        display_columns.append('principal')
+    if 'resultStatus' in df.columns:
+        display_columns.append('resultStatus')
+    if 'granted' in df.columns:
+        display_columns.append('granted')
+    if 'clientIp' in df.columns:
+        display_columns.append('clientIp')
+
+    # Filter dataframe for display
+    display_df = df[display_columns] if display_columns else df
+
+    # Apply color coding based on criticality
+    def color_criticality(val):
+        if val == 'CRITICAL':
+            return 'background-color: #ffcccc'
+        elif val == 'HIGH':
+            return 'background-color: #ffe6cc'
+        elif val == 'MEDIUM':
+            return 'background-color: #ffffcc'
+        else:
+            return ''
+
+    if 'criticality' in display_df.columns:
+        styled_df = display_df.style.applymap(
+            color_criticality,
+            subset=['criticality']
+        )
+    else:
+        styled_df = display_df
+
+    st.dataframe(styled_df, use_container_width=True, height=500)
+
+    # Download button
+    csv = df.to_csv(index=False)
+    st.download_button(
+        label="📥 Download CSV",
+        data=csv,
+        file_name=f"audit_events_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+        mime="text/csv"
+    )
+
+# =============================================================================
+# TAB 2: ANALYTICS
+# =============================================================================
+
+with tab2:
+    st.subheader("Event Analytics")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        # Criticality distribution
+        if 'criticality' in df.columns:
+            crit_counts = df['criticality'].value_counts()
+            fig = px.pie(
+                values=crit_counts.values,
+                names=crit_counts.index,
+                title="Events by Criticality",
+                color=crit_counts.index,
+                color_discrete_map={
+                    'CRITICAL': '#dc3545',
+                    'HIGH': '#fd7e14',
+                    'MEDIUM': '#ffc107',
+                    'LOW': '#28a745'
+                }
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+    with col2:
+        # Top methods
+        if 'methodName' in df.columns:
+            top_methods = df['methodName'].value_counts().head(10)
+            fig = px.bar(
+                x=top_methods.values,
+                y=top_methods.index,
+                orientation='h',
+                title="Top 10 Methods",
+                labels={'x': 'Count', 'y': 'Method'}
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+    # Timeline
+    if 'time' in df.columns and len(df) > 0:
+        st.subheader("Event Timeline")
+
+        # Group by hour
+        df_timeline = df.copy()
+        df_timeline['hour'] = df_timeline['time'].dt.floor('H')
+        timeline_data = df_timeline.groupby(['hour', 'criticality']).size().reset_index(name='count')
+
+        fig = px.line(
+            timeline_data,
+            x='hour',
+            y='count',
+            color='criticality',
+            title="Events Over Time",
+            labels={'hour': 'Time', 'count': 'Event Count'},
+            color_discrete_map={
+                'CRITICAL': '#dc3545',
+                'HIGH': '#fd7e14',
+                'MEDIUM': '#ffc107',
+                'LOW': '#28a745'
+            }
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+# =============================================================================
+# TAB 3: SEARCH
+# =============================================================================
+
+with tab3:
+    st.subheader("🔍 Search Events")
+
+    search_col1, search_col2 = st.columns(2)
+
+    with search_col1:
+        search_principal = st.text_input(
+            "Search by Principal",
+            placeholder="e.g., User:12345 or sa-abc123"
+        )
+
+    with search_col2:
+        search_method = st.text_input(
+            "Search by Method",
+            placeholder="e.g., DeleteKafkaCluster"
+        )
+
+    # Apply search filters
+    filtered_df = df.copy()
+
+    if search_principal:
+        if 'principal' in filtered_df.columns:
+            filtered_df = filtered_df[
+                filtered_df['principal'].str.contains(search_principal, case=False, na=False)
+            ]
+
+    if search_method:
+        if 'methodName' in filtered_df.columns:
+            filtered_df = filtered_df[
+                filtered_df['methodName'].str.contains(search_method, case=False, na=False)
+            ]
+
+    st.write(f"**Found {len(filtered_df)} matching events**")
+
+    if not filtered_df.empty:
+        # Display columns
+        display_columns = [col for col in ['time', 'criticality', 'methodName', 'principal', 'resultStatus', 'clientIp'] if col in filtered_df.columns]
+        st.dataframe(filtered_df[display_columns], use_container_width=True, height=400)
+    else:
+        st.info("No events match your search criteria")
+
+# =============================================================================
+# FOOTER
+# =============================================================================
+
+st.markdown("---")
+footer_col1, footer_col2, footer_col3 = st.columns(3)
+with footer_col1:
+    st.caption(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+with footer_col2:
+    st.caption(f"Showing {len(df):,} events (max {max_events:,})")
+with footer_col3:
+    st.caption("📡 Real-time (Kafka Direct)")
+
+# Auto-refresh
+if auto_refresh:
+    time.sleep(30)
+    st.rerun()

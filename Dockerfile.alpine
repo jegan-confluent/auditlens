@@ -1,0 +1,96 @@
+# syntax=docker/dockerfile:1.4
+# Confluent Audit Log Forwarder - Alpine Linux Production Image
+# Smallest possible image using Alpine Linux
+# Image size: ~150MB (vs 600MB with Debian slim, 200MB with distroless)
+# Last updated: 2025-12-08
+
+# =============================================================================
+# Build Stage - Compile dependencies
+# =============================================================================
+FROM python:3.11-alpine3.19@sha256:xxx AS builder
+
+LABEL org.opencontainers.image.title="Audit Forwarder Builder (Alpine)"
+LABEL org.opencontainers.image.description="Build stage for Alpine-based Confluent Audit Log Forwarder"
+
+WORKDIR /build
+
+# Install build dependencies for Alpine
+RUN apk add --no-cache \
+    gcc=13.2.1_git20231014-r0 \
+    musl-dev=1.2.4_git20230717-r4 \
+    librdkafka-dev=2.3.0-r0 \
+    libffi-dev=3.4.4-r3 \
+    openssl-dev=3.1.4-r5 \
+    curl=8.5.0-r0
+
+# Copy and install Python dependencies with build cache
+COPY requirements.txt .
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --no-cache-dir --prefix=/install -r requirements.txt
+
+# =============================================================================
+# Runtime Stage - Alpine minimal image
+# =============================================================================
+FROM python:3.11-alpine3.19@sha256:xxx
+
+# Metadata labels (OCI standard)
+LABEL org.opencontainers.image.title="Confluent Audit Log Forwarder (Alpine)"
+LABEL org.opencontainers.image.description="Minimal Alpine-based image for Confluent Cloud audit log forwarding"
+LABEL org.opencontainers.image.vendor="Audit Intelligence Team"
+LABEL org.opencontainers.image.version="2.1.0"
+LABEL org.opencontainers.image.licenses="Apache-2.0"
+LABEL org.opencontainers.image.source="https://github.com/your-org/audit-forwarder"
+LABEL org.opencontainers.image.documentation="https://github.com/your-org/audit-forwarder/blob/main/README.md"
+
+# Install ONLY runtime dependencies
+RUN apk add --no-cache \
+    librdkafka=2.3.0-r0 \
+    curl=8.5.0-r0 \
+    ca-certificates \
+    && rm -rf /var/cache/apk/*
+
+# Create non-root user
+RUN addgroup -g 1000 forwarder && \
+    adduser -D -u 1000 -G forwarder -s /sbin/nologin forwarder
+
+WORKDIR /app
+
+# Copy installed Python packages from builder
+COPY --from=builder /install /usr/local
+
+# Copy application code
+COPY --chown=forwarder:forwarder audit_forwarder.py .
+COPY --chown=forwarder:forwarder src/ ./src/
+
+# Create data directory with proper permissions
+RUN mkdir -p /app/data /tmp/forwarder && \
+    chown -R forwarder:forwarder /app /tmp/forwarder && \
+    chmod -R 755 /app && \
+    chmod -R 700 /app/data
+
+# Environment variables for Python optimization
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONOPTIMIZE=2 \
+    PYTHONHASHSEED=random \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# Application configuration
+ENV OFFSET_FILE=/app/data/offsets.json \
+    METRICS_PORT=8003 \
+    LOG_LEVEL=INFO \
+    TMPDIR=/tmp/forwarder
+
+# Expose metrics/health port
+EXPOSE 8003
+
+# Health check using the /health endpoint
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD curl -f http://localhost:8003/health || exit 1
+
+# Switch to non-root user
+USER forwarder
+
+# Command to run
+CMD ["python", "-u", "audit_forwarder.py"]

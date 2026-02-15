@@ -1,0 +1,142 @@
+# ============================================================================
+# Confluent Audit Log Intelligence System - .gitignore v8.0
+# ============================================================================
+
+# CRITICAL: Secrets and credentials
+# ============================================================================
+.secrets
+.env
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+*credentials.json
+*service-account*.json
+
+# Kafka/Confluent specific
+.confluent/
+confluent.properties
+*.properties
+
+# API keys and tokens
+*api_key*
+*api-key*
+*apikey*
+*secret*
+*token*
+*.token
+
+# Backup files that might contain secrets
+*.backup
+*.bak
+*.env.backup
+.env.*
+
+# Python
+# ============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IDEs
+# ============================================================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Testing
+# ============================================================================
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.log
+.pytest_cache/
+htmlcov/
+
+# Docker
+# ============================================================================
+*.log
+
+# Kubernetes
+*.kubeconfig
+
+# Offsets and state
+# ============================================================================
+offsets.json
+*.offset
+consumer_offsets/
+
+# Logs
+# ============================================================================
+*.log
+logs/
+*.out
+
+# Temporary files
+# ============================================================================
+tmp/
+temp/
+*.tmp
+
+# macOS
+# ============================================================================
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Archives (might contain sensitive data)
+# ============================================================================
+*.zip
+*.tar.gz
+*.tgz
+
+# Keep these files
+# ============================================================================
+!.gitkeep
+!README.md
+!LICENSE
+
+# Claude Code
+logs/tokens-*.jsonl
+logs/audit-*.jsonl
+.claude/CLAUDE.local.md
+

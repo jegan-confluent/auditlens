@@ -1,0 +1,51 @@
+################################################################################
+# AuditLens Terraform Variables
+# Copy this file to terraform.tfvars and fill in your values
+################################################################################
+
+# General Settings
+aws_region   = "us-west-2"
+environment  = "prod"
+project_name = "auditlens"
+
+# VPC Configuration
+vpc_cidr           = "10.0.0.0/16"
+availability_zones = ["us-west-2a", "us-west-2b"]
+
+# ECS - Forwarder Configuration
+forwarder_cpu           = 512    # 0.5 vCPU
+forwarder_memory        = 1024   # 1 GB
+forwarder_desired_count = 1
+forwarder_image_tag     = "v2.2.0"
+
+# ECS - Dashboard Configuration
+dashboard_cpu           = 256    # 0.25 vCPU
+dashboard_memory        = 512    # 0.5 GB
+dashboard_desired_count = 2      # 2 for HA
+dashboard_image_tag     = "v10.19"
+
+# Kafka Source (Audit Log Cluster)
+# Get these from Confluent Cloud Console > Audit Log Settings
+kafka_source_bootstrap  = "pkc-xxxxx.us-west-2.aws.confluent.cloud:9092"
+kafka_source_api_key    = "XXXXXXXXXXXXXXXX"
+kafka_source_api_secret = "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+
+# Kafka Destination (Your Processing Cluster)
+# Get these from Confluent Cloud Console > Cluster Settings > API Keys
+kafka_dest_bootstrap  = "pkc-yyyyy.us-west-2.aws.confluent.cloud:9092"
+kafka_dest_api_key    = "YYYYYYYYYYYYYYYY"
+kafka_dest_api_secret = "YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY"
+
+# Forwarder Settings
+audit_topic                = "confluent-audit-log-events"
+consumer_group_id          = "audit-forwarder-fargate"
+enable_multi_topic_routing = true   # Routes to CRITICAL/HIGH/MEDIUM/LOW topics
+drop_low_events            = true   # Saves ~89% storage by dropping LOW events
+enable_dlq                 = true   # Dead Letter Queue for failed events
+
+# Monitoring
+log_retention_days        = 30
+enable_container_insights = true
+
+# Cost Optimization
+use_fargate_spot = false  # Set true to save ~70% on forwarder (can be interrupted)

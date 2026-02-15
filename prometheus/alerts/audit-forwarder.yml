@@ -1,0 +1,149 @@
+groups:
+  - name: audit_forwarder_alerts
+    rules:
+      # High consumer lag
+      - alert: AuditForwarderHighLag
+        expr: audit_forwarder_consumer_lag_total > 100000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Audit forwarder falling behind"
+          description: "Consumer lag is {{ $value }} messages. The forwarder may be unable to keep up with the audit log rate."
+
+      # Critical consumer lag
+      - alert: AuditForwarderCriticalLag
+        expr: audit_forwarder_consumer_lag_total > 1000000
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Audit forwarder critically behind"
+          description: "Consumer lag is {{ $value }} messages. Immediate attention required."
+
+      # High error rate
+      - alert: AuditForwarderHighErrorRate
+        expr: rate(audit_forwarder_error_count_total[5m]) > 10
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High error rate in audit forwarder"
+          description: "Error rate is {{ $value | printf \"%.2f\" }} errors/second."
+
+      # Processing rate drop
+      - alert: AuditForwarderLowThroughput
+        expr: audit_forwarder_processing_rate_per_second < 10 and audit_forwarder_consumer_lag_total > 1000
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Audit forwarder throughput is low"
+          description: "Processing rate is {{ $value | printf \"%.2f\" }} msg/s while there is pending lag."
+
+      # Forwarder down
+      - alert: AuditForwarderDown
+        expr: up{job="audit-forwarder"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Audit forwarder is down"
+          description: "The audit forwarder instance is not responding to scrapes."
+
+      # Idle for too long
+      - alert: AuditForwarderIdle
+        expr: audit_forwarder_idle_seconds > 300 and audit_forwarder_consumer_lag_total > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Audit forwarder idle with pending messages"
+          description: "Forwarder has been idle for {{ $value | printf \"%.0f\" }} seconds but there are messages to process."
+
+      # Memory pressure (if process metrics enabled)
+      - alert: AuditForwarderHighMemory
+        expr: process_resident_memory_bytes{job="audit-forwarder"} > 1.5e9
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Audit forwarder high memory usage"
+          description: "Memory usage is {{ $value | humanize1024 }}B."
+
+  - name: audit_security_alerts
+    rules:
+      # Unusual authentication failures (requires security metrics)
+      - alert: UnusualAuthenticationFailures
+        expr: sum(rate(audit_forwarder_security_events_total{result_status="UNAUTHENTICATED"}[15m])) > 100
+        for: 5m
+        labels:
+          severity: warning
+          category: security
+        annotations:
+          summary: "Unusual number of authentication failures detected"
+          description: "{{ $value | printf \"%.0f\" }} authentication failures in the last 15 minutes."
+
+      # Access transparency event (Confluent personnel access)
+      - alert: ConfluentAccessTransparency
+        expr: increase(audit_forwarder_access_transparency_events_total[1h]) > 0
+        for: 0m
+        labels:
+          severity: info
+          category: security
+        annotations:
+          summary: "Confluent personnel accessed customer resources"
+          description: "Access transparency event detected. Review audit logs for details."
+
+      # Authorization denials spike
+      - alert: AuthorizationDenialSpike
+        expr: sum(rate(audit_forwarder_security_events_total{result_status="PERMISSION_DENIED"}[5m])) > 50
+        for: 5m
+        labels:
+          severity: warning
+          category: security
+        annotations:
+          summary: "Spike in authorization denials"
+          description: "{{ $value | printf \"%.0f\" }} authorization denials per second."
+
+  - name: sink_alerts
+    rules:
+      # Kafka sink failures
+      - alert: KafkaSinkFailures
+        expr: rate(audit_forwarder_sink_writes_total{sink_type="kafka",status="failure"}[5m]) > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Kafka sink write failures"
+          description: "Kafka sink is experiencing write failures."
+
+      # S3 sink failures
+      - alert: S3SinkFailures
+        expr: rate(audit_forwarder_sink_writes_total{sink_type="s3",status="failure"}[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "S3 sink write failures"
+          description: "S3 sink is experiencing write failures."
+
+      # GCS sink failures
+      - alert: GCSSinkFailures
+        expr: rate(audit_forwarder_sink_writes_total{sink_type="gcs",status="failure"}[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "GCS sink write failures"
+          description: "GCS sink is experiencing write failures."
+
+      # DLQ growing
+      - alert: DLQGrowing
+        expr: rate(audit_forwarder_sink_writes_total{sink_type="dlq"}[15m]) > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Dead letter queue is accumulating messages"
+          description: "DLQ is receiving messages at {{ $value | printf \"%.2f\" }}/s. Investigate processing failures."

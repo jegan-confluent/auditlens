@@ -1,0 +1,47 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+# Alertmanager configuration
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: []
+          # - alertmanager:9093
+
+# Load alerting rules
+rule_files:
+  - /etc/prometheus/alerts/*.yml
+
+scrape_configs:
+  # Audit Forwarder metrics
+  - job_name: 'audit-forwarder'
+    static_configs:
+      - targets: ['audit-forwarder:8003']
+    metrics_path: /metrics
+    scrape_interval: 15s
+    scrape_timeout: 10s
+    # Uncomment below when METRICS_AUTH_ENABLED=true on forwarder
+    # For Bearer token auth (set METRICS_AUTH_TOKEN on forwarder):
+    # authorization:
+    #   type: Bearer
+    #   credentials: 'your-secret-token-here'
+    # For Basic auth (set METRICS_AUTH_USERNAME/PASSWORD on forwarder):
+    # basic_auth:
+    #   username: prometheus
+    #   password: 'your-secret-password-here'
+
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # Docker containers (if running docker-compose)
+  - job_name: 'docker'
+    static_configs:
+      - targets: ['audit-forwarder:8003']
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        regex: '([^:]+):\d+'
+        replacement: '${1}'

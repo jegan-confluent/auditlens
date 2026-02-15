@@ -1,0 +1,92 @@
+# Trivy Security Scanner Configuration
+# Documentation: https://aquasecurity.github.io/trivy/latest/docs/configuration/
+
+# Scan settings
+scan:
+  # Security checks to perform
+  security-checks:
+    - vuln      # Vulnerabilities
+    - config    # Misconfigurations
+    - secret    # Secrets
+
+  # Vulnerability severities to report
+  severity:
+    - CRITICAL
+    - HIGH
+    - MEDIUM
+    - LOW
+
+  # Skip files and directories
+  skip-files:
+    - "**/*.md"
+    - "**/test_*.py"
+    - "**/tests/**"
+
+  # Skip directories
+  skip-dirs:
+    - .git
+    - .github
+    - docs
+    - backup
+
+# Vulnerability database
+db:
+  # Repository for vulnerability database
+  repository: ghcr.io/aquasecurity/trivy-db
+
+  # Skip database update
+  skip-update: false
+
+# Output settings
+format: table  # Options: table, json, sarif, cyclonedx, spdx
+output: trivy-results.txt
+
+# Exit code settings
+exit-code: 1  # Exit with error code 1 if vulnerabilities found
+
+# Ignore unfixed vulnerabilities
+ignore-unfixed: false
+
+# Timeout settings
+timeout: 10m
+
+# Cache settings
+cache:
+  clear: false
+  dir: .trivycache
+
+# License scanning
+license:
+  full: true
+  ignored:
+    - MIT
+    - Apache-2.0
+    - BSD-3-Clause
+    - ISC
+
+# Secret scanning
+secret:
+  config: trivy-secret.yaml
+
+# Misconfiguration scanning
+misconfiguration:
+  severity:
+    - CRITICAL
+    - HIGH
+
+  # Helm chart scanning
+  helm:
+    enabled: true
+    api-versions:
+      - v1
+
+  # Terraform scanning
+  terraform:
+    enabled: false
+
+# Kubernetes scanning
+kubernetes:
+  # Skip resources
+  skip-resources:
+    - configmap
+    - secret

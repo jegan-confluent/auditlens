@@ -1,0 +1,389 @@
+# Classification Rules for Confluent Audit Log Intelligence System
+#
+# Criticality Levels:
+# - CRITICAL: Immediate attention required (destructive operations, security breaches)
+# - HIGH: Attention within hours (credential operations, permission changes)
+# - MEDIUM: Daily review (configuration changes, resource modifications)
+# - LOW: Archive/audit trail (read operations, routine activity)
+#
+# To add new methods, add them to the appropriate section below.
+# Changes take effect on next forwarder restart.
+
+critical_methods:
+  # Kafka Cluster Operations
+  - DeleteKafkaCluster
+  - PauseKafkaCluster
+
+  # Environment & Organization
+  - DeleteEnvironment
+  - DeleteOrganization
+  - DeleteOrg
+
+  # Kafka Topic Operations (destructive)
+  - kafka.DeleteTopics
+  - kafka.DeleteRecords
+
+  # ACL Operations (security-critical)
+  - kafka.DeleteAcls
+  - kafka.CreateAcls
+
+  # Connector Operations
+  - DeleteConnector
+
+  # ksqlDB Operations
+  - DeleteKsqldbCluster
+
+  # Flink Operations
+  - DeleteFlinkCompute
+  - DeleteFlinkStatement
+  - DeleteStatement
+
+  # Schema Registry (destructive)
+  - DeleteSchema
+  - DeleteSubject
+
+  # Network Operations
+  - DeletePrivateLinkAccess
+  - DeleteNetworkLinkEndpoint
+  - DeleteNetworkLinkService
+  - DeletePeering
+  - DeleteTransitGatewayAttachment
+  - DeleteTransitGateway
+
+  # Service Account Operations (security-critical)
+  - DeleteServiceAccount
+
+  # Identity Provider
+  - DeleteIdentityProvider
+  - DeleteIdentityPool
+
+  # Audit Log Configuration (meta-security)
+  - DeleteAuditLogConfig
+  - UpdateAuditLogConfig
+
+  # BYOK/Encryption
+  - DeleteByokKey
+
+  # TableFlow
+  - DeleteTableflow
+
+  # Pipeline Operations
+  - DeletePipeline
+
+  # Workspace Operations
+  - DeleteWorkspace
+
+  # Stream Processing / Exporter
+  - DeleteExporter
+
+  # Domain & Access Point
+  - DeleteDomain
+  - DeleteAccessPoint
+
+high_methods:
+  # API Key Operations
+  - CreateApiKey
+  - DeleteApiKey
+  - UpdateApiKey
+  - RotateApiKey
+
+  # Service Account Operations
+  - CreateServiceAccount
+  - UpdateServiceAccount
+
+  # Role Binding Operations (RBAC)
+  - CreateRoleBinding
+  - DeleteRoleBinding
+  - UpdateRoleBinding
+  - UnbindAllRolesForPrincipal
+  - RevokeRoleResourcesForPrincipal
+
+  # User Management
+  - CreateInvitation
+  - DeleteInvitation
+  - CreateUser
+  - DeleteUser
+  - UpdateUser
+
+  # Identity Provider Configuration
+  - CreateIdentityProvider
+  - UpdateIdentityProvider
+  - CreateIdentityPool
+  - UpdateIdentityPool
+
+  # Network Configuration - Private Link
+  - CreatePrivateLinkAccess
+  - UpdatePrivateLinkAccess
+  - CreatePrivateLinkAttachment
+  - DeletePrivateLinkAttachment
+  - UpdatePrivateLinkAttachment
+  - CreatePrivateLinkAttachmentConnection
+  - DeletePrivateLinkAttachmentConnection
+
+  # Network Configuration - Network Link
+  - CreateNetworkLinkEndpoint
+  - UpdateNetworkLinkEndpoint
+  - CreateNetworkLinkService
+  - UpdateNetworkLinkService
+
+  # Network Configuration - Peering & Transit Gateway
+  - CreatePeering
+  - UpdatePeering
+  - CreateTransitGatewayAttachment
+  - UpdateTransitGatewayAttachment
+  - CreateTransitGateway
+  - UpdateTransitGateway
+
+  # Cluster Linking
+  - CreateClusterLink
+  - DeleteClusterLink
+  - UpdateClusterLink
+  - CreateMirrorTopic
+  - DeleteMirrorTopic
+
+  # Connect Operations
+  - CreateConnector
+  - UpdateConnector
+  - PauseConnector
+  - ResumeConnector
+
+  # Schema Registry Configuration
+  - UpdateMode
+  - UpdateConfig
+
+  # Kafka ACL Read (indicates reconnaissance)
+  - kafka.DescribeAcls
+
+  # BYOK/Encryption
+  - CreateByokKey
+  - UpdateByokKey
+  - EncryptTopic
+  - DecryptTopic
+
+  # Audit Log Configuration
+  - CreateAuditLogConfig
+
+  # SSO/SCIM/Group Mapping
+  - CreateSSOGroupMapping
+  - DeleteSSOGroupMapping
+  - UpdateSSOGroupMapping
+  - CreateGroupMapping
+  - DeleteGroupMapping
+
+  # IP Filtering & Security
+  - CreateIPFilter
+  - DeleteIPFilter
+  - CreateIPGroup
+  - DeleteIPGroup
+  - UpdateIPGroup
+
+  # Organization Management
+  - SuspendOrg
+  - UnsuspendOrg
+
+  # DNS & Networking
+  - CreateDnsForwarder
+  - DeleteDnsForwarder
+
+  # Integrations
+  - CreateIntegration
+  - DeleteIntegration
+
+  # Stream Processing / Exporter
+  - CreateExporter
+
+  # Alerting
+  - CreateAlert
+
+  # Domain & Access Point
+  - CreateDomain
+  - CreateAccessPoint
+
+medium_methods:
+  # Kafka Configuration
+  - kafka.AlterConfigs
+  - kafka.IncrementalAlterConfigs
+  - kafka.DescribeConfigs
+
+  # Cluster Updates
+  - UpdateKafkaCluster
+  - CreateKafkaCluster
+  - ResumeKafkaCluster
+
+  # Environment Updates
+  - CreateEnvironment
+  - UpdateEnvironment
+
+  # Topic Operations
+  - kafka.CreateTopics
+  - kafka.CreatePartitions
+
+  # Consumer Group Management
+  - kafka.DeleteGroups
+  - kafka.OffsetDelete
+
+  # ksqlDB Operations
+  - CreateKsqldbCluster
+  - UpdateKsqldbCluster
+  - PauseKsqldbCluster
+  - RestoreKsqldbCluster
+
+  # Flink Operations
+  - CreateFlinkCompute
+  - UpdateFlinkCompute
+  - CreateFlinkStatement
+  - UpdateFlinkStatement
+
+  # Schema Registry
+  - CreateSchema
+  - UpdateSchema
+  - CreateSubject
+
+  # Network
+  - CreateNetwork
+  - UpdateNetwork
+  - DeleteNetwork
+
+  # TableFlow
+  - CreateTableflow
+  - UpdateTableflow
+
+  # Connector Task Management
+  - RestartConnector
+  - RestartConnectorTask
+
+  # Pipeline Operations
+  - ActivatePipeline
+  - DeactivatePipeline
+  - ActivatePipelineConnector
+  - DeactivatePipelineConnector
+
+  # Stream Processing / Exporter Operations
+  - PauseExporter
+  - ResumeExporter
+  - ResetExporter
+
+  # Workspace Operations
+  - PatchWorkspace
+
+  # Integration Updates
+  - UpdateIntegration
+
+  # Alert Operations
+  - UpdateAlert
+
+  # Subscription & Opt-in
+  - UpdateSubscription
+  - UpdateOptIn
+
+  # Identity Provider Maintenance
+  - RefreshIdentityProviderKeys
+
+security_failure_statuses:
+  - UNAUTHENTICATED
+  - PERMISSION_DENIED
+  - UNAUTHORIZED
+  - FORBIDDEN
+  - INVALID_CREDENTIALS
+
+authentication_methods:
+  - kafka.Authentication
+  - Authentication
+  - Authenticate
+  - flink.Authenticate
+  - ksql.Authenticate
+  - schema-registry.Authentication
+
+authorization_check_methods:
+  - mds.Authorize
+  - flink.Authorize
+  - ksql.Authorize
+  - schema-registry.Authorize
+  - ip-filter.Authorize
+
+read_only_methods:
+  # Kafka Metadata
+  - kafka.Metadata
+  - kafka.DescribeCluster
+  - kafka.ListGroups
+  - kafka.DescribeGroups
+  - kafka.ListOffsets
+  - kafka.OffsetFetch
+  - kafka.FindCoordinator
+
+  # List Operations
+  - ListKafkaClusters
+  - ListEnvironments
+  - ListServiceAccounts
+  - ListApiKeys
+  - ListUsers
+  - ListRoleBindings
+  - ListConnectors
+  - ListSchemas
+  - ListSubjects
+
+  # Get/Describe Operations
+  - GetKafkaCluster
+  - GetEnvironment
+  - GetServiceAccount
+  - GetApiKey
+  - GetUser
+  - GetConnector
+  - GetSchema
+  - DescribeConnector
+
+  # Produce/Consume (routine operations)
+  - kafka.Produce
+  - kafka.Fetch
+  - kafka.JoinGroup
+  - kafka.LeaveGroup
+  - kafka.SyncGroup
+  - kafka.Heartbeat
+  - kafka.OffsetCommit
+
+  # API/UI Access
+  - ApiAccess
+  - UIAccess
+
+# Pattern matching for method classification
+patterns:
+  deletion:
+    - Delete
+    - Remove
+    - Purge
+    - Drop
+  creation:
+    - Create
+    - Add
+    - New
+    - Register
+  modification:
+    - Update
+    - Alter
+    - Modify
+    - Change
+    - Set
+  read:
+    - Get
+    - List
+    - Describe
+    - Fetch
+    - Read
+    - Find
+    - Show
+
+# Sensitive keywords for method detection
+sensitive_keywords:
+  - apikey
+  - api_key
+  - serviceaccount
+  - service_account
+  - acl
+  - rolebinding
+  - role_binding
+  - identity
+  - credential
+  - secret
+  - password
+  - token
+  - permission

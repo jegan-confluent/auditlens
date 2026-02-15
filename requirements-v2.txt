@@ -1,0 +1,48 @@
+# Confluent Audit Log Forwarder v2 - Requirements
+# Core dependencies
+
+# Kafka
+confluent-kafka>=2.3.0
+
+# Configuration
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+python-dotenv>=1.0.0
+
+# JSON processing (faster than stdlib)
+orjson>=3.9.0
+
+# Schema validation
+jsonschema>=4.20.0
+
+# Cloud storage
+boto3>=1.34.0  # AWS S3
+google-cloud-storage>=2.14.0  # GCS
+
+# Data formats
+pyarrow>=14.0.0  # Parquet support
+
+# Secrets management (optional)
+hvac>=2.1.0  # HashiCorp Vault
+
+# HTTP client
+httpx>=0.26.0
+
+# Async support
+asyncio-mqtt>=0.16.0
+
+# Type hints
+typing-extensions>=4.9.0
+
+# Logging
+structlog>=23.2.0
+
+# Testing
+pytest>=7.4.0
+pytest-asyncio>=0.23.0
+pytest-cov>=4.1.0
+
+# Development
+black>=23.12.0
+ruff>=0.1.0
+mypy>=1.8.0
