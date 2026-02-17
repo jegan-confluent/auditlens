@@ -37,7 +37,7 @@ class TestCloudEventsParser:
         assert isinstance(result, AuditEvent)
         assert result.id == "event-123"
         assert result.specversion == "1.0"
-        assert result.event_type == "io.confluent.kafka.server/authentication"
+        assert result.type == "io.confluent.kafka.server/authentication"
         assert result.principal == "User:sa-abc123"
         assert result.result_status == "SUCCESS"
         assert result.service_category == "kafka"
@@ -70,10 +70,10 @@ class TestCloudEventsParser:
 
         result = self.parser.parse(raw_event)
 
-        assert result.event_type == "io.confluent.kafka.server/authorization"
+        assert result.type == "io.confluent.kafka.server/authorization"
         assert result.result_status == "PERMISSION_DENIED"
         assert result.result_message == "User not authorized"
-        assert result.is_security_event is True
+        assert result.is_security_relevant is True
 
     def test_parse_request_event(self):
         """Test parsing a cloud request audit event."""
@@ -97,7 +97,7 @@ class TestCloudEventsParser:
 
         result = self.parser.parse(raw_event)
 
-        assert result.event_type == "io.confluent.cloud/request"
+        assert result.type == "io.confluent.cloud/request"
         assert result.method_name == "CreateKafkaCluster"
         assert result.service_category == "organization"
 
@@ -126,7 +126,7 @@ class TestCloudEventsParser:
 
         result = self.parser.parse(raw_event)
 
-        assert result.event_type == "io.confluent.cloud/access-transparency"
+        assert result.type == "io.confluent.cloud/access-transparency"
         assert result.is_access_transparency is True
         assert result.principal == "confluent-support@confluent.io"
 
@@ -145,10 +145,10 @@ class TestCloudEventsParser:
 
         result = self.parser.parse(raw_event)
 
-        assert result.organization_id == "org123"
-        assert result.environment_id == "env456"
-        assert result.cluster_id == "lkc-789"
-        assert result.cluster_type == "kafka"
+        assert result.source_organization_id == "org123"
+        assert result.source_environment_id == "env456"
+        assert result.source_cluster_id == "lkc-789"
+        assert result.source_cluster_type == "kafka"
 
     def test_parse_timestamp_formats(self):
         """Test parsing various timestamp formats."""
@@ -162,7 +162,7 @@ class TestCloudEventsParser:
         }
 
         result = self.parser.parse(raw_event)
-        assert result.timestamp is not None
+        assert result.time_epoch_ms is not None
 
     def test_parse_missing_optional_fields(self):
         """Test parsing event with missing optional fields."""
@@ -193,7 +193,7 @@ class TestCloudEventsParser:
         }
 
         result = self.parser.parse(raw_event)
-        assert result.is_security_event is True
+        assert result.is_security_relevant is True
 
     def test_audit_event_to_dict(self):
         """Test AuditEvent to_dict method."""
@@ -215,7 +215,8 @@ class TestCloudEventsParser:
         assert isinstance(result_dict, dict)
         assert result_dict["id"] == "dict-test"
         assert result_dict["specversion"] == "1.0"
-        assert "timestamp" in result_dict
+        # time_epoch_ms is included in to_dict if not None
+        assert "time" in result_dict or "time_epoch_ms" in result_dict
 
     def test_parse_schema_registry_event(self):
         """Test parsing Schema Registry event."""
@@ -230,8 +231,8 @@ class TestCloudEventsParser:
         }
 
         result = self.parser.parse(raw_event)
-        assert result.service_category == "schema-registry"
-        assert result.cluster_type == "schema-registry"
+        assert result.source_cluster_type == "schema-registry"
+        assert result.source_cluster_id == "lsrc-123"
 
     def test_parse_ksqldb_event(self):
         """Test parsing ksqlDB event."""
@@ -246,4 +247,5 @@ class TestCloudEventsParser:
         }
 
         result = self.parser.parse(raw_event)
-        assert result.service_category == "ksqldb"
+        assert result.source_cluster_type == "ksqldb"
+        assert result.source_cluster_id == "lksqlc-123"

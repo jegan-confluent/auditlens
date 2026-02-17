@@ -5,7 +5,7 @@ services:
       dockerfile: Dockerfile
       args:
         BUILDKIT_INLINE_CACHE: 1
-    image: audit-forwarder:v2.2.0
+    image: audit-forwarder:v3.0.0
     container_name: audit-forwarder
     restart: unless-stopped
     env_file:
@@ -15,13 +15,13 @@ services:
       # Only override defaults here, all other vars come from env_file
       - DEST_TOPIC=${DEST_TOPIC:-audit_events_flattened}
       - AUDIT_TOPIC=${AUDIT_TOPIC:-confluent-audit-log-events}
-      - GROUP_ID=${GROUP_ID:-audit-forwarder-group}
-      - OFFSET_FILE=/app/data/offsets.json
+      - GROUP_ID=${GROUP_ID:-audit-fwd-v3-feb}
+      # NOTE: Offsets are now managed by Kafka consumer groups (no OFFSET_FILE)
       - METRICS_PORT=8003
       - ENABLE_MULTI_TOPIC_ROUTING=${ENABLE_MULTI_TOPIC_ROUTING:-true}
       - DROP_LOW_EVENTS=${DROP_LOW_EVENTS:-true}
     volumes:
-      - ./data:/app/data:delegated
+      # NOTE: ./data volume removed - forwarder is now stateless
       - ./audit_forwarder.py:/app/audit_forwarder.py:ro
       - ./src:/app/src:ro
     ports:
@@ -57,7 +57,7 @@ services:
     # Security options
     security_opt:
       - no-new-privileges:true
-    read_only: false  # Need write access for /app/data
+    read_only: true  # Forwarder is now stateless (offsets in Kafka)
     tmpfs:
       - /tmp:mode=1777,size=100M
     cap_drop:
@@ -69,12 +69,16 @@ services:
     build:
       context: ./dashboard
       dockerfile: Dockerfile
-    image: audit-dashboard:v10.19
+    image: audit-dashboard:v11.0
     container_name: dashboard
     restart: unless-stopped
     env_file:
       - .env
       - .secrets
+    environment:
+      # Confluent Cloud API credentials for ACL & Identity lookups
+      - CONFLUENT_CLOUD_API_KEY=${CONFLUENT_CLOUD_API_KEY:-}
+      - CONFLUENT_CLOUD_API_SECRET=${CONFLUENT_CLOUD_API_SECRET:-}
     volumes:
       - ./dashboard:/app:rw
     ports:

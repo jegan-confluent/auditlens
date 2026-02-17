@@ -32,6 +32,8 @@ import tabs.analytics as analytics
 import tabs.time_insights as time_insights
 import tabs.export as export_tab
 import tabs.security_alerts as security_alerts
+import tabs.topic_identity as topic_identity
+import tabs.identity_activity as identity_activity
 
 # =============================================================================
 # STREAMLIT PAGE CONFIG
@@ -412,7 +414,7 @@ if 'metric_filter' in st.session_state and st.session_state.metric_filter:
 # =============================================================================
 st.markdown("---")
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12 = st.tabs([
     "🔍 Audit Trail",
     "🚨 All Failures",
     "🗑️ Deletions",
@@ -422,7 +424,9 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs([
     "📈 Analytics",
     "⏰ Time Insights",
     "💾 Export",
-    "🔔 Security Alerts"
+    "🔔 Security Alerts",
+    "🔗 Topic × Identity",
+    "👤 Identity Activity"
 ])
 
 # Pass configuration object to tabs
@@ -461,6 +465,12 @@ with tab9:
 
 with tab10:
     security_alerts.render_tab(df, tab_config)
+
+with tab11:
+    topic_identity.render_topic_identity_tab(df)
+
+with tab12:
+    identity_activity.render_identity_activity_tab(df)
 
 # =============================================================================
 # FOOTER

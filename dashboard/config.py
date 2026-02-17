@@ -16,7 +16,7 @@ load_dotenv(os.path.join(os.path.dirname(__file__), '..', '.secrets'))
 # BRANDING CONFIGURATION
 # =============================================================================
 APP_NAME = "Confluent AuditLens"
-APP_VERSION = "v10.19"
+APP_VERSION = "v11.0"
 APP_TAGLINE = "Real-time Kafka Audit Intelligence"
 
 # Confluent Logo - loaded from static/logo.png
@@ -42,6 +42,16 @@ TOPIC_HIGH = os.getenv('AUDIT_TOPIC_HIGH', 'audit_events_high')
 TOPIC_MEDIUM = os.getenv('AUDIT_TOPIC_MEDIUM', 'audit_events_medium')
 TOPIC_ALL = os.getenv('DEST_TOPIC', 'audit_events_flattened')
 TOPIC_ALERTS = os.getenv('AUDIT_TOPIC_ALERTS', 'audit_events_alerts')
+
+# =============================================================================
+# CONFLUENT CLOUD API (for ACL & Identity lookups)
+# =============================================================================
+# These are Cloud API keys (not Kafka API keys)
+# Used for:
+# - Identity enrichment (resolving sa-xxxx / u-xxxx to names)
+# - ACL lookups (Topic x Identity matrix)
+CONFLUENT_CLOUD_API_KEY = os.getenv('CONFLUENT_CLOUD_API_KEY')
+CONFLUENT_CLOUD_API_SECRET = os.getenv('CONFLUENT_CLOUD_API_SECRET')
 
 # =============================================================================
 # MONITORING CONFIGURATION

@@ -4,10 +4,13 @@ Handles user email resolution with LRU cache for performance
 """
 
 import json
+import logging
 import pandas as pd
 import requests
 from cachetools import LRUCache
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 from config import (
     EMAIL_CACHE_FILE,
     USER_MAPPING_FILE,
@@ -25,8 +28,8 @@ def load_email_cache():
         try:
             with open(EMAIL_CACHE_FILE, 'r') as f:
                 return json.load(f)
-        except:
-            pass
+        except (json.JSONDecodeError, IOError) as e:
+            logger.warning(f"Failed to load email cache: {e}")
     return {}
 
 
@@ -103,8 +106,8 @@ def extract_user_id(principal):
                     return data['confluentUser'].get('resourceId')
                 if 'confluentServiceAccount' in data:
                     return data['confluentServiceAccount'].get('resourceId')
-        except:
-            pass
+        except (json.JSONDecodeError, KeyError, TypeError):
+            pass  # Return None if parsing fails
 
     # User:NNNNN format - can't directly map but store for reference
     if principal_str.startswith('User:'):
@@ -251,8 +254,8 @@ def load_user_mapping():
             else:
                 # Legacy flat format - filter out comment keys
                 return {k: v for k, v in data.items() if not k.startswith('_')}
-        except:
-            pass
+        except (json.JSONDecodeError, IOError, KeyError) as e:
+            logger.warning(f"Failed to load user mapping: {e}")
     return {}
 
 

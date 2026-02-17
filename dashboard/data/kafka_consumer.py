@@ -51,6 +51,7 @@ def load_events_from_kafka(criticality_filter='All', time_minutes=60, max_events
         'sasl.username': DEST_API_KEY,
         'sasl.password': DEST_API_SECRET,
         'group.id': 'auditlens-dashboard-viewer',  # Static group - no more group explosion
+        'auto.offset.reset': 'latest',  # Explicit: start at latest if no committed offset
         'enable.auto.commit': False,
         'fetch.max.bytes': 52428800,  # 50MB
         'max.partition.fetch.bytes': 10485760,  # 10MB
@@ -84,7 +85,8 @@ def load_events_from_kafka(criticality_filter='All', time_minutes=60, max_events
                             start_offset = max(low, high - msgs_per_partition)
                             tp.offset = start_offset
                             all_partitions.append(tp)
-                    except:
+                    except Exception as e:
+                        logger.debug(f"Could not get watermarks for partition {p}: {e}")
                         continue
             except Exception as e:
                 continue

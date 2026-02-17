@@ -185,6 +185,8 @@ class TestRateTracker:
         tracker = RateTracker(config)
 
         # Generate auth failures exceeding threshold
+        # Collect all alerts from all events
+        all_alerts = []
         for i in range(6):
             event = {
                 'methodName': 'kafka.Produce',
@@ -193,10 +195,11 @@ class TestRateTracker:
                 'clientIp': '10.0.0.1',
             }
             alerts = tracker.track_event(event)
+            all_alerts.extend(alerts)
 
-        # Should detect auth failure spike
-        assert len(alerts) > 0
-        assert any(a.anomaly_type == AnomalyType.AUTH_FAILURE_SPIKE for a in alerts)
+        # Should detect auth failure spike (alert triggered when count >= threshold)
+        assert len(all_alerts) > 0
+        assert any(a.anomaly_type == AnomalyType.AUTH_FAILURE_SPIKE for a in all_alerts)
 
     def test_detect_permission_denied_spike(self):
         """Test detection of permission denied spike."""
@@ -207,6 +210,8 @@ class TestRateTracker:
         tracker = RateTracker(config)
 
         # Generate permission denied events
+        # Collect all alerts from all events
+        all_alerts = []
         for i in range(6):
             event = {
                 'methodName': 'kafka.Fetch',
@@ -216,10 +221,11 @@ class TestRateTracker:
                 'clientIp': '10.0.0.2',
             }
             alerts = tracker.track_event(event)
+            all_alerts.extend(alerts)
 
-        # Should detect auth failure spike
-        assert len(alerts) > 0
-        assert any(a.anomaly_type == AnomalyType.AUTH_FAILURE_SPIKE for a in alerts)
+        # Should detect auth failure spike (permission denied triggers auth failure detection)
+        assert len(all_alerts) > 0
+        assert any(a.anomaly_type == AnomalyType.AUTH_FAILURE_SPIKE for a in all_alerts)
 
     def test_detect_activity_spike(self):
         """Test detection of activity spike."""

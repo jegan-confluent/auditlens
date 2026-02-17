@@ -26,11 +26,13 @@ src/
 ├── aggregation/      # Denial aggregation
 ├── metrics/          # Prometheus metrics
 ├── secrets/          # Multi-backend secrets
-└── config/           # Pydantic validation
+├── config/           # Pydantic validation
+├── identity/         # Identity enrichment (NEW v3.0)
+└── confluent_api/    # Confluent Cloud Admin API (NEW v3.0)
 dashboard/
 ├── data/             # Kafka consumer, transforms
 ├── components/       # Reusable UI
-└── tabs/             # 10 specialized views
+└── tabs/             # 12 specialized views (was 10)
 ```
 
 ## Critical Rules
@@ -101,15 +103,33 @@ dashboard/
 47. Test data loading with `docker exec <container> python3 -c "..."` before debugging UI layer
 48. Add debug logging at data transformation boundaries to trace where data disappears
 
-## Current State (Dec 19, 2025)
+## Kafka Producer Patterns
+49. `producer.poll(0)` does NOT wait for delivery; use `producer.flush(timeout=N)` before committing offsets
+50. Signal handlers should set flags (`_shutdown_requested = True`), not call sys.exit() - let main loop clean up
+
+## Testing Patterns (Advanced)
+51. When tests use `@pytest.mark.asyncio`, ensure pytest.ini has `asyncio_mode = auto`
+52. When fixing test failures, always read actual implementation first to verify attribute names
+53. Collect events throughout loops when testing rate-limited systems with cooldown logic
+
+## Verification Patterns
+54. After major fixes, run verification grep commands to prove changes are in place
+55. Tests passing is necessary but not sufficient - verify with production-like scenarios
+
+## Current State (Feb 17, 2025) - v3.0.1
 
 ### Running Services
-- **Forwarder**: audit-forwarder:v2.2.0 on port 8003
-- **Dashboard**: audit-dashboard:v10.19 on port 8503
+- **Forwarder**: audit-forwarder:v3.0.0 on port 8003
+- **Dashboard**: audit-dashboard:v11.0 on port 8503
 - **Monitoring**: Prometheus :9090, Grafana :3000
-- **Network**: audit-network
+- **Network**: kafka-network, monitoring, frontend-network
 
-### Dashboard v10.19 Features
+### Dashboard v11.0 Features (NEW)
+- **12 tabs** (was 10) - added Topic × Identity Matrix and Identity Activity Timeline
+- Identity enrichment for human-readable principal names
+- Stale ACL detection (configurable 7-90 day threshold)
+- Risk score calculation (LOW/MEDIUM/HIGH/CRITICAL)
+- Sankey diagram for identity-topic flows
 - Theme toggle (Pastel/Clean/Professional)
 - Filter presets (save/load combinations)
 - PDF compliance report export (fpdf2)
@@ -117,12 +137,11 @@ dashboard/
 - Activity heatmap (day × hour) in Time Insights
 - Keyboard shortcuts (R to refresh)
 - Cluster/Environment sidebar filters
-- 10 tabs + modular architecture (480 lines main)
-- Non-blocking auto-refresh (st_autorefresh)
-- Static consumer group (no more group explosion)
 - orjson for 2x faster JSON parsing
 
-### Forwarder v2.2.0 Features
+### Forwarder v3.0.0 Features (BREAKING CHANGES)
+- **Kafka consumer group commits** (removed file-based offsets)
+- **Stateless container** (read_only: true, no volume mounts)
 - Multi-topic routing (CRITICAL/HIGH/MEDIUM/LOW)
 - Security Alerts aggregation (denial patterns)
 - Secrets management (6 backends)
@@ -130,23 +149,27 @@ dashboard/
 - Webhook retry with tenacity
 - Non-root containers
 - acks=all + idempotence (zero data loss)
-- Dead Letter Queue for failed events (`ENABLE_DLQ`, `DLQ_TOPIC`)
-- Bounded LRU offset cache (memory safe)
+- Dead Letter Queue for failed events
 
-### AWS Fargate Deployment (NEW)
+### New Modules
+- `src/identity/` - Identity enrichment (service accounts, users, identity pools)
+- `src/confluent_api/` - Confluent Cloud Admin API client (environments, clusters, topics, ACLs)
+
+### AWS Fargate Deployment
 - Complete Terraform configuration in `deploy/terraform/aws/`
 - VPC, ECR, ECS, ALB, Secrets Manager, CloudWatch
 - Estimated cost: ~$88/month
 - Ready to apply: `terraform init && terraform apply`
 
 ### Key Files
-- `audit_forwarder.py` - Main forwarder
-- `dashboard/app.py` - Dashboard entry point
+- `audit_forwarder.py` - Main forwarder (stateless)
+- `dashboard/app.py` - Dashboard entry point (12 tabs)
+- `src/identity/enricher.py` - Identity enrichment module
+- `src/confluent_api/admin_client.py` - Confluent Cloud API client
+- `dashboard/tabs/topic_identity.py` - Topic × Identity Matrix tab
+- `dashboard/tabs/identity_activity.py` - Identity Activity Timeline tab
+- `docs/2025-02-15/FEBRUARY-RELEASE.md` - February release notes
 - `docs/END_TO_END_FLOW.md` - Technical architecture
-- `docs/DLQ_API.md` - Dead Letter Queue documentation
-- `FEATURES.md` - Complete feature list
-- `CHANGELOG.md` - Version history
-- `GETTING_STARTED.md` - Setup guide
 - `.env` / `.secrets` - Configuration
 
 ### To Continue
@@ -155,6 +178,9 @@ dashboard/
 open http://localhost:8503    # Dashboard
 docker logs -f audit-forwarder  # Logs
 curl http://localhost:8003/health | jq  # Health check
+
+# Run tests
+python3 -m pytest tests/ -v
 
 # Deploy to AWS Fargate
 cd deploy/terraform/aws
@@ -166,7 +192,7 @@ Base: typescript-patterns, react-patterns, testing-patterns, api-patterns, datab
 Extended: supabase-patterns, security-first, deployment-patterns, performance-patterns
 
 ---
-Last Updated: 2025-12-19
+Last Updated: 2025-02-15
 
 ---
 

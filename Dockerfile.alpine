@@ -77,8 +77,8 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
 # Application configuration
-ENV OFFSET_FILE=/app/data/offsets.json \
-    METRICS_PORT=8003 \
+# NOTE: Offsets are managed by Kafka consumer groups (not file-based)
+ENV METRICS_PORT=8003 \
     LOG_LEVEL=INFO \
     TMPDIR=/tmp/forwarder
 

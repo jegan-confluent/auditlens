@@ -10,7 +10,9 @@ from . import (
     analytics,
     time_insights,
     export,
-    security_alerts
+    security_alerts,
+    topic_identity,
+    identity_activity,
 )
 
 __all__ = [
@@ -23,5 +25,7 @@ __all__ = [
     'analytics',
     'time_insights',
     'export',
-    'security_alerts'
+    'security_alerts',
+    'topic_identity',
+    'identity_activity',
 ]

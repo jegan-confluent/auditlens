@@ -6,9 +6,10 @@ Events are routed to different Kafka topics based on their classification,
 enabling tiered processing, alerting, and retention policies.
 """
 
-import json
 import logging
 import os
+
+import orjson
 from dataclasses import dataclass, field
 from typing import Dict, Any, Optional, List, Callable
 from enum import Enum
@@ -259,7 +260,7 @@ class TopicRouter:
             self.producer.produce(
                 topic=topic,
                 key=key.encode('utf-8') if key else None,
-                value=json.dumps(event).encode('utf-8'),
+                value=orjson.dumps(event),
                 callback=self.on_delivery,
             )
         except BufferError:
@@ -269,7 +270,7 @@ class TopicRouter:
             self.producer.produce(
                 topic=topic,
                 key=key.encode('utf-8') if key else None,
-                value=json.dumps(event).encode('utf-8'),
+                value=orjson.dumps(event),
                 callback=self.on_delivery,
             )
 

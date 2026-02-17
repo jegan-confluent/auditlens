@@ -70,7 +70,8 @@ class TestCRNParser:
         """Test parsing None CRN returns empty components."""
         result = self.parser.parse(None)
 
-        assert result.raw is None
+        assert result.raw == ""  # Empty string, not None
+        assert result.is_valid is False
         assert result.organization_id is None
         assert result.environment_id is None
 
@@ -79,6 +80,7 @@ class TestCRNParser:
         result = self.parser.parse("")
 
         assert result.raw == ""
+        assert result.is_valid is False
         assert result.organization_id is None
 
     def test_parse_invalid_crn_prefix(self):
@@ -88,14 +90,15 @@ class TestCRNParser:
 
         # Should still store raw but not parse components
         assert result.raw == crn
+        assert result.is_valid is False
         assert result.organization_id is None
 
-    def test_parse_consumer_group_crn(self):
+    def test_parse_group_crn(self):
         """Test parsing a consumer group CRN."""
-        crn = "crn://confluent.cloud/organization=org1/environment=env1/kafka=lkc-123/consumer-group=my-group"
+        crn = "crn://confluent.cloud/organization=org1/environment=env1/kafka=lkc-123/group=my-group"
         result = self.parser.parse(crn)
 
-        assert result.resource_type == "consumer-group"
+        assert result.resource_type == "group"
         assert result.resource_id == "my-group"
 
     def test_extract_cluster_id(self):
@@ -116,6 +119,7 @@ class TestCRNParser:
         """Test CRNComponents to_dict method."""
         components = CRNComponents(
             raw="crn://confluent.cloud/organization=org1",
+            is_valid=True,
             organization_id="org1",
             environment_id="env1",
             cluster_type="kafka",
@@ -123,7 +127,8 @@ class TestCRNParser:
         )
         result = components.to_dict()
 
-        assert result["organization_id"] == "org1"
-        assert result["environment_id"] == "env1"
-        assert result["cluster_type"] == "kafka"
-        assert result["cluster_id"] == "lkc-123"
+        # to_dict uses crn_ prefix for keys
+        assert result["crn_organization_id"] == "org1"
+        assert result["crn_environment_id"] == "env1"
+        assert result["crn_cluster_type"] == "kafka"
+        assert result["crn_cluster_id"] == "lkc-123"

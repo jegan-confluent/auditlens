@@ -161,8 +161,8 @@ def extract_user_display(principal):
                     return data['confluentUser'].get('resourceId', 'User')
                 if 'confluentServiceAccount' in data:
                     return data['confluentServiceAccount'].get('resourceId', 'SA')
-        except:
-            pass
+        except (json.JSONDecodeError, KeyError, TypeError) as e:
+            pass  # Return original principal if parsing fails
 
     # Handle User:xxx or SA:xxx format
     if ':' in principal_str:

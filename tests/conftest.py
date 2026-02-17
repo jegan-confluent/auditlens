@@ -1,45 +1,31 @@
-"""Pytest configuration and fixtures."""
+"""Pytest configuration and fixtures for audit forwarder tests."""
 
 import pytest
 import asyncio
-import os
-import sys
-
-# Add src to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 
-@pytest.fixture(scope="session")
-def event_loop():
-    """Create an instance of the default event loop for each test case."""
-    loop = asyncio.get_event_loop_policy().new_event_loop()
-    yield loop
-    loop.close()
+# Configure pytest-asyncio to use auto mode
+pytest_plugins = ["pytest_asyncio"]
 
 
 @pytest.fixture
 def sample_authentication_event():
-    """Sample authentication audit event."""
+    """Sample authentication event for testing."""
     return {
-        "id": "auth-event-001",
+        "id": "test-event-001",
         "specversion": "1.0",
-        "source": "crn://confluent.cloud/organization=org-123/environment=env-456/kafka=lkc-789",
+        "source": "crn://confluent.cloud/organization=org1/environment=env1/kafka=lkc-123",
         "type": "io.confluent.kafka.server/authentication",
         "time": "2025-01-15T10:30:00.000Z",
-        "subject": "crn://confluent.cloud/organization=org-123/environment=env-456/kafka=lkc-789",
-        "datacontenttype": "application/json",
+        "subject": "crn://confluent.cloud/organization=org1/environment=env1/kafka=lkc-123",
         "data": {
             "authenticationInfo": {
-                "principal": "User:sa-service-account"
+                "principal": "User:sa-test123"
             },
             "methodName": "kafka.Authentication",
-            "serviceName": "crn://confluent.cloud/organization=org-123/environment=env-456/kafka=lkc-789",
-            "resourceName": "kafka",
+            "serviceName": "crn://confluent.cloud/organization=org1/environment=env1/kafka=lkc-123",
             "result": {
                 "status": "SUCCESS"
-            },
-            "requestMetadata": {
-                "clientAddress": "192.168.1.100"
             }
         }
     }
@@ -47,23 +33,22 @@ def sample_authentication_event():
 
 @pytest.fixture
 def sample_authorization_event():
-    """Sample authorization audit event."""
+    """Sample authorization event for testing."""
     return {
-        "id": "authz-event-001",
+        "id": "test-event-002",
         "specversion": "1.0",
-        "source": "crn://confluent.cloud/organization=org-123/environment=env-456/kafka=lkc-789",
+        "source": "crn://confluent.cloud/organization=org1/environment=env1/kafka=lkc-123",
         "type": "io.confluent.kafka.server/authorization",
         "time": "2025-01-15T10:31:00.000Z",
         "data": {
             "authenticationInfo": {
-                "principal": "User:sa-service-account"
+                "principal": "User:sa-test123"
             },
             "authorizationInfo": {
-                "resourceType": "Topic",
-                "resourceName": "test-topic",
+                "granted": True,
                 "operation": "Write",
-                "patternType": "LITERAL",
-                "granted": True
+                "resourceType": "Topic",
+                "resourceName": "test-topic"
             },
             "methodName": "kafka.Produce",
             "result": {
@@ -74,12 +59,12 @@ def sample_authorization_event():
 
 
 @pytest.fixture
-def sample_authorization_denied_event():
-    """Sample authorization denied audit event."""
+def sample_security_event():
+    """Sample security failure event for testing."""
     return {
-        "id": "authz-denied-001",
+        "id": "test-event-003",
         "specversion": "1.0",
-        "source": "crn://confluent.cloud/organization=org-123/environment=env-456/kafka=lkc-789",
+        "source": "crn://confluent.cloud/organization=org1/environment=env1/kafka=lkc-123",
         "type": "io.confluent.kafka.server/authorization",
         "time": "2025-01-15T10:32:00.000Z",
         "data": {
@@ -87,43 +72,43 @@ def sample_authorization_denied_event():
                 "principal": "User:unauthorized-user"
             },
             "authorizationInfo": {
-                "resourceType": "Topic",
-                "resourceName": "restricted-topic",
+                "granted": False,
                 "operation": "Read",
-                "patternType": "LITERAL",
-                "granted": False
+                "resourceType": "Topic",
+                "resourceName": "sensitive-data"
             },
             "methodName": "kafka.Fetch",
             "result": {
                 "status": "PERMISSION_DENIED",
-                "message": "User not authorized to access topic"
+                "message": "User not authorized to read from topic"
             }
         }
     }
 
 
 @pytest.fixture
-def sample_access_transparency_event():
-    """Sample access transparency audit event."""
+def sample_authorization_denied_event():
+    """Sample authorization denied event for testing."""
     return {
-        "id": "transparency-001",
+        "id": "test-event-004",
         "specversion": "1.0",
-        "source": "crn://confluent.cloud/organization=org-123",
-        "type": "io.confluent.cloud/access-transparency",
+        "source": "crn://confluent.cloud/organization=org1/environment=env1/kafka=lkc-123",
+        "type": "io.confluent.kafka.server/authorization",
         "time": "2025-01-15T10:33:00.000Z",
         "data": {
             "authenticationInfo": {
-                "principal": "confluent-support@confluent.io"
+                "principal": "User:attacker"
             },
-            "methodName": "SupportAccess",
-            "serviceName": "support",
+            "authorizationInfo": {
+                "granted": False,
+                "operation": "Write",
+                "resourceType": "Topic",
+                "resourceName": "production-data"
+            },
+            "methodName": "kafka.Produce",
             "result": {
-                "status": "SUCCESS"
-            },
-            "accessTransparency": {
-                "reason": "Customer-initiated support ticket",
-                "caseNumber": "CS-2025-12345",
-                "accessedBy": "support-engineer@confluent.io"
+                "status": "PERMISSION_DENIED",
+                "message": "Access denied"
             }
         }
     }
@@ -131,11 +116,11 @@ def sample_access_transparency_event():
 
 @pytest.fixture
 def sample_request_event():
-    """Sample cloud request audit event."""
+    """Sample cloud request event for testing."""
     return {
-        "id": "request-001",
+        "id": "test-event-005",
         "specversion": "1.0",
-        "source": "crn://confluent.cloud/organization=org-123",
+        "source": "crn://confluent.cloud/organization=org1",
         "type": "io.confluent.cloud/request",
         "time": "2025-01-15T10:34:00.000Z",
         "data": {
@@ -144,33 +129,8 @@ def sample_request_event():
             },
             "methodName": "CreateEnvironment",
             "serviceName": "organization",
-            "request": {
-                "environmentName": "production",
-                "region": "us-west-2"
-            },
             "result": {
                 "status": "SUCCESS"
             }
         }
-    }
-
-
-@pytest.fixture
-def mock_settings():
-    """Mock settings for testing."""
-    return {
-        "audit_bootstrap": "localhost:9092",
-        "audit_api_key": "test-key",
-        "audit_api_secret": "test-secret",
-        "audit_topics": ["confluent-audit-log-events"],
-        "consumer_group_id": "test-consumer-group",
-        "dest_bootstrap": "localhost:9092",
-        "dest_api_key": "test-dest-key",
-        "dest_api_secret": "test-dest-secret",
-        "dest_topic": "audit-logs-processed",
-        "s3_enabled": False,
-        "gcs_enabled": False,
-        "mcp_enabled": True,
-        "metrics_port": 8000,
-        "health_port": 8001
     }

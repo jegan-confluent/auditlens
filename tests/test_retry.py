@@ -2,7 +2,7 @@
 
 import pytest
 import asyncio
-from src.resilience.retry import RetryPolicy, retry_with_backoff
+from src.resilience.retry import RetryPolicy, retry_with_backoff, RetryExhaustedError
 
 
 class TestRetryPolicy:
@@ -31,30 +31,29 @@ class TestRetryPolicy:
         assert policy.exponential_base == 3.0
         assert policy.jitter is False
 
-    def test_calculate_delay_without_jitter(self):
+    def test_get_delay_without_jitter(self):
         """Test delay calculation without jitter."""
         policy = RetryPolicy(base_delay=1.0, exponential_base=2.0, jitter=False)
 
         # Attempt 0: 1.0 * 2^0 = 1.0
-        assert policy.calculate_delay(0) == 1.0
+        assert policy.get_delay(0) == 1.0
         # Attempt 1: 1.0 * 2^1 = 2.0
-        assert policy.calculate_delay(1) == 2.0
+        assert policy.get_delay(1) == 2.0
         # Attempt 2: 1.0 * 2^2 = 4.0
-        assert policy.calculate_delay(2) == 4.0
+        assert policy.get_delay(2) == 4.0
 
-    def test_calculate_delay_with_jitter(self):
+    def test_get_delay_with_jitter(self):
         """Test delay calculation with jitter adds randomness."""
         policy = RetryPolicy(base_delay=1.0, exponential_base=2.0, jitter=True)
 
-        # With jitter, delay should be between 0.5x and 1.5x base delay
-        delays = [policy.calculate_delay(0) for _ in range(10)]
+        # With jitter, delay should be around base delay +/- 25%
+        delays = [policy.get_delay(0) for _ in range(10)]
 
         # All delays should be > 0
         assert all(d > 0 for d in delays)
 
-        # With jitter, we should see some variation
-        # (statistically very unlikely all 10 are identical)
-        assert len(set(delays)) > 1 or True  # May be same in test env
+        # All delays should be within expected range (0.75 to 1.25 for attempt 0)
+        assert all(0.5 <= d <= 1.5 for d in delays)
 
 
 class TestRetryWithBackoff:
@@ -96,7 +95,7 @@ class TestRetryWithBackoff:
 
     @pytest.mark.asyncio
     async def test_max_retries_exceeded(self):
-        """Test exception raised when max retries exceeded."""
+        """Test RetryExhaustedError raised when max retries exceeded."""
         call_count = 0
 
         async def always_fail():
@@ -106,10 +105,10 @@ class TestRetryWithBackoff:
 
         policy = RetryPolicy(max_retries=3, base_delay=0.01, jitter=False)
 
-        with pytest.raises(ValueError) as exc_info:
+        with pytest.raises(RetryExhaustedError) as exc_info:
             await retry_with_backoff(always_fail, policy=policy)
 
-        assert "permanent failure" in str(exc_info.value)
+        assert "Failed after 4 attempts" in str(exc_info.value)
         assert call_count == 4  # Initial + 3 retries
 
     @pytest.mark.asyncio

@@ -41,7 +41,7 @@ class KafkaSourceConfig(BaseModel):
     topic: str = "confluent-audit-log-events"
     group_id: str = "audit-forwarder-v2"
     auto_offset_reset: str = "earliest"
-    enable_auto_commit: bool = True
+    enable_auto_commit: bool = False  # Manual commit after producer.flush() for at-least-once delivery
     auto_commit_interval_ms: int = 5000
     fetch_min_bytes: int = 1
     fetch_max_bytes: int = 52428800  # 50MB
@@ -233,7 +233,7 @@ class Settings(BaseSettings):
     # Processing
     batch_size: int = 500
     num_workers: int = 3
-    offset_file: str = "./data/offsets.json"
+    # NOTE: Offsets are managed by Kafka consumer groups (not file-based)
 
     # Metrics
     metrics_port: int = 8003

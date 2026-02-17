@@ -47,9 +47,9 @@ RUN mkdir -p /app/data && \
     chmod -R 755 /app
 
 # Environment defaults
+# NOTE: Offsets are managed by Kafka consumer groups (not file-based)
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    OFFSET_FILE=/app/data/offsets.json \
     METRICS_PORT=8000 \
     LOG_LEVEL=INFO \
     LOG_FORMAT=json

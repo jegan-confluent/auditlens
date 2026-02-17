@@ -44,7 +44,7 @@ services:
       # Processing
       - BATCH_SIZE=${BATCH_SIZE:-500}
       - NUM_WORKERS=${NUM_WORKERS:-3}
-      - OFFSET_FILE=/app/data/offsets.json
+      # NOTE: Offsets are managed by Kafka consumer groups (not file-based)
 
       # Enabled sinks (comma-separated: kafka,s3,gcs)
       - ENABLED_SINKS=${ENABLED_SINKS:-kafka}

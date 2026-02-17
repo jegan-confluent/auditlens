@@ -19,6 +19,7 @@ VERSION = _version_file.read_text().strip() if _version_file.exists() else "2.1.
 
 import os
 import sys
+import signal
 import orjson
 import logging
 import time
@@ -45,6 +46,21 @@ from src.anomaly import RateTracker, RateTrackerConfig
 from src.routing import TopicRouter, RouterConfig
 from src.alerting import get_webhook_sender
 from src.aggregation import DenialAggregator, AggregatorConfig
+
+# ──────────── graceful shutdown handler ────────────
+_shutdown_requested = False
+
+def _signal_handler(sig, frame):
+    """Handle SIGTERM/SIGINT for graceful shutdown."""
+    global _shutdown_requested
+    sig_name = signal.Signals(sig).name
+    # Use print since logger may not be initialized yet
+    print(f"Received {sig_name}, initiating graceful shutdown...")
+    _shutdown_requested = True
+
+# Register signal handlers
+signal.signal(signal.SIGTERM, _signal_handler)
+signal.signal(signal.SIGINT, _signal_handler)
 
 
 def extract_from_crn(crn, field):
@@ -87,9 +103,8 @@ SCHEMA_REGISTRY_KEY    = os.getenv("SCHEMA_REGISTRY_KEY")
 SCHEMA_REGISTRY_SECRET = os.getenv("SCHEMA_REGISTRY_SECRET")
 DEST_TOPIC             = os.getenv("DEST_TOPIC", "jegan_auditlog")
 AUDIT_TOPIC            = os.getenv("AUDIT_TOPIC", "confluent-audit-log-events")
-# Fresh consumer group - will start from LATEST due to auto.offset.reset=latest
-GROUP_ID               = os.getenv("GROUP_ID", "audit-fwd-realtime-dec10")
-OFFSET_FILE            = os.getenv("OFFSET_FILE", "offsets.json")
+# Consumer group - offsets are managed by Kafka consumer groups (not files)
+GROUP_ID               = os.getenv("GROUP_ID", "audit-fwd-v3-feb")
 METRICS_PORT           = int(os.getenv("METRICS_PORT", "8000"))
 
 # Anomaly detection configuration
@@ -309,15 +324,18 @@ consumer_conf = {
     "sasl.username":             AUDIT_API_KEY,
     "sasl.password":             AUDIT_API_SECRET,
     "group.id":                  GROUP_ID,
-    "enable.auto.commit":        True,
-    "auto.commit.interval.ms":   10000,  # 10 seconds
-    "auto.offset.reset":         "latest",  # CHANGED: Skip history, start real-time
+    # Explicit offset commits after batch processing (at-least-once delivery)
+    "enable.auto.commit":        False,
+    "auto.offset.reset":         "latest",  # Start from latest on new consumer group
     "fetch.min.bytes":           1024 * 1024,      # Wait for 1MB before fetching
-    "fetch.max.bytes":           200 * 1024 * 1024,  # 200MB max fetch (was 100MB)
-    "fetch.wait.max.ms":         50,                 # Wait up to 50ms (was 100ms)
-    "max.partition.fetch.bytes": 20 * 1024 * 1024,   # 20MB per partition (was 10MB)
-    "queued.min.messages":       50000,              # Pre-fetch 50K messages (was 10K)
+    "fetch.max.bytes":           200 * 1024 * 1024,  # 200MB max fetch
+    "fetch.wait.max.ms":         50,                 # Wait up to 50ms
+    "max.partition.fetch.bytes": 20 * 1024 * 1024,   # 20MB per partition
+    "queued.min.messages":       50000,              # Pre-fetch 50K messages
     "queued.max.messages.kbytes": 500 * 1024,        # 500MB prefetch buffer
+    # Cross-region latency settings
+    "socket.timeout.ms":         30000,              # 30s socket timeout
+    "session.timeout.ms":        45000,              # 45s session timeout
 }
 
 producer_conf = {
@@ -338,37 +356,11 @@ producer_conf = {
     "compression.type":             "lz4",              # LZ4 compression for speed
 }
 
-# ──────────── offset helpers ────────────
-# Bounded LRU cache to prevent memory leaks with many partitions
-from cachetools import LRUCache
-
-_offset_cache = LRUCache(maxsize=500)  # Bounded: max 500 topic-partition pairs
-_offset_save_counter = 0
-
-def load_offsets():
-    global _offset_cache
-    try:
-        with open(OFFSET_FILE, 'rb') as f:
-            loaded = orjson.loads(f.read())
-            # Load into LRU cache
-            for k, v in loaded.items():
-                _offset_cache[k] = v
-            return dict(_offset_cache)
-    except FileNotFoundError:
-        return {}
-
-def save_offset(topic, partition, offset):
-    """Update offset in memory - file save is batched."""
-    _offset_cache[f"{topic}_{partition}"] = offset
-
-def flush_offsets():
-    """Write all offsets to file - call once per batch, not per message."""
-    global _offset_save_counter
-    _offset_save_counter += 1
-    # Only actually write to disk every 10 batches to reduce I/O
-    if _offset_save_counter % 10 == 0 and _offset_cache:
-        with open(OFFSET_FILE, "wb") as f:
-            f.write(orjson.dumps(dict(_offset_cache)))
+# ──────────── offset management ────────────
+# NOTE: Offsets are now managed entirely by Kafka consumer groups.
+# No file-based offset storage - enables horizontal scaling and crash recovery.
+# After each batch is processed and produced, we call consumer.commit() explicitly.
+# This is "at-least-once" delivery: commit AFTER successful produce.
 
 # ──────────── flatten helpers ────────────
 def _to_scalar(value):
@@ -589,18 +581,17 @@ def safe_produce(p: Producer, topic: str, key: bytes, value: bytes):
 
 # ──────────── partition assign callback ────────────
 def on_assign(consumer, partitions):
-    stored = load_offsets()
+    """Handle partition assignment - offsets managed by Kafka consumer groups."""
+    # Let Kafka consumer group handle offsets automatically
+    # On first join: starts from auto.offset.reset (latest)
+    # On rejoins: resumes from last committed offset
     for tp in partitions:
-        key = f"{tp.topic}_{tp.partition}"
-        if key in stored:
-            tp.offset = stored[key] + 1
-            logger.info("Resuming %s from saved offset %d", tp, stored[key])
-        else:
+        try:
             low, high = consumer.get_watermark_offsets(tp, timeout=5.0)
-            tp.offset = high  # CHANGED: Start from LATEST (was low/earliest)
-            logger.info("No saved offset for %s; seeking to LATEST %d", tp, high)
-    consumer.assign(partitions)
-    logger.info("Assigned partitions: %s", [p.partition for p in partitions])
+            logger.info("Assigned partition %d: watermarks low=%d high=%d", tp.partition, low, high)
+        except Exception as e:
+            logger.warning("Could not get watermarks for partition %d: %s", tp.partition, e)
+    logger.info("Assigned %d partitions: %s", len(partitions), [p.partition for p in partitions])
 
 # ──────────── main ────────────
 def main():
@@ -735,16 +726,11 @@ def main():
     else:
         logger.info("Schema Registry not configured - using JSON serialization without schema validation")
 
-    # Assign or subscribe
-    saved = load_offsets()
-    if saved:
-        tps = [
-            TopicPartition(tp.split('_')[0], int(tp.split('_')[1]), offset+1)
-            for tp, offset in saved.items()
-        ]
-        on_assign(consumer, tps)
-    else:
-        consumer.subscribe([AUDIT_TOPIC], on_assign=on_assign)
+    # Subscribe to source topic - offsets are managed by Kafka consumer groups
+    # On first join: starts from auto.offset.reset (latest)
+    # On rejoins after crash: resumes from last committed offset
+    consumer.subscribe([AUDIT_TOPIC], on_assign=on_assign)
+    logger.info("Subscribed to %s with consumer group %s", AUDIT_TOPIC, GROUP_ID)
 
     # Main processing loop
     BATCH_SIZE     = 5000  # Increased from 500 for 10x throughput
@@ -755,7 +741,7 @@ def main():
 
     logger.info("Entering processing loop")
     try:
-        while True:
+        while not _shutdown_requested:
             batch = consumer.consume(num_messages=BATCH_SIZE, timeout=1.0)
             if not batch:
                 producer.poll(0)
@@ -835,13 +821,23 @@ def main():
                             msg.offset()
                         )
 
-                producer.poll(0)
-                consumer.commit(asynchronous=True)
-                # Update offsets in memory (fast), batch flush to disk
-                for msg in batch:
-                    if msg and not msg.error():
-                        save_offset(msg.topic(), msg.partition(), msg.offset())
-                flush_offsets()  # Flush to disk once per batch, not per message
+                # Flush producer to ensure ALL messages are delivered before committing offsets
+                # This is critical for at-least-once delivery guarantee
+                remaining = producer.flush(timeout=30)
+
+                if remaining > 0:
+                    # Some messages failed to deliver - do NOT commit offsets
+                    # These events will be reprocessed on restart
+                    logger.error("Producer flush timed out: %d messages still in queue. NOT committing offsets.", remaining)
+                    metrics.record_error()
+                else:
+                    # All messages delivered - safe to commit offsets
+                    try:
+                        consumer.commit(asynchronous=False)  # Synchronous commit for durability
+                        logger.debug("Batch committed: %d events", batch_size)
+                    except Exception as e:
+                        logger.error("Failed to commit offsets: %s", e)
+                        metrics.record_error()
 
                 processed += batch_size
                 if processed >= 1000 and processed % 1000 < batch_size:
@@ -891,12 +887,20 @@ def main():
                                             tp.partition, pos, high, lag)
                     except Exception as e:
                         logger.warning("Error getting lag for partition %d: %s", tp.partition, e)
+
+                # Periodic cleanup of rate tracker to prevent memory leak
+                anomaly_tracker.cleanup()
+                tracker_stats = anomaly_tracker.get_stats()
+                logger.debug("Rate tracker cleanup: %d principals, %d IPs tracked",
+                            tracker_stats.get('tracked_principals', 0),
+                            tracker_stats.get('tracked_ips', 0))
+
                 last_lag_ts = now
 
     except KeyboardInterrupt:
-        logger.info("Interrupted by user")
+        logger.info("Interrupted by user (KeyboardInterrupt)")
     finally:
-        logger.info("Shutting down: flushing and closing")
+        logger.info("Shutting down gracefully...")
 
         # Shutdown denial aggregator FIRST (flushes pending alerts before producer)
         if denial_aggregator:
@@ -905,7 +909,19 @@ def main():
         # Stop metrics server
         if metrics_server:
             metrics_server.shutdown()
-        producer.flush(timeout=10)
+
+        # Flush producer and commit final offsets
+        remaining = producer.flush(timeout=30)
+        if remaining > 0:
+            logger.warning("Could not flush %d messages during shutdown", remaining)
+        else:
+            # Only commit if all messages were delivered
+            try:
+                consumer.commit(asynchronous=False)
+                logger.info("Final offset commit successful")
+            except Exception as e:
+                logger.error("Failed to commit offsets during shutdown: %s", e)
+
         consumer.close()
         logger.info("Shutdown complete")
 
