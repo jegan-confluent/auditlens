@@ -1,0 +1,25 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AuditLens Enriched Audit Event",
+  "type": "object",
+  "required": ["schema_version", "pipeline_stage", "time", "methodName", "criticality"],
+  "properties": {
+    "schema_version": { "const": "audit.enriched.v1" },
+    "pipeline_stage": { "const": "enriched" },
+    "criticality": { "enum": ["CRITICAL", "HIGH", "MEDIUM", "LOW"] },
+    "classification_reason": { "type": ["string", "null"], "description": "Derived classification explanation" },
+    "is_security_event": { "type": "boolean", "description": "Derived security relevance flag" },
+    "is_signal_candidate": { "type": ["boolean", "null"], "description": "Derived flag for events that should drive signals instead of per-event urgency" },
+    "signal_type": { "type": ["string", "null"], "description": "Derived signal family such as auth_failure or authz_denial" },
+    "is_high_risk": { "type": "boolean", "description": "Derived flag for rare destructive or security-changing events" },
+    "event_contract_version": { "type": "string" },
+    "principal_raw": { "type": ["string", "null"] },
+    "principal_normalized": { "type": ["string", "null"] },
+    "principal_type": { "type": ["string", "null"] },
+    "auth_mechanism": { "type": ["string", "null"] },
+    "auth_identifier": { "type": ["string", "null"] },
+    "result_message": { "type": ["string", "null"] },
+    "network_id": { "type": ["string", "null"] }
+  },
+  "additionalProperties": true
+}

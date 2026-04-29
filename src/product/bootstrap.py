@@ -1,0 +1,1274 @@
+"""AuditLens guided installation and bootstrap helpers."""
+
+from __future__ import annotations
+
+import base64
+import http.client
+import json
+import os
+import secrets
+import socket
+import string
+import subprocess
+import time
+import uuid
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
+
+import yaml
+from confluent_kafka import Consumer, TopicPartition
+from confluent_kafka.admin import AdminClient, NewTopic
+
+
+CANONICAL_TOPICS = [
+    "audit.raw.v1",
+    "audit.normalized.v1",
+    "audit.enriched.v1",
+    "audit.signals.denials.v1",
+    "audit.signals.highrisk.v1",
+    "audit.alerts.v1",
+    "audit.dlq.v1",
+]
+
+SOURCE_AUDIT_TOPIC = "confluent-audit-log-events"
+DEFAULT_GROUP_ID = "auditlens-forwarder-v1"
+DEFAULT_PERSISTENCE_DB_PATH = "/var/lib/auditlens/auditlens.db"
+DEFAULT_NAMESPACE = "auditlens"
+DEFAULT_STORAGE_SIZE = "10Gi"
+DEFAULT_MCP_PORT = 8080
+DEFAULT_METRICS_PORT = 8003
+DEFAULT_DASHBOARD_PORT = 8503
+DEFAULT_LANDING_PORT = 8088
+DOCKER_PERSISTENCE_VOLUME = "auditlens_auditlens_data"
+PLACEHOLDER_VALUES = {"REPLACE_ME", "REPLACE_ME_OPTIONAL", "CHANGE_ME", "<required>"}
+
+SECRET_FIELD_NAMES = {
+    "audit_api_key",
+    "audit_api_secret",
+    "dest_api_key",
+    "dest_api_secret",
+    "schema_registry_api_key",
+    "schema_registry_api_secret",
+    "generated_admin_token",
+    "alerting_webhook",
+    "slack_webhook",
+}
+
+
+class BootstrapError(RuntimeError):
+    """Raised when bootstrap cannot continue safely."""
+
+
+@dataclass
+class BootstrapInputs:
+    deployment_mode: str = "docker"
+
+    source_display_name: str = "Confluent Cloud Audit Logs"
+    audit_bootstrap: str = ""
+    audit_api_key: str = ""
+    audit_api_secret: str = ""
+    audit_topic: str = SOURCE_AUDIT_TOPIC
+    group_id: str = DEFAULT_GROUP_ID
+    auto_offset_reset: str = "earliest"
+
+    destination_display_name: str = "AuditLens Internal Kafka"
+    dest_bootstrap: str = ""
+    dest_api_key: str = ""
+    dest_api_secret: str = ""
+    topics_exist: bool = False
+    audit_raw_topic: str = "audit.raw.v1"
+    audit_normalized_topic: str = "audit.normalized.v1"
+    audit_enriched_topic: str = "audit.enriched.v1"
+    audit_signals_denials_topic: str = "audit.signals.denials.v1"
+    audit_signals_highrisk_topic: str = "audit.signals.highrisk.v1"
+    audit_alerts_topic: str = "audit.alerts.v1"
+    dlq_topic: str = "audit.dlq.v1"
+
+    schema_registry_enabled: bool = False
+    schema_registry_url: str = ""
+    schema_registry_api_key: str = ""
+    schema_registry_api_secret: str = ""
+
+    api_auth_enabled: bool = True
+    api_token_mode: str = "generate"
+    api_auth_token_file: str = "/run/secrets/auditlens-api-tokens.json"
+    generated_admin_token: str = ""
+
+    dashboard_port: int = DEFAULT_DASHBOARD_PORT
+    metrics_port: int = DEFAULT_METRICS_PORT
+    mcp_port: int = DEFAULT_MCP_PORT
+    landing_port: int = DEFAULT_LANDING_PORT
+    alerting_webhook: str = ""
+    slack_webhook: str = ""
+
+    persistence_enabled: bool = True
+    persistence_backend: str = "sqlite"
+    persistence_db_path: str = DEFAULT_PERSISTENCE_DB_PATH
+
+    replay_enabled: bool = True
+    replay_default_hours: int = 24
+    replay_max_hours: int = 720
+    replay_publish_topics: bool = False
+
+    api_max_search_results: int = 500
+    api_export_max_rows: int = 5000
+    api_export_max_hours: int = 168
+
+    cloud_api_key: str = ""
+    cloud_api_secret: str = ""
+
+    namespace: str = DEFAULT_NAMESPACE
+    pvc_size: str = DEFAULT_STORAGE_SIZE
+    forwarder_image: str = "auditlens-forwarder:bootstrap"
+    dashboard_image: str = "auditlens-dashboard:bootstrap"
+
+    def destination_topics(self) -> list[str]:
+        return [
+            self.audit_raw_topic,
+            self.audit_normalized_topic,
+            self.audit_enriched_topic,
+            self.audit_signals_denials_topic,
+            self.audit_signals_highrisk_topic,
+            self.audit_alerts_topic,
+            self.dlq_topic,
+        ]
+
+    def to_masked_summary(self) -> dict[str, Any]:
+        summary = asdict(self)
+        for key in SECRET_FIELD_NAMES:
+            if summary.get(key):
+                summary[key] = mask_secret(summary[key])
+        return summary
+
+
+@dataclass
+class SourceValidationResult:
+    topic: str
+    partitions: int
+    readable: bool
+    sample_found: bool
+    retained_messages_present: bool
+
+
+@dataclass
+class DestinationValidationResult:
+    reachable: bool
+    existing_topics: list[str]
+    created_topics: list[str]
+    verified_topics: list[str]
+
+
+@dataclass
+class SchemaRegistryValidationResult:
+    reachable: bool
+    authenticated: bool
+    subjects_checked: bool
+    subject_count: int
+
+
+@dataclass
+class PersistenceValidationResult:
+    enabled: bool
+    backend: str
+    path: str
+    parent_exists: bool
+    local_parent_writable: bool
+    docker_volume_writable: bool
+    message: str
+
+
+@dataclass
+class HealthCheckResult:
+    status_code: int
+    payload: dict[str, Any]
+
+
+@dataclass
+class LocalPrereqResult:
+    docker_available: bool
+    docker_daemon_reachable: bool
+    docker_compose_available: bool
+    python_available: bool
+    outbound_dns_ok: bool
+    creatable_directories: list[str] = field(default_factory=list)
+    conflicting_ports: list[int] = field(default_factory=list)
+
+
+@dataclass
+class ConfigLoadResult:
+    inputs: BootstrapInputs
+    missing_required_fields: list[str] = field(default_factory=list)
+    placeholder_fields: list[str] = field(default_factory=list)
+
+
+def mask_secret(value: str) -> str:
+    if not value:
+        return "(not set)"
+    if len(value) <= 8:
+        return "****"
+    return f"{value[:4]}...{value[-4:]}"
+
+
+def make_api_token(actor_id: str = "auditlens-bootstrap-admin", role: str = "admin") -> tuple[str, list[dict[str, Any]]]:
+    alphabet = string.ascii_letters + string.digits
+    token = "".join(secrets.choice(alphabet) for _ in range(40))
+    return token, [{
+        "token": token,
+        "actor_id": actor_id,
+        "role": role,
+        "organizations": ["*"],
+        "environments": ["*"],
+        "clusters": ["*"],
+    }]
+
+
+def write_text_file(path: Path, content: str, mode: int = 0o600) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    path.chmod(mode)
+
+
+def timestamp_suffix() -> str:
+    return datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+
+
+def backup_file_if_exists(path: Path) -> Path | None:
+    if not path.exists():
+        return None
+    backup_path = path.with_name(f"{path.name}.backup.{timestamp_suffix()}")
+    path.replace(backup_path)
+    return backup_path
+
+
+def _get_nested(mapping: dict[str, Any], *keys: str, default: Any = "") -> Any:
+    current: Any = mapping
+    for key in keys:
+        if not isinstance(current, dict):
+            return default
+        current = current.get(key, default)
+    return current
+
+
+def is_placeholder(value: Any) -> bool:
+    return isinstance(value, str) and value.strip() in PLACEHOLDER_VALUES
+
+
+def _coerce_bool(value: Any, *, field_name: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value in {None, ""}:
+        return False
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "yes", "y", "1", "on"}:
+            return True
+        if normalized in {"false", "no", "n", "0", "off"}:
+            return False
+    if isinstance(value, int):
+        return bool(value)
+    raise BootstrapError(
+        f"Config field {field_name} must be a boolean value. "
+        "Use true/false in YAML or a boolean in JSON."
+    )
+
+
+def _coerce_int(value: Any, *, field_name: str, default: int) -> int:
+    if value in {None, ""}:
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise BootstrapError(f"Config field {field_name} must be an integer.") from exc
+
+
+def load_install_config_file(path: Path) -> ConfigLoadResult:
+    if not path.exists():
+        raise BootstrapError(f"Config file not found: {path}")
+
+    suffix = path.suffix.lower()
+    raw_text = path.read_text(encoding="utf-8")
+    try:
+        if suffix in {".yaml", ".yml"}:
+            payload = yaml.safe_load(raw_text)
+        elif suffix == ".json":
+            payload = json.loads(raw_text)
+        else:
+            raise BootstrapError("Config file must be .yaml, .yml, or .json")
+    except (yaml.YAMLError, json.JSONDecodeError) as exc:
+        raise BootstrapError(f"Could not parse config file {path}: {exc}") from exc
+
+    if not isinstance(payload, dict):
+        raise BootstrapError("Config file must contain a top-level mapping/object.")
+
+    missing_required: list[str] = []
+    placeholder_fields: list[str] = []
+
+    def read_required(path_key: str, *keys: str) -> str:
+        value = _get_nested(payload, *keys, default="")
+        if is_placeholder(value):
+            placeholder_fields.append(path_key)
+            return ""
+        if value in {None, ""}:
+            missing_required.append(path_key)
+            return ""
+        return str(value)
+
+    def read_optional(*keys: str, default: Any = "") -> Any:
+        value = _get_nested(payload, *keys, default=default)
+        if is_placeholder(value):
+            return default
+        return value if value is not None else default
+
+    source = payload.get("source", {})
+    destination = payload.get("destination", {})
+    schema_registry = payload.get("schema_registry", {})
+    product = payload.get("product", {})
+    persistence = payload.get("persistence", {})
+
+    for section_name, section_value in {
+        "source": source,
+        "destination": destination,
+        "schema_registry": schema_registry,
+        "product": product,
+        "persistence": persistence,
+    }.items():
+        if section_value is None or section_value == "":
+            continue
+        if not isinstance(section_value, dict):
+            raise BootstrapError(f"Config section {section_name} must be a mapping/object.")
+
+    inputs = BootstrapInputs(
+        deployment_mode=str(payload.get("deployment_mode", "docker")),
+        source_display_name=str(read_optional("source", "display_name", default="Confluent Cloud Audit Logs")),
+        audit_bootstrap=read_required("source.bootstrap", "source", "bootstrap"),
+        audit_api_key=read_required("source.api_key", "source", "api_key"),
+        audit_api_secret=read_required("source.api_secret", "source", "api_secret"),
+        audit_topic=str(read_optional("source", "audit_topic", default=SOURCE_AUDIT_TOPIC)),
+        group_id=str(read_optional("source", "group_id", default=DEFAULT_GROUP_ID)),
+        auto_offset_reset=str(read_optional("source", "auto_offset_reset", default="earliest")),
+        destination_display_name=str(read_optional("destination", "display_name", default="AuditLens Internal Kafka")),
+        dest_bootstrap=read_required("destination.bootstrap", "destination", "bootstrap"),
+        dest_api_key=read_required("destination.api_key", "destination", "api_key"),
+        dest_api_secret=read_required("destination.api_secret", "destination", "api_secret"),
+        topics_exist=_coerce_bool(read_optional("destination", "topics_exist", default=False), field_name="destination.topics_exist"),
+        schema_registry_enabled=_coerce_bool(read_optional("schema_registry", "enabled", default=False), field_name="schema_registry.enabled"),
+        schema_registry_url=str(read_optional("schema_registry", "url", default="")),
+        schema_registry_api_key=str(read_optional("schema_registry", "api_key", default="")),
+        schema_registry_api_secret=str(read_optional("schema_registry", "api_secret", default="")),
+        api_auth_enabled=_coerce_bool(read_optional("product", "api_auth_enabled", default=True), field_name="product.api_auth_enabled"),
+        api_token_mode=str(read_optional("product", "api_token_mode", default="generate")),
+        dashboard_port=_coerce_int(read_optional("product", "dashboard_port", default=DEFAULT_DASHBOARD_PORT), field_name="product.dashboard_port", default=DEFAULT_DASHBOARD_PORT),
+        metrics_port=_coerce_int(read_optional("product", "metrics_port", default=DEFAULT_METRICS_PORT), field_name="product.metrics_port", default=DEFAULT_METRICS_PORT),
+        mcp_port=_coerce_int(read_optional("product", "mcp_port", default=DEFAULT_MCP_PORT), field_name="product.mcp_port", default=DEFAULT_MCP_PORT),
+        landing_port=_coerce_int(read_optional("product", "landing_port", default=DEFAULT_LANDING_PORT), field_name="product.landing_port", default=DEFAULT_LANDING_PORT),
+        slack_webhook=str(read_optional("product", "slack_webhook_url", default="")),
+        alerting_webhook=str(read_optional("product", "alert_webhook_url", default="")),
+        cloud_api_key=str(read_optional("product", "confluent_cloud_api_key", default="")),
+        cloud_api_secret=str(read_optional("product", "confluent_cloud_api_secret", default="")),
+        persistence_enabled=_coerce_bool(read_optional("persistence", "enabled", default=True), field_name="persistence.enabled"),
+        persistence_backend=str(read_optional("persistence", "backend", default="sqlite")),
+        persistence_db_path=str(read_optional("persistence", "db_path", default=DEFAULT_PERSISTENCE_DB_PATH)),
+    )
+
+    if inputs.schema_registry_enabled:
+        if is_placeholder(schema_registry.get("url")):
+            placeholder_fields.append("schema_registry.url")
+        if is_placeholder(schema_registry.get("api_key")):
+            placeholder_fields.append("schema_registry.api_key")
+        if is_placeholder(schema_registry.get("api_secret")):
+            placeholder_fields.append("schema_registry.api_secret")
+        if not inputs.schema_registry_url:
+            missing_required.append("schema_registry.url")
+        if not inputs.schema_registry_api_key:
+            missing_required.append("schema_registry.api_key")
+        if not inputs.schema_registry_api_secret:
+            missing_required.append("schema_registry.api_secret")
+
+    if inputs.api_auth_enabled and inputs.api_token_mode == "existing":
+        token_path = str(read_optional("product", "api_token_file", default=str(Path("secrets") / "auditlens-api-tokens.json")))
+        if is_placeholder(token_path):
+            placeholder_fields.append("product.api_token_file")
+        if not token_path:
+            missing_required.append("product.api_token_file")
+        else:
+            inputs.api_auth_token_file = token_path
+
+    return ConfigLoadResult(
+        inputs=inputs,
+        missing_required_fields=sorted(set(missing_required)),
+        placeholder_fields=sorted(set(placeholder_fields)),
+    )
+
+
+def run_checked(command: list[str], cwd: Path | None = None, redacted: str | None = None) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(command, cwd=str(cwd) if cwd else None, check=True, text=True, capture_output=True)
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr.strip() or exc.stdout.strip()
+        cmd = redacted or " ".join(command)
+        raise BootstrapError(f"Command failed: {cmd}\n{stderr}") from exc
+
+
+def docker_auth_headers(token: str | None) -> dict[str, str]:
+    if not token:
+        return {}
+    return {"Authorization": f"Bearer {token}"}
+
+
+def validate_bootstrap_format(bootstrap: str) -> tuple[str, int]:
+    value = bootstrap.strip()
+    if ":" not in value:
+        raise BootstrapError(f"Bootstrap endpoint must be in host:port form. Received: {value!r}")
+    host, port_text = value.rsplit(":", 1)
+    if not host:
+        raise BootstrapError("Bootstrap endpoint host is empty.")
+    try:
+        port = int(port_text)
+    except ValueError as exc:
+        raise BootstrapError(f"Bootstrap endpoint port is invalid: {port_text!r}") from exc
+    if port <= 0 or port > 65535:
+        raise BootstrapError(f"Bootstrap endpoint port out of range: {port}")
+    return host, port
+
+
+def resolve_hostname(host: str, port: int) -> list[str]:
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise BootstrapError(f"DNS resolution failed for {host}: {exc}") from exc
+    return sorted({info[4][0] for info in infos})
+
+
+def check_tcp_connectivity(host: str, port: int, timeout_seconds: float = 5.0) -> None:
+    try:
+        with socket.create_connection((host, port), timeout=timeout_seconds):
+            return
+    except OSError as exc:
+        raise BootstrapError(
+            f"TCP connectivity failed for {host}:{port}. "
+            "Likely causes: private networking, firewall policy, proxy requirements, or wrong endpoint."
+        ) from exc
+
+
+def port_in_use(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        return sock.connect_ex(("127.0.0.1", port)) == 0
+
+
+def validate_port_choices(
+    metrics_port: int,
+    dashboard_port: int,
+    mcp_port: int,
+    landing_port: int = DEFAULT_LANDING_PORT,
+    allowed_in_use_ports: set[int] | None = None,
+) -> None:
+    ports = [metrics_port, dashboard_port, mcp_port, landing_port]
+    if any(not isinstance(port, int) or port <= 0 or port > 65535 for port in ports):
+        raise BootstrapError("Ports must be numeric values in the range 1-65535.")
+    if len(set(ports)) != len(ports):
+        raise BootstrapError("Metrics, dashboard, MCP, and landing page ports must not conflict with each other.")
+    allowed = allowed_in_use_ports or set()
+    in_use = [port for port in ports if port_in_use(port) and port not in allowed]
+    if in_use:
+        raise BootstrapError(
+            f"Chosen local ports are already in use: {', '.join(str(port) for port in in_use)}. "
+            "Pick free ports before starting AuditLens."
+        )
+
+
+def validate_outbound_dns(host: str = "api.confluent.cloud", port: int = 443) -> None:
+    resolve_hostname(host, port)
+
+
+def check_local_prerequisites(repo_root: Path, metrics_port: int = DEFAULT_METRICS_PORT, dashboard_port: int = DEFAULT_DASHBOARD_PORT, mcp_port: int = DEFAULT_MCP_PORT, landing_port: int = DEFAULT_LANDING_PORT) -> LocalPrereqResult:
+    docker_available = False
+    docker_daemon_reachable = False
+    docker_compose_available = False
+    python_available = False
+
+    try:
+        run_checked(["docker", "--version"])
+        docker_available = True
+    except BootstrapError:
+        docker_available = False
+
+    if docker_available:
+        try:
+            run_checked(["docker", "info"], redacted="docker info")
+            docker_daemon_reachable = True
+        except BootstrapError:
+            docker_daemon_reachable = False
+
+        try:
+            run_checked(["docker", "compose", "version"], redacted="docker compose version")
+            docker_compose_available = True
+        except BootstrapError:
+            docker_compose_available = False
+
+    try:
+        run_checked(["python3", "--version"], cwd=repo_root)
+        python_available = True
+    except BootstrapError:
+        python_available = False
+
+    validate_outbound_dns()
+
+    creatable_directories: list[str] = []
+    for path in [repo_root / "secrets", repo_root / "logs"]:
+        path.mkdir(parents=True, exist_ok=True)
+        creatable_directories.append(str(path))
+
+    conflicting_ports = [port for port in [metrics_port, dashboard_port, mcp_port, landing_port] if port_in_use(port)]
+
+    if not docker_available:
+        raise BootstrapError("Docker is not installed. Install Docker Desktop or Docker Engine before continuing.")
+    if not docker_daemon_reachable:
+        raise BootstrapError("Docker is installed but the daemon is not reachable. Start Docker before continuing.")
+    if not docker_compose_available:
+        raise BootstrapError("docker compose is not available. Install a Docker Compose-capable Docker distribution.")
+    if not python_available:
+        raise BootstrapError("python3 is required for the guided installer helper scripts.")
+
+    return LocalPrereqResult(
+        docker_available=docker_available,
+        docker_daemon_reachable=docker_daemon_reachable,
+        docker_compose_available=docker_compose_available,
+        python_available=python_available,
+        outbound_dns_ok=True,
+        creatable_directories=creatable_directories,
+        conflicting_ports=conflicting_ports,
+    )
+
+
+def _kafka_client_config(bootstrap: str, api_key: str, api_secret: str, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+    config: dict[str, Any] = {
+        "bootstrap.servers": bootstrap,
+        "security.protocol": "SASL_SSL",
+        "sasl.mechanism": "PLAIN",
+        "sasl.username": api_key,
+        "sasl.password": api_secret,
+        "socket.timeout.ms": 15000,
+    }
+    if extra:
+        config.update(extra)
+    return config
+
+
+def _validate_kafka_endpoint(bootstrap: str) -> tuple[str, int]:
+    host, port = validate_bootstrap_format(bootstrap)
+    resolve_hostname(host, port)
+    check_tcp_connectivity(host, port)
+    return host, port
+
+
+def validate_source_access(inputs: BootstrapInputs, timeout: float = 15.0) -> SourceValidationResult:
+    _validate_kafka_endpoint(inputs.audit_bootstrap)
+    consumer = Consumer(_kafka_client_config(
+        inputs.audit_bootstrap,
+        inputs.audit_api_key,
+        inputs.audit_api_secret,
+        {
+            "group.id": f"auditlens-bootstrap-source-{uuid.uuid4()}",
+            "auto.offset.reset": inputs.auto_offset_reset,
+            "enable.auto.commit": False,
+            "session.timeout.ms": 10000,
+        },
+    ))
+    try:
+        metadata = consumer.list_topics(inputs.audit_topic, timeout=timeout)
+        if inputs.audit_topic not in metadata.topics:
+            raise BootstrapError(
+                f"Source audit topic {inputs.audit_topic!r} is not visible. "
+                "Likely causes: wrong audit-log cluster bootstrap endpoint, bad credentials, or topic name mismatch."
+            )
+        topic_meta = metadata.topics[inputs.audit_topic]
+        if topic_meta.error is not None:
+            raise BootstrapError(f"Unable to read source topic metadata for {inputs.audit_topic}: {topic_meta.error}")
+
+        readable_partitions: list[TopicPartition] = []
+        retained_messages_present = False
+        for partition_id in sorted(topic_meta.partitions):
+            tp = TopicPartition(inputs.audit_topic, partition_id)
+            low, high = consumer.get_watermark_offsets(tp, timeout=timeout)
+            if high > low:
+                retained_messages_present = True
+                tp.offset = low
+                readable_partitions.append(tp)
+
+        sample_found = False
+        if readable_partitions:
+            consumer.assign(readable_partitions[:1])
+            deadline = time.time() + timeout
+            while time.time() < deadline and not sample_found:
+                msg = consumer.poll(1.0)
+                if msg is None or msg.error():
+                    continue
+                sample_found = bool(msg.value())
+
+        return SourceValidationResult(
+            topic=inputs.audit_topic,
+            partitions=len(topic_meta.partitions),
+            readable=True,
+            sample_found=sample_found,
+            retained_messages_present=retained_messages_present,
+        )
+    except Exception as exc:
+        if isinstance(exc, BootstrapError):
+            raise
+        raise BootstrapError(
+            "Source Kafka authentication or metadata lookup failed. "
+            "Likely causes: SASL credentials are wrong, the bootstrap endpoint is wrong, or audit-log access is not enabled. "
+            "Verify `confluent audit-log describe`, confirm the source cluster ID and Kafka API key belong to the same audit-log cluster, "
+            "and try `confluent kafka topic consume --from-beginning <AUDIT_LOG_TOPIC>` after selecting the audit-log environment and cluster."
+        ) from exc
+    finally:
+        consumer.close()
+
+
+def validate_destination_and_topics(
+    inputs: BootstrapInputs,
+    topics: list[str] | None = None,
+    create_missing_topics: bool = True,
+    partitions: int = 3,
+    timeout: float = 15.0,
+) -> DestinationValidationResult:
+    _validate_kafka_endpoint(inputs.dest_bootstrap)
+    required_topics = topics or inputs.destination_topics()
+    admin = AdminClient(_kafka_client_config(inputs.dest_bootstrap, inputs.dest_api_key, inputs.dest_api_secret))
+
+    try:
+        metadata = admin.list_topics(timeout=timeout)
+        existing_topics = set(metadata.topics.keys())
+    except Exception as exc:
+        raise BootstrapError(
+            "Destination Kafka authentication or metadata lookup failed. "
+            "Likely causes: bad SASL credentials, wrong bootstrap endpoint, or blocked private networking."
+        ) from exc
+
+    missing_topics = [topic for topic in required_topics if topic not in existing_topics]
+    created_topics: list[str] = []
+
+    if missing_topics and create_missing_topics:
+        futures = admin.create_topics([NewTopic(topic, num_partitions=partitions) for topic in missing_topics])
+        for topic, future in futures.items():
+            try:
+                future.result(timeout=timeout)
+                created_topics.append(topic)
+            except Exception as exc:
+                raise BootstrapError(
+                    f"Destination topic creation failed for {topic!r}. "
+                    "Likely causes: missing create-topic permissions or unsupported cluster policy."
+                ) from exc
+    elif missing_topics:
+        raise BootstrapError(
+            f"Required destination topics are missing: {', '.join(missing_topics)}. "
+            "Create them first or rerun the installer allowing topic creation."
+        )
+
+    metadata = admin.list_topics(timeout=timeout)
+    verified_topics = [topic for topic in required_topics if topic in metadata.topics]
+    missing_after_create = [topic for topic in required_topics if topic not in metadata.topics]
+    if missing_after_create:
+        raise BootstrapError(
+            f"Destination Kafka still does not expose required topics after validation: {', '.join(missing_after_create)}"
+        )
+
+    return DestinationValidationResult(
+        reachable=True,
+        existing_topics=sorted(existing_topics),
+        created_topics=sorted(created_topics),
+        verified_topics=sorted(verified_topics),
+    )
+
+
+def validate_schema_registry_access(inputs: BootstrapInputs, timeout_seconds: float = 10.0) -> SchemaRegistryValidationResult:
+    if not inputs.schema_registry_enabled:
+        return SchemaRegistryValidationResult(reachable=False, authenticated=False, subjects_checked=False, subject_count=0)
+
+    parsed = urlparse(inputs.schema_registry_url)
+    if parsed.scheme != "https" or not parsed.hostname:
+        raise BootstrapError("Schema Registry URL must be a valid https URL, for example https://psrc-xxxxx.region.confluent.cloud")
+    host = parsed.hostname
+    port = parsed.port or 443
+    resolve_hostname(host, port)
+    check_tcp_connectivity(host, port, timeout_seconds)
+
+    credentials = f"{inputs.schema_registry_api_key}:{inputs.schema_registry_api_secret}".encode("utf-8")
+    headers = {
+        "Authorization": f"Basic {base64.b64encode(credentials).decode('ascii')}",
+        "Accept": "application/json",
+    }
+    request = Request(inputs.schema_registry_url.rstrip("/") + "/subjects", headers=headers)
+    try:
+        with urlopen(request, timeout=timeout_seconds) as response:
+            body = response.read().decode("utf-8")
+            payload = json.loads(body) if body else []
+            return SchemaRegistryValidationResult(
+                reachable=True,
+                authenticated=True,
+                subjects_checked=True,
+                subject_count=len(payload) if isinstance(payload, list) else 0,
+            )
+    except HTTPError as exc:
+        if exc.code in {401, 403}:
+            raise BootstrapError("Schema Registry authentication failed. Check the API key and secret.") from exc
+        raise BootstrapError(f"Schema Registry request failed with HTTP {exc.code}.") from exc
+    except URLError as exc:
+        raise BootstrapError(f"Schema Registry request failed: {exc.reason}") from exc
+
+
+def validate_persistence_config(inputs: BootstrapInputs, repo_root: Path) -> PersistenceValidationResult:
+    if not inputs.persistence_enabled:
+        return PersistenceValidationResult(
+            enabled=False,
+            backend=inputs.persistence_backend,
+            path=inputs.persistence_db_path,
+            parent_exists=False,
+            local_parent_writable=False,
+            docker_volume_writable=False,
+            message="Persistence disabled by configuration.",
+        )
+
+    if inputs.persistence_backend != "sqlite":
+        raise BootstrapError("Only sqlite persistence is currently supported by the installer.")
+
+    parent = Path(inputs.persistence_db_path).parent
+    parent_exists = parent.exists()
+    local_parent_writable = False
+
+    if inputs.deployment_mode == "docker":
+        run_checked(["docker", "volume", "create", DOCKER_PERSISTENCE_VOLUME], cwd=repo_root, redacted=f"docker volume create {DOCKER_PERSISTENCE_VOLUME}")
+        test_db = f"{inputs.persistence_db_path}.preflight"
+        try:
+            _run_docker_persistence_preflight(repo_root, parent, test_db)
+        except BootstrapError as exc:
+            if "permission denied" not in str(exc).lower():
+                raise
+            print("Detected volume permission issue. Attempting automatic fix...")
+            _fix_docker_persistence_volume_permissions(repo_root)
+            try:
+                _run_docker_persistence_preflight(repo_root, parent, test_db)
+                print("Persistence volume permissions fixed successfully.")
+            except BootstrapError as exc:
+                raise BootstrapError(
+                    "Persistence validation failed after automatic fix. "
+                    f"Check Docker volume {DOCKER_PERSISTENCE_VOLUME}, host filesystem permissions, and Docker Desktop volume state. "
+                    "Manual fix command: "
+                    f"docker run --rm -v {DOCKER_PERSISTENCE_VOLUME}:/var/lib/auditlens alpine "
+                    "sh -c \"chown -R 1000:1000 /var/lib/auditlens && chmod 755 /var/lib/auditlens\""
+                ) from exc
+        return PersistenceValidationResult(
+            enabled=True,
+            backend=inputs.persistence_backend,
+            path=inputs.persistence_db_path,
+            parent_exists=True,
+            local_parent_writable=True,
+            docker_volume_writable=True,
+            message="Docker named volume preflight succeeded for runtime UID 1000.",
+        )
+
+    # Kubernetes path validation remains local because PVC is provisioned by the cluster.
+    if not str(parent).startswith("/var/lib/auditlens"):
+        raise BootstrapError(
+            "For Kubernetes mode, the SQLite path must remain under /var/lib/auditlens so it stays inside the mounted PVC."
+        )
+    return PersistenceValidationResult(
+        enabled=True,
+        backend=inputs.persistence_backend,
+        path=inputs.persistence_db_path,
+        parent_exists=parent_exists,
+        local_parent_writable=local_parent_writable,
+        docker_volume_writable=False,
+        message="Kubernetes persistence path validated against the mounted PVC contract.",
+    )
+
+
+def _run_docker_persistence_preflight(repo_root: Path, parent: Path, test_db: str) -> None:
+    sqlite_preflight = (
+        "import sqlite3;"
+        f"p={test_db!r};"
+        "con=sqlite3.connect(p, timeout=2);"
+        "con.execute('create table if not exists __auditlens_preflight(id integer primary key, ts text)');"
+        "con.execute(\"insert into __auditlens_preflight(ts) values(datetime('now'))\");"
+        "con.commit();"
+        "con.close()"
+    )
+    run_checked(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "-u",
+            "1000:1000",
+            "-v",
+            f"{DOCKER_PERSISTENCE_VOLUME}:/var/lib/auditlens",
+            "python:3.11-slim",
+            "sh",
+            "-lc",
+            f"mkdir -p {shlex_quote(str(parent))} && python -c {shlex_quote(sqlite_preflight)} && rm -f {shlex_quote(test_db)}",
+        ],
+        cwd=repo_root,
+        redacted="docker run persistence preflight",
+    )
+
+
+def _fix_docker_persistence_volume_permissions(repo_root: Path) -> None:
+    run_checked(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "-v",
+            f"{DOCKER_PERSISTENCE_VOLUME}:/var/lib/auditlens",
+            "alpine",
+            "sh",
+            "-lc",
+            "chown -R 1000:1000 /var/lib/auditlens && chmod 755 /var/lib/auditlens",
+        ],
+        cwd=repo_root,
+        redacted="docker run persistence permission fix",
+    )
+
+
+def shlex_quote(value: str) -> str:
+    return "'" + value.replace("'", "'\"'\"'") + "'"
+
+
+def wait_for_topic_message(
+    bootstrap: str,
+    api_key: str,
+    api_secret: str,
+    topic: str,
+    timeout_seconds: float = 30.0,
+) -> bool:
+    consumer = Consumer(_kafka_client_config(
+        bootstrap,
+        api_key,
+        api_secret,
+        {
+            "group.id": f"auditlens-bootstrap-dest-{uuid.uuid4()}",
+            "auto.offset.reset": "earliest",
+            "enable.auto.commit": False,
+            "session.timeout.ms": 10000,
+        },
+    ))
+    try:
+        metadata = consumer.list_topics(topic, timeout=min(timeout_seconds, 10.0))
+        if topic not in metadata.topics:
+            return False
+        assignments: list[TopicPartition] = []
+        for partition_id in sorted(metadata.topics[topic].partitions):
+            tp = TopicPartition(topic, partition_id)
+            low, high = consumer.get_watermark_offsets(tp, timeout=10.0)
+            if high > low:
+                tp.offset = max(low, high - 1)
+                assignments.append(tp)
+        if not assignments:
+            return False
+        consumer.assign(assignments[:1])
+        deadline = time.time() + timeout_seconds
+        while time.time() < deadline:
+            msg = consumer.poll(1.0)
+            if msg is None or msg.error():
+                continue
+            return bool(msg.value())
+        return False
+    finally:
+        consumer.close()
+
+
+def render_env_file(inputs: BootstrapInputs) -> str:
+    lines = [
+        "APP_NAME=AuditLens",
+        "APP_ENV=production",
+        "LOG_LEVEL=INFO",
+        "LOG_FORMAT=json",
+        "",
+        "# Source audit cluster",
+        f"AUDIT_BOOTSTRAP={inputs.audit_bootstrap}",
+        f"AUDIT_TOPIC={inputs.audit_topic}",
+        f"GROUP_ID={inputs.group_id}",
+        f"AUTO_OFFSET_RESET={inputs.auto_offset_reset}",
+        "",
+        "# Internal / destination Kafka",
+        f"DEST_BOOTSTRAP={inputs.dest_bootstrap}",
+        "",
+        "# Canonical product topics",
+        f"AUDIT_RAW_TOPIC={inputs.audit_raw_topic}",
+        f"AUDIT_NORMALIZED_TOPIC={inputs.audit_normalized_topic}",
+        f"AUDIT_ENRICHED_TOPIC={inputs.audit_enriched_topic}",
+        f"AUDIT_SIGNALS_DENIALS_TOPIC={inputs.audit_signals_denials_topic}",
+        f"AUDIT_SIGNALS_HIGHRISK_TOPIC={inputs.audit_signals_highrisk_topic}",
+        f"AUDIT_ALERTS_TOPIC={inputs.audit_alerts_topic}",
+        f"DLQ_TOPIC={inputs.dlq_topic}",
+        "",
+        "# Optional Schema Registry",
+        f"SCHEMA_REGISTRY_URL={inputs.schema_registry_url if inputs.schema_registry_enabled else ''}",
+        "",
+        "# Alerting",
+        f"SLACK_WEBHOOK={inputs.slack_webhook}",
+        "DENIAL_AGGREGATOR_WINDOW=60",
+        "DENIAL_AGGREGATOR_THRESHOLD=10",
+        "ALERT_ON_HIGH_RISK=true",
+        "",
+        "# Dashboard and API ports",
+        f"LANDING_PORT={inputs.landing_port}",
+        f"DASHBOARD_PORT={inputs.dashboard_port}",
+        f"METRICS_PORT={inputs.metrics_port}",
+        f"MCP_PORT={inputs.mcp_port}",
+        f"SOURCE_CLUSTER_DISPLAY_NAME={inputs.source_display_name}",
+        f"DESTINATION_CLUSTER_DISPLAY_NAME={inputs.destination_display_name}",
+        f"SETUP_TIMESTAMP={datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')}",
+        f"DASHBOARD_SOURCE_TOPIC={inputs.audit_enriched_topic}",
+        f"DASHBOARD_DENIALS_TOPIC={inputs.audit_signals_denials_topic}",
+        f"DASHBOARD_ALERTS_TOPIC={inputs.audit_alerts_topic}",
+        f"DASHBOARD_FORWARDER_URL=http://auditlens-forwarder:{inputs.metrics_port}",
+        "DASHBOARD_GRAFANA_URL=http://grafana:3000",
+        "DASHBOARD_PROMETHEUS_URL=http://prometheus:9090",
+        "",
+        "# Product persistence",
+        f"PERSISTENCE_ENABLED={'true' if inputs.persistence_enabled else 'false'}",
+        f"PERSISTENCE_BACKEND={inputs.persistence_backend}",
+        f"PERSISTENCE_DB_PATH={inputs.persistence_db_path}",
+        "PERSISTENCE_ENRICHED_RETENTION_DAYS=30",
+        "PERSISTENCE_SIGNALS_RETENTION_DAYS=30",
+        "PERSISTENCE_ALERTS_RETENTION_DAYS=90",
+        "PERSISTENCE_AUDIT_RETENTION_DAYS=90",
+        "",
+        "# Replay and rebuild",
+        f"REPLAY_ENABLED={'true' if inputs.replay_enabled else 'false'}",
+        f"REPLAY_DEFAULT_HOURS={inputs.replay_default_hours}",
+        f"REPLAY_MAX_HOURS={inputs.replay_max_hours}",
+        f"REPLAY_PUBLISH_DERIVED_TOPICS={'true' if inputs.replay_publish_topics else 'false'}",
+        "",
+        "# API auth and export controls",
+        f"API_AUTH_ENABLED={'true' if inputs.api_auth_enabled else 'false'}",
+        f"API_AUTH_TOKEN_FILE={inputs.api_auth_token_file}",
+        f"API_MAX_SEARCH_RESULTS={inputs.api_max_search_results}",
+        f"API_EXPORT_MAX_ROWS={inputs.api_export_max_rows}",
+        f"API_EXPORT_MAX_HOURS={inputs.api_export_max_hours}",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def render_secrets_env(inputs: BootstrapInputs) -> str:
+    lines = [
+        "# Generated by AuditLens guided installer",
+        f"AUDIT_API_KEY={inputs.audit_api_key}",
+        f"AUDIT_API_SECRET={inputs.audit_api_secret}",
+        f"DEST_API_KEY={inputs.dest_api_key}",
+        f"DEST_API_SECRET={inputs.dest_api_secret}",
+        f"SCHEMA_REGISTRY_KEY={inputs.schema_registry_api_key if inputs.schema_registry_enabled else ''}",
+        f"SCHEMA_REGISTRY_SECRET={inputs.schema_registry_api_secret if inputs.schema_registry_enabled else ''}",
+        f"GF_SECURITY_ADMIN_PASSWORD={make_admin_password()}",
+        f"CONFLUENT_CLOUD_API_KEY={inputs.cloud_api_key}",
+        f"CONFLUENT_CLOUD_API_SECRET={inputs.cloud_api_secret}",
+        f"SLACK_WEBHOOK={inputs.slack_webhook}",
+        f"ALERTING_WEBHOOK={inputs.alerting_webhook}",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def make_admin_password() -> str:
+    alphabet = string.ascii_letters + string.digits
+    return "".join(secrets.choice(alphabet) for _ in range(24))
+
+
+def render_token_json(entries: list[dict[str, Any]]) -> str:
+    return json.dumps(entries, indent=2) + "\n"
+
+
+def render_review_summary(inputs: BootstrapInputs) -> str:
+    masked = inputs.to_masked_summary()
+    lines = ["Configuration review (masked):"]
+    ordered_keys = [
+        "deployment_mode",
+        "source_display_name",
+        "audit_bootstrap",
+        "audit_api_key",
+        "audit_api_secret",
+        "audit_topic",
+        "group_id",
+        "auto_offset_reset",
+        "destination_display_name",
+        "dest_bootstrap",
+        "dest_api_key",
+        "dest_api_secret",
+        "schema_registry_enabled",
+        "schema_registry_url",
+        "schema_registry_api_key",
+        "schema_registry_api_secret",
+        "api_auth_enabled",
+        "api_token_mode",
+        "api_auth_token_file",
+        "dashboard_port",
+        "metrics_port",
+        "mcp_port",
+        "persistence_enabled",
+        "persistence_backend",
+        "persistence_db_path",
+    ]
+    for key in ordered_keys:
+        lines.append(f"- {key}: {masked.get(key)}")
+    lines.append(f"- destination_topics: {', '.join(inputs.destination_topics())}")
+    return "\n".join(lines)
+
+
+def _yaml_dump_all(docs: list[dict[str, Any]]) -> str:
+    return yaml.safe_dump_all(docs, sort_keys=False)
+
+
+def render_k8s_configmap(inputs: BootstrapInputs) -> str:
+    config = {
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": {"name": "auditlens-config", "namespace": inputs.namespace},
+        "data": {
+            "APP_NAME": "AuditLens",
+            "AUDIT_TOPIC": inputs.audit_topic,
+            "GROUP_ID": inputs.group_id,
+            "AUTO_OFFSET_RESET": inputs.auto_offset_reset,
+            "AUDIT_RAW_TOPIC": inputs.audit_raw_topic,
+            "AUDIT_NORMALIZED_TOPIC": inputs.audit_normalized_topic,
+            "AUDIT_ENRICHED_TOPIC": inputs.audit_enriched_topic,
+            "AUDIT_SIGNALS_DENIALS_TOPIC": inputs.audit_signals_denials_topic,
+            "AUDIT_SIGNALS_HIGHRISK_TOPIC": inputs.audit_signals_highrisk_topic,
+            "AUDIT_ALERTS_TOPIC": inputs.audit_alerts_topic,
+            "DLQ_TOPIC": inputs.dlq_topic,
+            "ENABLE_DENIAL_AGGREGATION": "true",
+            "ALERT_ON_HIGH_RISK": "true",
+            "METRICS_PORT": str(inputs.metrics_port),
+            "PERSISTENCE_ENABLED": "true" if inputs.persistence_enabled else "false",
+            "PERSISTENCE_BACKEND": inputs.persistence_backend,
+            "PERSISTENCE_DB_PATH": inputs.persistence_db_path,
+            "API_AUTH_ENABLED": "true" if inputs.api_auth_enabled else "false",
+            "API_MAX_SEARCH_RESULTS": str(inputs.api_max_search_results),
+            "API_EXPORT_MAX_ROWS": str(inputs.api_export_max_rows),
+            "API_EXPORT_MAX_HOURS": str(inputs.api_export_max_hours),
+            "REPLAY_ENABLED": "true" if inputs.replay_enabled else "false",
+            "REPLAY_DEFAULT_HOURS": str(inputs.replay_default_hours),
+            "REPLAY_MAX_HOURS": str(inputs.replay_max_hours),
+            "REPLAY_PUBLISH_DERIVED_TOPICS": "true" if inputs.replay_publish_topics else "false",
+            "LOG_LEVEL": "INFO",
+            "LOG_FORMAT": "json",
+            "DASHBOARD_SOURCE_TOPIC": inputs.audit_enriched_topic,
+            "DASHBOARD_DENIALS_TOPIC": inputs.audit_signals_denials_topic,
+            "DASHBOARD_ALERTS_TOPIC": inputs.audit_alerts_topic,
+            "DASHBOARD_FORWARDER_URL": f"http://auditlens-forwarder:{inputs.metrics_port}",
+            "SCHEMA_REGISTRY_URL": inputs.schema_registry_url if inputs.schema_registry_enabled else "",
+        },
+    }
+    return _yaml_dump_all([config])
+
+
+def render_k8s_secret(inputs: BootstrapInputs, token_json: str | None) -> str:
+    string_data: dict[str, str] = {
+        "AUDIT_BOOTSTRAP": inputs.audit_bootstrap,
+        "AUDIT_API_KEY": inputs.audit_api_key,
+        "AUDIT_API_SECRET": inputs.audit_api_secret,
+        "DEST_BOOTSTRAP": inputs.dest_bootstrap,
+        "DEST_API_KEY": inputs.dest_api_key,
+        "DEST_API_SECRET": inputs.dest_api_secret,
+        "GF_SECURITY_ADMIN_PASSWORD": make_admin_password(),
+        "CONFLUENT_CLOUD_API_KEY": inputs.cloud_api_key,
+        "CONFLUENT_CLOUD_API_SECRET": inputs.cloud_api_secret,
+    }
+    if inputs.schema_registry_enabled:
+        string_data["SCHEMA_REGISTRY_KEY"] = inputs.schema_registry_api_key
+        string_data["SCHEMA_REGISTRY_SECRET"] = inputs.schema_registry_api_secret
+    if token_json:
+        string_data["API_AUTH_TOKENS_JSON"] = token_json
+    secret = {
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {"name": "auditlens-secrets", "namespace": inputs.namespace},
+        "type": "Opaque",
+        "stringData": string_data,
+    }
+    return _yaml_dump_all([secret])
+
+
+def render_k8s_namespace(inputs: BootstrapInputs) -> str:
+    return _yaml_dump_all([{
+        "apiVersion": "v1",
+        "kind": "Namespace",
+        "metadata": {"name": inputs.namespace},
+    }])
+
+
+def render_k8s_pvc(inputs: BootstrapInputs) -> str:
+    return _yaml_dump_all([{
+        "apiVersion": "v1",
+        "kind": "PersistentVolumeClaim",
+        "metadata": {"name": "auditlens-data", "namespace": inputs.namespace},
+        "spec": {
+            "accessModes": ["ReadWriteOnce"],
+            "resources": {"requests": {"storage": inputs.pvc_size}},
+        },
+    }])
+
+
+def render_k8s_workloads(inputs: BootstrapInputs) -> str:
+    docs = [
+        {
+            "apiVersion": "apps/v1",
+            "kind": "Deployment",
+            "metadata": {"name": "auditlens-forwarder", "namespace": inputs.namespace},
+            "spec": {
+                "replicas": 1,
+                "selector": {"matchLabels": {"app": "auditlens-forwarder"}},
+                "template": {
+                    "metadata": {"labels": {"app": "auditlens-forwarder"}},
+                    "spec": {
+                        "containers": [{
+                            "name": "forwarder",
+                            "image": inputs.forwarder_image,
+                            "imagePullPolicy": "IfNotPresent",
+                            "ports": [{"containerPort": inputs.metrics_port, "name": "http"}],
+                            "envFrom": [
+                                {"configMapRef": {"name": "auditlens-config"}},
+                                {"secretRef": {"name": "auditlens-secrets"}},
+                            ],
+                            "livenessProbe": {"httpGet": {"path": "/health", "port": "http"}, "initialDelaySeconds": 20, "periodSeconds": 10},
+                            "readinessProbe": {"httpGet": {"path": "/health", "port": "http"}, "initialDelaySeconds": 10, "periodSeconds": 5},
+                            "startupProbe": {"httpGet": {"path": "/health", "port": "http"}, "failureThreshold": 30, "periodSeconds": 5},
+                            "volumeMounts": [
+                                {"name": "auditlens-data", "mountPath": "/var/lib/auditlens"},
+                                {"name": "tmp", "mountPath": "/tmp"},
+                            ],
+                        }],
+                        "volumes": [
+                            {"name": "auditlens-data", "persistentVolumeClaim": {"claimName": "auditlens-data"}},
+                            {"name": "tmp", "emptyDir": {}},
+                        ],
+                    },
+                },
+            },
+        },
+        {
+            "apiVersion": "v1",
+            "kind": "Service",
+            "metadata": {"name": "auditlens-forwarder", "namespace": inputs.namespace},
+            "spec": {
+                "selector": {"app": "auditlens-forwarder"},
+                "ports": [{"port": inputs.metrics_port, "targetPort": inputs.metrics_port, "name": "http"}],
+            },
+        },
+        {
+            "apiVersion": "apps/v1",
+            "kind": "Deployment",
+            "metadata": {"name": "auditlens-dashboard", "namespace": inputs.namespace},
+            "spec": {
+                "replicas": 1,
+                "selector": {"matchLabels": {"app": "auditlens-dashboard"}},
+                "template": {
+                    "metadata": {"labels": {"app": "auditlens-dashboard"}},
+                    "spec": {
+                        "containers": [{
+                            "name": "dashboard",
+                            "image": inputs.dashboard_image,
+                            "imagePullPolicy": "IfNotPresent",
+                            "ports": [{"containerPort": 8501, "name": "http"}],
+                            "envFrom": [
+                                {"configMapRef": {"name": "auditlens-config"}},
+                                {"secretRef": {"name": "auditlens-secrets"}},
+                            ],
+                        }],
+                    },
+                },
+            },
+        },
+        {
+            "apiVersion": "v1",
+            "kind": "Service",
+            "metadata": {"name": "auditlens-dashboard", "namespace": inputs.namespace},
+            "spec": {
+                "selector": {"app": "auditlens-dashboard"},
+                "ports": [{"port": 8501, "targetPort": 8501, "name": "http"}],
+            },
+        },
+    ]
+    return _yaml_dump_all(docs)
+
+
+def wait_for_http_json(
+    url: str,
+    timeout_seconds: float = 60.0,
+    headers: dict[str, str] | None = None,
+) -> HealthCheckResult:
+    deadline = time.time() + timeout_seconds
+    last_error = "unknown error"
+    while time.time() < deadline:
+        try:
+            request = Request(url, headers=headers or {})
+            with urlopen(request, timeout=5.0) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+                return HealthCheckResult(status_code=response.status, payload=payload)
+        except HTTPError as exc:
+            last_error = _format_http_wait_error(exc)
+            if not _is_retryable_http_error(exc):
+                raise BootstrapError(f"Health endpoint returned non-retryable HTTP {exc.code} while waiting for {url}.") from exc
+        except TRANSIENT_HTTP_ERRORS as exc:
+            last_error = _format_http_wait_error(exc)
+        except json.JSONDecodeError as exc:
+            last_error = _format_http_wait_error(exc)
+        time.sleep(1.0)
+    raise BootstrapError(f"Timed out waiting for forwarder health endpoint on {url}. Last observed error: {last_error}")
+
+
+def wait_for_http_status(
+    url: str,
+    timeout_seconds: float = 60.0,
+) -> int:
+    deadline = time.time() + timeout_seconds
+    last_error = "unknown error"
+    while time.time() < deadline:
+        try:
+            request = Request(url)
+            with urlopen(request, timeout=5.0) as response:
+                return response.status
+        except HTTPError as exc:
+            last_error = _format_http_wait_error(exc)
+            if not _is_retryable_http_error(exc):
+                raise BootstrapError(f"Endpoint returned non-retryable HTTP {exc.code} while waiting for {url}.") from exc
+        except TRANSIENT_HTTP_ERRORS as exc:
+            last_error = _format_http_wait_error(exc)
+        time.sleep(1.0)
+    raise BootstrapError(f"Timed out waiting for {url}: {last_error}")
+
+
+TRANSIENT_HTTP_ERRORS = (
+    ConnectionResetError,
+    ConnectionRefusedError,
+    TimeoutError,
+    socket.timeout,
+    http.client.RemoteDisconnected,
+    URLError,
+    OSError,
+)
+
+
+def _is_retryable_http_error(exc: HTTPError) -> bool:
+    return exc.code in {408, 425, 429, 500, 502, 503, 504}
+
+
+def _format_http_wait_error(exc: BaseException) -> str:
+    if isinstance(exc, HTTPError):
+        return f"HTTP {exc.code}"
+    if isinstance(exc, URLError):
+        reason = exc.reason
+        if isinstance(reason, BaseException):
+            return f"{reason.__class__.__name__}: {reason}"
+        return str(reason)
+    message = str(exc).strip()
+    if not message:
+        return exc.__class__.__name__
+    return f"{exc.__class__.__name__}: {message}"

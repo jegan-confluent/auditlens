@@ -1,0 +1,33 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AuditLens Normalized Audit Event",
+  "type": "object",
+  "required": ["schema_version", "id", "time", "methodName"],
+  "properties": {
+    "schema_version": { "const": "audit.normalized.v1" },
+    "id": { "type": ["string", "null"] },
+    "time": { "type": ["string", "null"], "format": "date-time" },
+    "methodName": { "type": ["string", "null"] },
+    "serviceName": { "type": ["string", "null"], "description": "Observed from CloudEvent data.serviceName" },
+    "principal": { "type": ["string", "null"], "description": "Observed canonical principal value used for compatibility" },
+    "principal_raw": { "type": ["string", "null"], "description": "Observed principal before normalization" },
+    "principal_normalized": { "type": ["string", "null"], "description": "Derived principal with User: prefix removed for search/grouping" },
+    "principal_type": { "type": ["string", "null"], "description": "Derived principal type: user, service_account, unknown" },
+    "auth_mechanism": { "type": ["string", "null"], "description": "Observed authn mechanism from authenticationInfo.metadata.mechanism" },
+    "auth_identifier": { "type": ["string", "null"], "description": "Observed authn identifier from authenticationInfo.metadata.identifier" },
+    "email": { "type": ["string", "null"] },
+    "resourceName": { "type": ["string", "null"] },
+    "resourceType": { "type": ["string", "null"] },
+    "operation": { "type": ["string", "null"] },
+    "resultStatus": { "type": ["string", "null"] },
+    "result_message": { "type": ["string", "null"], "description": "Observed result.message from CloudEvent payload" },
+    "granted": { "type": ["boolean", "null"] },
+    "clientIp": { "type": ["string", "null"] },
+    "network_id": { "type": ["string", "null"], "description": "Observed requestMetadata.network_id" },
+    "cluster_id": { "type": ["string", "null"] },
+    "environment_id": { "type": ["string", "null"] },
+    "organization_id": { "type": ["string", "null"] },
+    "data_json": { "type": ["string", "null"], "description": "Observed raw CloudEvent data payload preserved as JSON; full CloudEvent is preserved in audit.raw.v1" }
+  },
+  "additionalProperties": true
+}

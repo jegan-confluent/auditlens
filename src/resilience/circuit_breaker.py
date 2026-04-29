@@ -11,7 +11,7 @@ import time
 from enum import Enum
 from typing import Callable, Any, Optional
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -130,7 +130,7 @@ class CircuitBreaker:
         """Record a successful call."""
         async with self._lock:
             self._stats.successful_calls += 1
-            self._stats.last_success_time = datetime.utcnow()
+            self._stats.last_success_time = datetime.now(timezone.utc)
 
             if self._state == CircuitState.HALF_OPEN:
                 self._stats.half_open_successes += 1
@@ -144,7 +144,7 @@ class CircuitBreaker:
         """Record a failed call."""
         async with self._lock:
             self._stats.failed_calls += 1
-            self._stats.last_failure_time = datetime.utcnow()
+            self._stats.last_failure_time = datetime.now(timezone.utc)
             self._stats.current_failures += 1
 
             # Track failure time for windowed counting

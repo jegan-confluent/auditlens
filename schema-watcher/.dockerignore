@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Data files (managed by volumes)
+schema_versions.json
+schema_snapshot_*.json
+
+# Documentation
+README.md
+
+# Git
+.git/
+.gitignore

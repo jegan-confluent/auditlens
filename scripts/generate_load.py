@@ -6,7 +6,7 @@ import os
 import random
 import sys
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from confluent_kafka import Producer
 
@@ -33,7 +33,7 @@ def generate_authentication_event(org_id: str, env_id: str, cluster_id: str) -> 
         "specversion": "1.0",
         "source": f"crn://confluent.cloud/organization={org_id}/environment={env_id}/kafka={cluster_id}",
         "type": "io.confluent.kafka.server/authentication",
-        "time": datetime.utcnow().isoformat() + "Z",
+        "time": datetime.now(timezone.utc).isoformat() + "Z",
         "subject": f"crn://confluent.cloud/organization={org_id}/environment={env_id}/kafka={cluster_id}",
         "datacontenttype": "application/json",
         "data": {
@@ -70,7 +70,7 @@ def generate_authorization_event(org_id: str, env_id: str, cluster_id: str) -> d
         "specversion": "1.0",
         "source": f"crn://confluent.cloud/organization={org_id}/environment={env_id}/kafka={cluster_id}",
         "type": "io.confluent.kafka.server/authorization",
-        "time": datetime.utcnow().isoformat() + "Z",
+        "time": datetime.now(timezone.utc).isoformat() + "Z",
         "data": {
             "authenticationInfo": {
                 "principal": random.choice(principals)
@@ -111,7 +111,7 @@ def generate_request_event(org_id: str) -> dict:
         "specversion": "1.0",
         "source": f"crn://confluent.cloud/organization={org_id}",
         "type": "io.confluent.cloud/request",
-        "time": datetime.utcnow().isoformat() + "Z",
+        "time": datetime.now(timezone.utc).isoformat() + "Z",
         "data": {
             "authenticationInfo": {
                 "principal": random.choice(principals)
@@ -132,7 +132,7 @@ def generate_access_transparency_event(org_id: str) -> dict:
         "specversion": "1.0",
         "source": f"crn://confluent.cloud/organization={org_id}",
         "type": "io.confluent.cloud/access-transparency",
-        "time": datetime.utcnow().isoformat() + "Z",
+        "time": datetime.now(timezone.utc).isoformat() + "Z",
         "data": {
             "authenticationInfo": {
                 "principal": "confluent-support@confluent.io"

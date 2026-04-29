@@ -93,19 +93,20 @@ class TestCalculateCriticality:
     """Tests for the calculate_criticality function."""
 
     def test_security_failure_is_critical(self):
-        """Test that security failures are classified as CRITICAL."""
+        """Test that authn/authz failures are signal-driven, not urgent per event."""
         event = {
-            'methodName': 'kafka.Produce',
+            'methodName': 'kafka.Authentication',
             'resultStatus': 'UNAUTHENTICATED',
             'principal': 'User:test',
         }
         result = calculate_criticality(event)
-        assert result.criticality == CriticalityLevel.CRITICAL
+        assert result.criticality == CriticalityLevel.LOW
         assert result.is_security_event is True
-        assert 'security failure' in result.reason.lower()
+        assert result.is_signal_candidate is True
+        assert result.signal_type == 'auth_failure'
 
     def test_permission_denied_non_auth_method_is_high(self):
-        """Test that permission denied on non-auth methods is HIGH."""
+        """Test that denied non-auth operations stay searchable without high urgency."""
         event = {
             'methodName': 'kafka.Fetch',
             'resultStatus': 'SUCCESS',
@@ -113,8 +114,9 @@ class TestCalculateCriticality:
             'principal': 'User:test',
         }
         result = calculate_criticality(event)
-        assert result.criticality == CriticalityLevel.HIGH
+        assert result.criticality == CriticalityLevel.LOW
         assert result.is_security_event is True
+        assert result.is_signal_candidate is True
 
     def test_delete_cluster_is_critical(self):
         """Test that DeleteKafkaCluster is CRITICAL."""
@@ -229,6 +231,29 @@ class TestCalculateCriticality:
         # Should match delete pattern -> HIGH
         assert result.criticality in [CriticalityLevel.HIGH, CriticalityLevel.CRITICAL]
 
+    def test_get_kafka_clusters_is_low(self):
+        """Observed high-volume admin reads like GetKafkaClusters should be LOW."""
+        event = {
+            'methodName': 'GetKafkaClusters',
+            'resultStatus': 'SUCCESS',
+            'principal': 'User:sa-observed',
+        }
+        result = calculate_criticality(event)
+        assert result.criticality == CriticalityLevel.LOW
+
+    def test_authorization_denied_is_signal_candidate(self):
+        """Routine authz denials should feed signals rather than per-event urgency."""
+        event = {
+            'methodName': 'mds.Authorize',
+            'resultStatus': 'SUCCESS',
+            'granted': False,
+            'principal': 'User:sa-observed',
+        }
+        result = calculate_criticality(event)
+        assert result.criticality == CriticalityLevel.LOW
+        assert result.is_signal_candidate is True
+        assert result.signal_type == 'authz_denial'
+
     def test_classification_result_fields(self):
         """Test that ClassificationResult has all expected fields."""
         event = {
@@ -304,7 +329,8 @@ class TestClassificationIntegration:
             'principal': sample_authorization_denied_event['data']['authenticationInfo']['principal'],
         }
         result = calculate_criticality(event)
-        assert result.criticality in [CriticalityLevel.CRITICAL, CriticalityLevel.HIGH]
+        assert result.criticality == CriticalityLevel.MEDIUM
+        assert result.is_signal_candidate is True
         assert result.is_security_event is True
 
     def test_normal_authorization_classification(self, sample_authorization_event):
@@ -364,8 +390,8 @@ class TestAuthorizationCheckMethods:
         assert result.criticality == CriticalityLevel.LOW
         assert 'Authorization check' in result.reason
 
-    def test_mds_authorize_with_granted_false_is_medium(self):
-        """Test that mds.Authorize with granted=False is MEDIUM (not CRITICAL)."""
+    def test_mds_authorize_with_granted_false_is_low_signal(self):
+        """Test that mds.Authorize with granted=False is LOW and signal-driven."""
         event = {
             'methodName': 'mds.Authorize',
             'resultStatus': 'SUCCESS',
@@ -373,10 +399,10 @@ class TestAuthorizationCheckMethods:
             'principal': 'User:test',
         }
         result = calculate_criticality(event)
-        assert result.criticality == CriticalityLevel.MEDIUM
+        assert result.criticality == CriticalityLevel.LOW
+        assert result.is_signal_candidate is True
         assert 'Authorization check denied' in result.reason
-        # Should NOT be marked as security event - routine denials are normal
-        assert result.is_security_event is False
+        assert result.is_security_event is True
 
     def test_flink_authorize_with_granted_true_is_low(self):
         """Test that flink.Authorize with granted=True is LOW."""
@@ -389,8 +415,8 @@ class TestAuthorizationCheckMethods:
         result = calculate_criticality(event)
         assert result.criticality == CriticalityLevel.LOW
 
-    def test_flink_authorize_with_granted_false_is_medium(self):
-        """Test that flink.Authorize with granted=False is MEDIUM."""
+    def test_flink_authorize_with_granted_false_is_low_signal(self):
+        """Test that flink.Authorize with granted=False is LOW and signal-driven."""
         event = {
             'methodName': 'flink.Authorize',
             'resultStatus': 'SUCCESS',
@@ -398,10 +424,10 @@ class TestAuthorizationCheckMethods:
             'principal': 'User:test',
         }
         result = calculate_criticality(event)
-        assert result.criticality == CriticalityLevel.MEDIUM
+        assert result.criticality == CriticalityLevel.LOW
 
-    def test_ksql_authorize_with_granted_false_is_medium(self):
-        """Test that ksql.Authorize with granted=False is MEDIUM."""
+    def test_ksql_authorize_with_granted_false_is_low_signal(self):
+        """Test that ksql.Authorize with granted=False is LOW and signal-driven."""
         event = {
             'methodName': 'ksql.Authorize',
             'resultStatus': 'SUCCESS',
@@ -409,10 +435,10 @@ class TestAuthorizationCheckMethods:
             'principal': 'User:test',
         }
         result = calculate_criticality(event)
-        assert result.criticality == CriticalityLevel.MEDIUM
+        assert result.criticality == CriticalityLevel.LOW
 
-    def test_schema_registry_authorize_with_granted_false_is_medium(self):
-        """Test that schema-registry.Authorize with granted=False is MEDIUM."""
+    def test_schema_registry_authorize_with_granted_false_is_low_signal(self):
+        """Test that schema-registry.Authorize with granted=False is LOW and signal-driven."""
         event = {
             'methodName': 'schema-registry.Authorize',
             'resultStatus': 'SUCCESS',
@@ -420,10 +446,10 @@ class TestAuthorizationCheckMethods:
             'principal': 'User:test',
         }
         result = calculate_criticality(event)
-        assert result.criticality == CriticalityLevel.MEDIUM
+        assert result.criticality == CriticalityLevel.LOW
 
-    def test_delete_cluster_with_granted_false_is_critical(self):
-        """Test that DeleteKafkaCluster with granted=False is CRITICAL."""
+    def test_delete_cluster_with_granted_false_is_high(self):
+        """Test that denied destructive actions stay HIGH, not automatically CRITICAL."""
         event = {
             'methodName': 'DeleteKafkaCluster',
             'resultStatus': 'SUCCESS',
@@ -431,11 +457,11 @@ class TestAuthorizationCheckMethods:
             'principal': 'User:admin',
         }
         result = calculate_criticality(event)
-        assert result.criticality == CriticalityLevel.CRITICAL
+        assert result.criticality == CriticalityLevel.HIGH
         assert result.is_security_event is True
 
-    def test_create_api_key_with_granted_false_is_critical(self):
-        """Test that CreateApiKey with granted=False is CRITICAL (high-priority denied)."""
+    def test_create_api_key_with_granted_false_is_high(self):
+        """Test that denied API key operations stay HIGH."""
         event = {
             'methodName': 'CreateApiKey',
             'resultStatus': 'SUCCESS',
@@ -443,7 +469,7 @@ class TestAuthorizationCheckMethods:
             'principal': 'User:admin',
         }
         result = calculate_criticality(event)
-        assert result.criticality == CriticalityLevel.CRITICAL
+        assert result.criticality == CriticalityLevel.HIGH
         assert result.is_security_event is True
 
 

@@ -15,7 +15,7 @@ import json
 import os
 import re
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Any
 
 from confluent_kafka import Consumer, KafkaError
@@ -59,7 +59,7 @@ def consume_audit_logs(bootstrap: str, api_key: str, api_secret: str,
     consumer.subscribe([topic])
 
     events = []
-    cutoff = datetime.utcnow() - timedelta(days=days)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
 
     print(f"Loading audit logs from last {days} days...")
 

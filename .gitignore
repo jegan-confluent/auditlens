@@ -6,6 +6,11 @@
 # ============================================================================
 .secrets
 .env
+install.local.yaml
+install.*.local.yaml
+*.install.local.yaml
+secrets/
+deploy/kubernetes/generated/
 *.pem
 *.key
 *.crt
@@ -116,6 +121,11 @@ tmp/
 temp/
 *.tmp
 
+# Frontend local build/dependency artifacts
+# ============================================================================
+frontend/.next/
+frontend/node_modules/
+
 # macOS
 # ============================================================================
 .DS_Store
@@ -139,4 +149,3 @@ temp/
 logs/tokens-*.jsonl
 logs/audit-*.jsonl
 .claude/CLAUDE.local.md
-

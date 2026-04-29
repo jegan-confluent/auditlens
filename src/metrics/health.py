@@ -7,12 +7,18 @@ import logging
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import Dict, Any, Optional, Callable, List
 
 logger = logging.getLogger(__name__)
+
+
+def _utc_iso(dt: Optional[datetime] = None) -> str:
+    """Return RFC3339 UTC timestamp without duplicating timezone suffixes."""
+    ts = dt or datetime.now(timezone.utc)
+    return ts.isoformat().replace("+00:00", "Z")
 
 
 class HealthStatus(str, Enum):
@@ -55,14 +61,14 @@ class HealthChecker:
         for name, check_func in self._checks.items():
             try:
                 result = check_func()
-                result.last_check = datetime.utcnow()
+                result.last_check = datetime.now(timezone.utc)
                 results[name] = result
             except Exception as e:
                 results[name] = ComponentHealth(
                     name=name,
                     status=HealthStatus.UNHEALTHY,
                     message=str(e),
-                    last_check=datetime.utcnow(),
+                    last_check=datetime.now(timezone.utc),
                 )
         self._last_results = results
         return results
@@ -88,12 +94,12 @@ class HealthChecker:
         return {
             "status": self.get_overall_status().value,
             "uptime_seconds": time.time() - self._start_time,
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "timestamp": _utc_iso(),
             "components": {
                 name: {
                     "status": comp.status.value,
                     "message": comp.message,
-                    "last_check": comp.last_check.isoformat() + "Z" if comp.last_check else None,
+                    "last_check": _utc_iso(comp.last_check) if comp.last_check else None,
                     "details": comp.details,
                 }
                 for name, comp in self._last_results.items()

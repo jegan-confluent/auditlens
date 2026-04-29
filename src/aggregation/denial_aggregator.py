@@ -1,9 +1,9 @@
 """
-Denial Aggregator for Confluent Audit Log Intelligence System.
+Denial Aggregator for AuditLens foundation.
 
 Aggregates high-volume authorization denials into actionable alerts.
 Instead of routing every mds.Authorize (granted=False) individually,
-this aggregates them per principal per minute into summary alerts.
+this aggregates them per principal, method, and resource per time window.
 
 This reduces ~86% of MEDIUM topic noise while preserving security signals.
 """
@@ -16,8 +16,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Dict, Any, List, Optional, Set, Callable, TYPE_CHECKING
-from collections import defaultdict
+from typing import Dict, Any, List, Optional, Set, Callable, TYPE_CHECKING, Tuple
 
 from confluent_kafka import Producer
 
@@ -39,8 +38,11 @@ class AggregatorConfig:
     # Threshold for elevating to HIGH criticality
     high_threshold: int = 10
 
-    # Topic for aggregated alerts
-    alerts_topic: str = "audit_events_alerts"
+    # Topic for denial summaries
+    signals_topic: str = "audit.signals.denials.v1"
+
+    # Topic for operator alert records
+    alerts_topic: str = "audit.alerts.v1"
 
     # Maximum events to sample per bucket (for drill-down)
     max_sample_events: int = 5
@@ -60,7 +62,8 @@ class AggregatorConfig:
         return cls(
             window_seconds=int(os.getenv('DENIAL_AGGREGATOR_WINDOW', '60')),
             high_threshold=int(os.getenv('DENIAL_AGGREGATOR_THRESHOLD', '10')),
-            alerts_topic=os.getenv('AUDIT_TOPIC_ALERTS', 'audit_events_alerts'),
+            signals_topic=os.getenv('AUDIT_SIGNALS_DENIALS_TOPIC', 'audit.signals.denials.v1'),
+            alerts_topic=os.getenv('AUDIT_ALERTS_TOPIC', 'audit.alerts.v1'),
             max_sample_events=int(os.getenv('DENIAL_AGGREGATOR_MAX_SAMPLES', '5')),
             max_unique_values=int(os.getenv('DENIAL_AGGREGATOR_MAX_UNIQUE', '20')),
             enabled=os.getenv('ENABLE_DENIAL_AGGREGATION', 'true').lower() == 'true',
@@ -70,9 +73,13 @@ class AggregatorConfig:
 
 @dataclass
 class DenialBucket:
-    """Bucket for accumulating denials for a single principal."""
+    """Bucket for accumulating denials for a principal-method-resource tuple."""
 
-    principal: str
+    principal_raw: str
+    principal_normalized: str
+    principal_type: str
+    primary_method: str
+    primary_resource: str
     window_start: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     denial_count: int = 0
     operations: Set[str] = field(default_factory=set)
@@ -161,6 +168,10 @@ class AggregatedDenialAlert:
     window_start: str = ""
     window_end: str = ""
     principal: str = ""
+    principal_raw: Optional[str] = None
+    principal_normalized: Optional[str] = None
+    principal_type: str = "unknown"
+    resource_name: Optional[str] = None
     principal_email: Optional[str] = None
     denial_count: int = 0
     unique_operations: List[str] = field(default_factory=list)
@@ -191,7 +202,11 @@ class AggregatedDenialAlert:
             'window_start': self.window_start,
             'window_end': self.window_end,
             'principal': self.principal,
+            'principal_raw': self.principal_raw or self.principal,
+            'principal_normalized': self.principal_normalized,
+            'principal_type': self.principal_type,
             'email': self.principal_email,
+            'resource_name': self.resource_name,
             'denial_count': self.denial_count,
             'unique_operations': self.unique_operations,
             'unique_resource_types': self.unique_resource_types,
@@ -251,8 +266,8 @@ class DenialAggregator:
         self.on_flush = on_flush
         self.webhook_sender = webhook_sender
 
-        # Buckets: principal -> DenialBucket
-        self._buckets: Dict[str, DenialBucket] = {}
+        # Buckets: (principal, method, resource) -> DenialBucket
+        self._buckets: Dict[Tuple[str, str, str], DenialBucket] = {}
         self._lock = threading.Lock()
 
         # Statistics
@@ -273,7 +288,8 @@ class DenialAggregator:
             self._start_timer()
             logger.info(
                 f"DenialAggregator initialized: window={self.config.window_seconds}s, "
-                f"threshold={self.config.high_threshold}, topic={self.config.alerts_topic}, "
+                f"threshold={self.config.high_threshold}, signals_topic={self.config.signals_topic}, "
+                f"alerts_topic={self.config.alerts_topic}, "
                 f"dry_run={self.config.dry_run}"
             )
         else:
@@ -342,14 +358,24 @@ class DenialAggregator:
         if not self.config.enabled:
             return False
 
-        principal = event.get('principal') or event.get('principalResourceId') or 'unknown'
+        principal_raw = event.get('principal_raw') or event.get('principal') or event.get('principalResourceId') or 'unknown'
+        principal_normalized = event.get('principal_normalized') or principal_raw
+        principal_type = event.get('principal_type') or 'unknown'
+        method_name = event.get('methodName') or 'unknown'
+        resource_name = event.get('authzResourceName') or event.get('resourceName') or 'unknown'
+        bucket_key = (principal_normalized, method_name, resource_name)
 
         with self._lock:
-            # Get or create bucket for this principal
-            if principal not in self._buckets:
-                self._buckets[principal] = DenialBucket(principal=principal)
+            if bucket_key not in self._buckets:
+                self._buckets[bucket_key] = DenialBucket(
+                    principal_raw=principal_raw,
+                    principal_normalized=principal_normalized,
+                    principal_type=principal_type,
+                    primary_method=method_name,
+                    primary_resource=resource_name,
+                )
 
-            bucket = self._buckets[principal]
+            bucket = self._buckets[bucket_key]
             bucket.add_denial(
                 event,
                 max_samples=self.config.max_sample_events,
@@ -376,7 +402,7 @@ class DenialAggregator:
         high_count = 0
         medium_count = 0
 
-        for principal, bucket in buckets_to_flush:
+        for _, bucket in buckets_to_flush:
             if bucket.denial_count == 0:
                 continue  # Skip empty buckets
 
@@ -411,10 +437,15 @@ class DenialAggregator:
 
         return AggregatedDenialAlert(
             id=str(uuid.uuid4()),
+            method_name=bucket.primary_method,
             criticality=criticality,
             window_start=bucket.window_start.isoformat(),
             window_end=window_end.isoformat(),
-            principal=bucket.principal,
+            principal=bucket.principal_raw,
+            principal_raw=bucket.principal_raw,
+            principal_normalized=bucket.principal_normalized,
+            principal_type=bucket.principal_type,
+            resource_name=bucket.primary_resource,
             principal_email=bucket.principal_email,
             denial_count=bucket.denial_count,
             unique_operations=list(bucket.operations),
@@ -435,6 +466,7 @@ class DenialAggregator:
         if self.config.dry_run:
             logger.info(
                 f"[DRY-RUN] Would produce alert: principal={alert.principal}, "
+                f"method={alert.method_name}, resource={alert.resource_name}, "
                 f"count={alert.denial_count}, criticality={alert.criticality}, "
                 f"operations={alert.unique_operations[:3]}"
             )
@@ -446,13 +478,22 @@ class DenialAggregator:
             return
 
         try:
+            payload = json.dumps(alert.to_dict()).encode('utf-8')
             self.producer.produce(
-                topic=self.config.alerts_topic,
-                key=alert.principal.encode('utf-8'),
-                value=json.dumps(alert.to_dict()).encode('utf-8'),
+                topic=self.config.signals_topic,
+                key=f"{alert.principal_normalized}:{alert.method_name}:{alert.resource_name}".encode('utf-8'),
+                value=payload,
                 callback=self._delivery_callback,
             )
             self._stats['alerts_produced'] += 1
+
+            if alert.threshold_exceeded:
+                self.producer.produce(
+                    topic=self.config.alerts_topic,
+                    key=f"{alert.principal_normalized}:{alert.method_name}:{alert.resource_name}".encode('utf-8'),
+                    value=payload,
+                    callback=self._delivery_callback,
+                )
 
             # Call optional callback
             if self.on_flush:
@@ -473,10 +514,11 @@ class DenialAggregator:
             self.producer.poll(1)
             # Retry once
             try:
+                payload = json.dumps(alert.to_dict()).encode('utf-8')
                 self.producer.produce(
-                    topic=self.config.alerts_topic,
-                    key=alert.principal.encode('utf-8'),
-                    value=json.dumps(alert.to_dict()).encode('utf-8'),
+                    topic=self.config.signals_topic,
+                    key=f"{alert.principal_normalized}:{alert.method_name}:{alert.resource_name}".encode('utf-8'),
+                    value=payload,
                     callback=self._delivery_callback,
                 )
                 self._stats['alerts_produced'] += 1
@@ -534,6 +576,7 @@ class DenialAggregator:
             stats['config'] = {
                 'window_seconds': self.config.window_seconds,
                 'high_threshold': self.config.high_threshold,
+                'signals_topic': self.config.signals_topic,
                 'alerts_topic': self.config.alerts_topic,
                 'enabled': self.config.enabled,
                 'dry_run': self.config.dry_run,

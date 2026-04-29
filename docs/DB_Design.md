@@ -1,0 +1,48 @@
+# AuditLens DB Design
+
+The product database stores normalized audit events in `audit_events`.
+
+## Table
+
+Key columns:
+
+- `id`: database primary key.
+- `event_fingerprint`: stable deduplication key with a unique constraint.
+- `timestamp`: event time used for ordering, filtering, retention, and health checks.
+- `actor`, `result`, `action_category`, `resource_type`, `resource_name`: common filter dimensions.
+- `summary`: readable normalized event text.
+- `raw_payload_json`: raw audit evidence, returned only from `/events/{event_id}`.
+
+## Indexes
+
+The schema includes:
+
+- `timestamp DESC`
+- `resource_type, resource_name, timestamp DESC`
+- `action_category, timestamp DESC`
+- `actor, timestamp DESC`
+- `result, timestamp DESC`
+- Supporting single-column indexes for common filters and `event_fingerprint`.
+
+## Retention
+
+`EVENT_RETENTION_DAYS` controls API-side retention cleanup and defaults to 7 days for local/demo mode. Cleanup is available at:
+
+```bash
+curl -X POST "http://localhost:8080/admin/retention/cleanup?dry_run=true"
+curl -X POST "http://localhost:8080/admin/retention/cleanup?dry_run=false"
+```
+
+The cleanup function logs `dry_run`, retention window, cutoff, and deleted count. Use dry-run before deleting production data.
+
+## Health
+
+DB health reports:
+
+- mode: `sqlite` or `postgres`
+- connectivity and simple query status
+- event count
+- oldest event
+- newest event
+- storage estimate where possible
+

@@ -5,10 +5,32 @@ Tracks critical events, severity levels, operation types, and anomalies
 for dashboard visibility and alerting.
 """
 
+import re
 import time
 import threading
 from typing import Dict, Any, Optional, List
-from collections import defaultdict
+from cachetools import LRUCache
+
+
+def sanitize_label(value: str, max_length: int = 128) -> str:
+    """
+    Sanitize value for use as Prometheus label.
+
+    Removes injection characters that could break Prometheus format:
+    - Curly braces {} (label delimiter)
+    - Double quotes " (value delimiter)
+    - Newlines and backslashes
+
+    Args:
+        value: The raw value to sanitize
+        max_length: Maximum length of the output
+
+    Returns:
+        Sanitized string safe for use as label value
+    """
+    if not value:
+        return "unknown"
+    return re.sub(r'[{}"\n\\]', '_', str(value))[:max_length]
 
 
 class AuditEventMetrics:
@@ -36,12 +58,12 @@ class AuditEventMetrics:
         self._cluster_total = 0
         # Anomaly counters
         self._anomalies_total = 0
-        self._anomalies_by_type: Dict[str, int] = defaultdict(int)
+        self._anomalies_by_type: Dict[str, int] = {}
         # Routing counters
-        self._routed_by_topic: Dict[str, int] = defaultdict(int)
+        self._routed_by_topic: Dict[str, int] = {}
         self._routing_dry_run_total = 0
-        # Per-principal activity (for anomaly context)
-        self._events_by_principal: Dict[str, int] = defaultdict(int)
+        # Per-principal activity (for anomaly context) - bounded to prevent memory leaks
+        self._events_by_principal: LRUCache = LRUCache(maxsize=10000)
         # Recent critical events (last 100 for context)
         self._recent_critical_events: List[Dict[str, Any]] = []
         self._max_recent_events = 100
@@ -92,21 +114,24 @@ class AuditEventMetrics:
             if 'Cluster' in method:
                 self._cluster_total += 1
 
-            # Track per-principal activity
+            # Track per-principal activity (bounded LRUCache prevents memory leaks)
             principal = event.get('principal')
             if principal:
-                self._events_by_principal[str(principal)[:100]] += 1
+                key = sanitize_label(str(principal), 100)
+                self._events_by_principal[key] = self._events_by_principal.get(key, 0) + 1
 
     def record_anomaly(self, anomaly_type: str, details: Optional[Dict[str, Any]] = None) -> None:
         """Record an anomaly detection event."""
         with self._lock:
             self._anomalies_total += 1
-            self._anomalies_by_type[anomaly_type] += 1
+            key = sanitize_label(anomaly_type)
+            self._anomalies_by_type[key] = self._anomalies_by_type.get(key, 0) + 1
 
     def record_routing(self, topic: str, dry_run: bool = False) -> None:
         """Record a routing event."""
         with self._lock:
-            self._routed_by_topic[topic] += 1
+            key = sanitize_label(topic)
+            self._routed_by_topic[key] = self._routed_by_topic.get(key, 0) + 1
             if dry_run:
                 self._routing_dry_run_total += 1
 
@@ -123,7 +148,7 @@ class AuditEventMetrics:
             lines.append("# HELP audit_events_by_severity Audit events by severity level")
             lines.append("# TYPE audit_events_by_severity counter")
             for severity, count in self._by_severity.items():
-                lines.append(f'audit_events_by_severity{{severity="{severity}"}} {count}')
+                lines.append(f'audit_events_by_severity{{severity="{sanitize_label(severity)}"}} {count}')
 
             # Total by severity for convenience
             lines.append("# HELP audit_events_critical_total Critical severity events")
@@ -185,13 +210,15 @@ class AuditEventMetrics:
             lines.append("# HELP audit_anomalies_by_type Anomalies by type")
             lines.append("# TYPE audit_anomalies_by_type counter")
             for anomaly_type, count in self._anomalies_by_type.items():
-                lines.append(f'audit_anomalies_by_type{{type="{anomaly_type}"}} {count}')
+                # anomaly_type already sanitized on record
+                lines.append(f'audit_anomalies_by_type{{type="{sanitize_label(anomaly_type)}"}} {count}')
 
             # Routing metrics
             lines.append("# HELP audit_routed_by_topic Events routed to each topic")
             lines.append("# TYPE audit_routed_by_topic counter")
             for topic, count in self._routed_by_topic.items():
-                lines.append(f'audit_routed_by_topic{{topic="{topic}"}} {count}')
+                # topic already sanitized on record
+                lines.append(f'audit_routed_by_topic{{topic="{sanitize_label(topic)}"}} {count}')
 
             lines.append("# HELP audit_routing_dry_run_total Events processed in dry-run mode")
             lines.append("# TYPE audit_routing_dry_run_total counter")

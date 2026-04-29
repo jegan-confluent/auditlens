@@ -1,31 +1,63 @@
 services:
-  audit-forwarder:
+  auditlens-forwarder:
     build:
       context: .
       dockerfile: Dockerfile
       args:
         BUILDKIT_INLINE_CACHE: 1
-    image: audit-forwarder:v3.0.0
-    container_name: audit-forwarder
-    restart: unless-stopped
+    image: auditlens-forwarder:v1.0.0
+    container_name: auditlens-forwarder
+    restart: on-failure:3
     env_file:
       - .env
       - .secrets
     environment:
-      # Only override defaults here, all other vars come from env_file
-      - DEST_TOPIC=${DEST_TOPIC:-audit_events_flattened}
+      # Canonical foundation contract
       - AUDIT_TOPIC=${AUDIT_TOPIC:-confluent-audit-log-events}
-      - GROUP_ID=${GROUP_ID:-audit-fwd-v3-feb}
-      # NOTE: Offsets are now managed by Kafka consumer groups (no OFFSET_FILE)
-      - METRICS_PORT=8003
-      - ENABLE_MULTI_TOPIC_ROUTING=${ENABLE_MULTI_TOPIC_ROUTING:-true}
-      - DROP_LOW_EVENTS=${DROP_LOW_EVENTS:-true}
+      - GROUP_ID=${GROUP_ID:-auditlens-forwarder-v1}
+      - AUTO_OFFSET_RESET=${AUTO_OFFSET_RESET:-latest}
+      - METRICS_PORT=${METRICS_PORT:-8003}
+      - AUDIT_RAW_TOPIC=${AUDIT_RAW_TOPIC:-audit.raw.v1}
+      - AUDIT_NORMALIZED_TOPIC=${AUDIT_NORMALIZED_TOPIC:-audit.normalized.v1}
+      - AUDIT_ENRICHED_TOPIC=${AUDIT_ENRICHED_TOPIC:-audit.enriched.v1}
+      - AUDIT_SIGNALS_DENIALS_TOPIC=${AUDIT_SIGNALS_DENIALS_TOPIC:-audit.signals.denials.v1}
+      - AUDIT_SIGNALS_HIGHRISK_TOPIC=${AUDIT_SIGNALS_HIGHRISK_TOPIC:-audit.signals.highrisk.v1}
+      - AUDIT_ALERTS_TOPIC=${AUDIT_ALERTS_TOPIC:-audit.alerts.v1}
+      - DLQ_TOPIC=${DLQ_TOPIC:-audit.dlq.v1}
+      - ALERT_ON_HIGH_RISK=${ALERT_ON_HIGH_RISK:-true}
+      - PERSISTENCE_ENABLED=${PERSISTENCE_ENABLED:-true}
+      - PERSISTENCE_BACKEND=${PERSISTENCE_BACKEND:-sqlite}
+      - PERSISTENCE_DB_PATH=${FORWARDER_PERSISTENCE_DB_PATH:-/app/data/auditlens.db}
+      - PERSISTENCE_DB_MAX_BYTES=${PERSISTENCE_DB_MAX_BYTES:-1073741824}
+      - PERSISTENCE_WAL_MAX_BYTES=${PERSISTENCE_WAL_MAX_BYTES:-134217728}
+      - PERSISTENCE_ENRICHED_RETENTION_DAYS=${PERSISTENCE_ENRICHED_RETENTION_DAYS:-3}
+      - PERSISTENCE_SIGNALS_RETENTION_DAYS=${PERSISTENCE_SIGNALS_RETENTION_DAYS:-7}
+      - PERSISTENCE_ALERTS_RETENTION_DAYS=${PERSISTENCE_ALERTS_RETENTION_DAYS:-14}
+      - PERSISTENCE_AUDIT_RETENTION_DAYS=${PERSISTENCE_AUDIT_RETENTION_DAYS:-14}
+      - KAFKA_CONSUME_BATCH_SIZE=${KAFKA_CONSUME_BATCH_SIZE:-100}
+      - CONSUMER_POLL_TIMEOUT_SECONDS=${CONSUMER_POLL_TIMEOUT_SECONDS:-2.0}
+      - CONSUMER_EMPTY_POLL_SLEEP_SECONDS=${CONSUMER_EMPTY_POLL_SLEEP_SECONDS:-0.25}
+      - CONSUMER_BATCH_SLEEP_SECONDS=${CONSUMER_BATCH_SLEEP_SECONDS:-0.25}
+      - KAFKA_RETRY_INITIAL_BACKOFF_SECONDS=${KAFKA_RETRY_INITIAL_BACKOFF_SECONDS:-1.0}
+      - KAFKA_RETRY_MAX_BACKOFF_SECONDS=${KAFKA_RETRY_MAX_BACKOFF_SECONDS:-60.0}
+      - KAFKA_QUEUED_MAX_MESSAGES_KBYTES=${KAFKA_QUEUED_MAX_MESSAGES_KBYTES:-65536}
+      - KAFKA_PRODUCER_QUEUE_MAX_KBYTES=${KAFKA_PRODUCER_QUEUE_MAX_KBYTES:-65536}
+      - ENABLE_DB_WRITER=${ENABLE_DB_WRITER:-true}
+      - DATABASE_URL=${FORWARDER_DATABASE_URL:-sqlite:////app/data/auditlens_api.db}
+      - DB_WRITE_BATCH_SIZE=${DB_WRITE_BATCH_SIZE:-100}
+      - DB_WRITE_BACKOFF_MAX_SECONDS=${DB_WRITE_BACKOFF_MAX_SECONDS:-60}
+      - API_AUTH_ENABLED=${API_AUTH_ENABLED:-false}
+      - API_AUTH_TOKEN_FILE=${API_AUTH_TOKEN_FILE:-/run/secrets/auditlens-api-tokens.json}
+      - API_MAX_SEARCH_RESULTS=${API_MAX_SEARCH_RESULTS:-500}
+      - API_EXPORT_MAX_ROWS=${API_EXPORT_MAX_ROWS:-5000}
+      - API_EXPORT_MAX_HOURS=${API_EXPORT_MAX_HOURS:-168}
     volumes:
-      # NOTE: ./data volume removed - forwarder is now stateless
       - ./audit_forwarder.py:/app/audit_forwarder.py:ro
       - ./src:/app/src:ro
+      - auditlens_data:/app/data
+      - ./secrets:/run/secrets:ro
     ports:
-      - "8003:8003"
+      - "127.0.0.1:${METRICS_PORT:-8003}:${METRICS_PORT:-8003}"
     # Use default Docker DNS instead of hardcoded Google DNS
     # dns:
     #   - 8.8.8.8
@@ -33,14 +65,14 @@ services:
     logging:
       driver: "json-file"
       options:
-        max-size: "50m"
-        max-file: "10"
+        max-size: "10m"
+        max-file: "3"
         compress: "true"
     networks:
       - kafka-network  # Kafka communication
       - monitoring  # Metrics collection
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8003/health"]
+      test: ["CMD-SHELL", "curl -f http://localhost:$${METRICS_PORT:-8003}/health || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -49,11 +81,13 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '4.0'
-          memory: 4G
+          cpus: '0.25'
+          memory: 384M
         reservations:
-          cpus: '1.0'
-          memory: 1G
+          cpus: '0.10'
+          memory: 128M
+    cpus: "0.25"
+    mem_limit: 384m
     # Security options
     security_opt:
       - no-new-privileges:true
@@ -79,23 +113,31 @@ services:
       # Confluent Cloud API credentials for ACL & Identity lookups
       - CONFLUENT_CLOUD_API_KEY=${CONFLUENT_CLOUD_API_KEY:-}
       - CONFLUENT_CLOUD_API_SECRET=${CONFLUENT_CLOUD_API_SECRET:-}
+      - DASHBOARD_SOURCE_TOPIC=${DASHBOARD_SOURCE_TOPIC:-audit.enriched.v1}
+      - DASHBOARD_DENIALS_TOPIC=${DASHBOARD_DENIALS_TOPIC:-audit.signals.denials.v1}
+      - DASHBOARD_ALERTS_TOPIC=${DASHBOARD_ALERTS_TOPIC:-audit.alerts.v1}
+      - DASHBOARD_FORWARDER_URL=${DASHBOARD_FORWARDER_URL:-http://auditlens-forwarder:${METRICS_PORT:-8003}}
+      - DASHBOARD_GRAFANA_URL=${DASHBOARD_GRAFANA_URL:-http://grafana:3000}
+      - DASHBOARD_PROMETHEUS_URL=${DASHBOARD_PROMETHEUS_URL:-http://prometheus:9090}
     volumes:
       - ./dashboard:/app:rw
     ports:
-      - "8503:8501"
+      - "127.0.0.1:${DASHBOARD_PORT:-8503}:8501"
     networks:
       - kafka-network  # Access to Kafka data
       - frontend-network  # User interface access
     depends_on:
-      - audit-forwarder
+      - auditlens-forwarder
     deploy:
       resources:
         limits:
-          cpus: '1.0'
-          memory: 512M
+          cpus: '0.75'
+          memory: 384M
         reservations:
-          cpus: '0.25'
+          cpus: '0.10'
           memory: 256M
+    cpus: "0.75"
+    mem_limit: 384m
     security_opt:
       - no-new-privileges:true
     read_only: false
@@ -104,35 +146,155 @@ services:
     cap_drop:
       - ALL
 
+  api:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    image: auditlens-api:v0.1.0
+    container_name: auditlens-api
+    restart: unless-stopped
+    user: "1000:1000"
+    environment:
+      - DATABASE_URL=${DATABASE_URL:-sqlite:////var/lib/auditlens/auditlens_api.db}
+      - FORWARDER_HEALTH_URL=${FORWARDER_HEALTH_URL:-http://auditlens-forwarder:${METRICS_PORT:-8003}/health}
+      - EVENT_RETENTION_DAYS=${EVENT_RETENTION_DAYS:-7}
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
+    volumes:
+      - auditlens_data:/var/lib/auditlens
+    ports:
+      - "127.0.0.1:${BACKEND_PORT:-8080}:8080"
+    networks:
+      - kafka-network
+      - frontend-network
+    depends_on:
+      - auditlens-forwarder
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8080/health', timeout=2).read()\" || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 384M
+        reservations:
+          cpus: '0.10'
+          memory: 128M
+    cpus: "0.50"
+    mem_limit: 384m
+    security_opt:
+      - no-new-privileges:true
+    read_only: false
+    tmpfs:
+      - /tmp:mode=1777,size=100M
+    cap_drop:
+      - ALL
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    image: auditlens-frontend:v0.1.0
+    container_name: auditlens-frontend
+    restart: unless-stopped
+    environment:
+      - NEXT_PUBLIC_API_BASE_URL=${NEXT_PUBLIC_API_BASE_URL:-http://localhost:${BACKEND_PORT:-8080}}
+    ports:
+      - "127.0.0.1:${FRONTEND_PORT:-3000}:3000"
+    networks:
+      - frontend-network
+    depends_on:
+      - api
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://localhost:3000/dashboard').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 384M
+        reservations:
+          cpus: '0.10'
+          memory: 128M
+    cpus: "0.50"
+    mem_limit: 384m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+  postgres:
+    profiles: ["postgres", "dev"]
+    image: postgres:16-alpine
+    container_name: auditlens-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB:-auditlens}
+      - POSTGRES_USER=${POSTGRES_USER:-auditlens}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-auditlens}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    networks:
+      - kafka-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-auditlens} -d $${POSTGRES_DB:-auditlens}"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: '0.75'
+          memory: 768M
+        reservations:
+          cpus: '0.10'
+          memory: 256M
+    cpus: "0.75"
+    mem_limit: 768m
+    security_opt:
+      - no-new-privileges:true
+
   prometheus:
+    profiles: ["observability", "dev"]
     image: prom/prometheus:v2.54.1
     container_name: audit-prometheus
     restart: unless-stopped
     user: "65534:65534"  # nobody user
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/alerts:/etc/prometheus/alerts:ro
       - prometheus_data:/prometheus
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.path=/prometheus'
-      - '--storage.tsdb.retention.time=30d'
-      - '--storage.tsdb.retention.size=10GB'
+      - '--storage.tsdb.retention.time=${PROMETHEUS_RETENTION_TIME:-7d}'
+      - '--storage.tsdb.retention.size=${PROMETHEUS_RETENTION_SIZE:-1GB}'
       - '--web.console.libraries=/etc/prometheus/console_libraries'
       - '--web.console.templates=/etc/prometheus/consoles'
       - '--web.enable-lifecycle'
-      - '--web.enable-admin-api'
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     networks:
       - monitoring  # Monitoring infrastructure
+      - frontend-network  # User-facing local Prometheus access
     deploy:
       resources:
         limits:
-          cpus: '1.0'
-          memory: 1G
+          cpus: '0.75'
+          memory: 768M
         reservations:
           cpus: '0.25'
           memory: 256M
+    cpus: "0.75"
+    mem_limit: 768m
     security_opt:
       - no-new-privileges:true
     read_only: true
@@ -142,19 +304,26 @@ services:
       - ALL
 
   grafana:
+    profiles: ["observability", "dev"]
     image: grafana/grafana:11.3.1
     container_name: audit-grafana
     restart: unless-stopped
     user: "472:472"  # grafana user
+    env_file:
+      - .secrets
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        test -n "$$GF_SECURITY_ADMIN_PASSWORD" || { echo "GF_SECURITY_ADMIN_PASSWORD must be set" >&2; exit 1; }
+        test "$$GF_SECURITY_ADMIN_PASSWORD" != "admin" || { echo "GF_SECURITY_ADMIN_PASSWORD must not use the default admin value" >&2; exit 1; }
+        exec /run.sh
     volumes:
       - grafana_data:/var/lib/grafana
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
       - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
     environment:
       - GF_SECURITY_ADMIN_USER=${GF_ADMIN_USER:-admin}
-      # SECURITY: Password must be set via GF_ADMIN_PASSWORD environment variable
-      # Add to .env or .secrets: GF_ADMIN_PASSWORD=your-secure-password
-      - GF_SECURITY_ADMIN_PASSWORD=${GF_ADMIN_PASSWORD:?GF_ADMIN_PASSWORD must be set}
       - GF_USERS_ALLOW_SIGN_UP=false
       - GF_SERVER_ROOT_URL=http://localhost:3000
       - GF_ANALYTICS_REPORTING_ENABLED=false
@@ -163,7 +332,7 @@ services:
       - GF_SNAPSHOTS_EXTERNAL_ENABLED=false
       - GF_AUTH_ANONYMOUS_ENABLED=false
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     networks:
       - monitoring  # Access to Prometheus metrics
       - frontend-network  # User interface access
@@ -172,11 +341,13 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '1.0'
+          cpus: '0.50'
           memory: 512M
         reservations:
           cpus: '0.25'
           memory: 128M
+    cpus: "0.50"
+    mem_limit: 512m
     security_opt:
       - no-new-privileges:true
     read_only: false  # Grafana needs write access for plugins and DB
@@ -186,12 +357,47 @@ services:
       - ALL
     cap_add:
       - NET_BIND_SERVICE
+
+  landing:
+    profiles: ["dev"]
+    image: python:3.11-slim
+    container_name: auditlens-landing
+    restart: unless-stopped
+    env_file:
+      - .env
+    command: ["python", "/app/scripts/landing_page.py"]
+    environment:
+      - LANDING_PORT=${LANDING_PORT:-8088}
+      - DASHBOARD_PORT=${DASHBOARD_PORT:-8503}
+      - METRICS_PORT=${METRICS_PORT:-8003}
+    volumes:
+      - ./scripts/landing_page.py:/app/scripts/landing_page.py:ro
+    ports:
+      - "127.0.0.1:${LANDING_PORT:-8088}:${LANDING_PORT:-8088}"
+    networks:
+      - kafka-network
+      - monitoring
+      - frontend-network
+    depends_on:
+      - auditlens-forwarder
+      - dashboard
+      - grafana
+      - prometheus
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777,size=32M
+    cap_drop:
+      - ALL
+
   loki:
+    profiles: ["observability", "dev"]
     image: grafana/loki:3.2.1
     container_name: loki
     user: "10001:10001"  # loki user
     ports:
-      - "3100:3100"
+      - "127.0.0.1:3100:3100"
     command: -config.file=/etc/loki/local-config.yaml
     volumes:
       - loki_data:/loki
@@ -202,11 +408,13 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '1.0'
+          cpus: '0.50'
           memory: 512M
         reservations:
           cpus: '0.25'
           memory: 128M
+    cpus: "0.50"
+    mem_limit: 512m
     security_opt:
       - no-new-privileges:true
     read_only: false  # Loki needs write access for data
@@ -218,6 +426,7 @@ services:
       - NET_BIND_SERVICE
 
   promtail:
+    profiles: ["observability", "dev"]
     image: grafana/promtail:3.2.1
     container_name: promtail
     # SECURITY: Using non-root user (10001) instead of root for file-based log collection
@@ -237,14 +446,128 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '0.5'
+          cpus: '0.25'
           memory: 256M
         reservations:
           cpus: '0.1'
           memory: 64M
+    cpus: "0.25"
+    mem_limit: 256m
     security_opt:
       - no-new-privileges:true
     read_only: true
+    tmpfs:
+      - /tmp:mode=1777,size=50M
+    cap_drop:
+      - ALL
+
+  mcp-server:
+    profiles: ["future"]
+    build:
+      context: .
+      dockerfile: src/mcp/Dockerfile
+      args:
+        BUILDKIT_INLINE_CACHE: 1
+    image: audit-mcp-server:v1.0.0
+    container_name: audit-mcp-server
+    restart: unless-stopped
+    env_file:
+      - .env
+      - .secrets
+    environment:
+      # MCP server configuration
+      - MCP_PORT=${MCP_PORT:-8080}
+      - MCP_HOST=0.0.0.0
+      - MCP_AUTH_TOKEN=${MCP_AUTH_TOKEN:-}
+      # Kafka topics to query
+      - AUDIT_ENRICHED_TOPIC=${AUDIT_ENRICHED_TOPIC:-audit.enriched.v1}
+      - AUDIT_ALERTS_TOPIC=${AUDIT_ALERTS_TOPIC:-audit.alerts.v1}
+      # Kafka connection (inherited from .env)
+      - DEST_BOOTSTRAP=${DEST_BOOTSTRAP:-}
+      - DEST_API_KEY=${DEST_API_KEY:-}
+      - DEST_API_SECRET=${DEST_API_SECRET:-}
+      - SECURITY_PROTOCOL=${SECURITY_PROTOCOL:-SASL_SSL}
+      - SASL_MECHANISM=${SASL_MECHANISM:-PLAIN}
+      # Cloud storage credentials (for export functionality)
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-1}
+      - GCS_PROJECT_ID=${GCS_PROJECT_ID:-}
+      - GOOGLE_APPLICATION_CREDENTIALS=${GOOGLE_APPLICATION_CREDENTIALS:-}
+      # Confluent Cloud API (for identity enrichment)
+      - CONFLUENT_CLOUD_API_KEY=${CONFLUENT_CLOUD_API_KEY:-}
+      - CONFLUENT_CLOUD_API_SECRET=${CONFLUENT_CLOUD_API_SECRET:-}
+    ports:
+      - "${MCP_PORT:-8080}:${MCP_PORT:-8080}"
+    networks:
+      - kafka-network  # Access to Kafka topics
+      - monitoring  # Metrics collection
+      - frontend-network  # API access
+    depends_on:
+      - auditlens-forwarder
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:$${MCP_PORT:-8080}/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+    # Security options
+    security_opt:
+      - no-new-privileges:true
+    read_only: true  # Stateless MCP server
+    tmpfs:
+      - /tmp:mode=1777,size=100M
+      - /app/cache:mode=0700,size=100M,uid=1001,gid=1001
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+
+  schema-watcher:
+    profiles: ["future"]
+    build:
+      context: ./schema-watcher
+      dockerfile: Dockerfile
+    image: schema-watcher:v1.0.0
+    container_name: schema-watcher
+    restart: unless-stopped
+    environment:
+      # Schema watcher configuration
+      - METHODS_FILE=/app/src/classification/methods.py
+      - VERSIONS_FILE=/app/data/schema_versions.json
+      - CHECK_INTERVAL_HOURS=${SCHEMA_CHECK_INTERVAL_HOURS:-24}
+      - DRY_RUN=${SCHEMA_WATCHER_DRY_RUN:-false}
+      - SLACK_WEBHOOK=${SLACK_WEBHOOK:-}
+      - PYTHONUNBUFFERED=1
+    volumes:
+      # Mount src/classification for read/write (to update methods.py)
+      - ./src/classification:/app/src/classification:rw
+      # Mount data directory for version tracking
+      - schema_watcher_data:/app/data
+    networks:
+      - monitoring  # For metrics and alerts
+    # Resource limits (minimal - only checks once per day)
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 256M
+        reservations:
+          cpus: '0.1'
+          memory: 128M
+    # Security options
+    security_opt:
+      - no-new-privileges:true
+    read_only: false  # Needs write access to update methods.py
     tmpfs:
       - /tmp:mode=1777,size=50M
     cap_drop:
@@ -263,6 +586,10 @@ networks:
     internal: false  # User-facing services (dashboard, Grafana)
 
 volumes:
+  auditlens_data:
+    name: auditlens_auditlens_data
   prometheus_data:
   grafana_data:
   loki_data:
+  postgres_data:
+  schema_watcher_data:

@@ -1,0 +1,34 @@
+from functools import lru_cache
+from typing import Literal
+
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    database_url: str = Field(default="sqlite:///./data/auditlens.db", alias="DATABASE_URL")
+    forwarder_health_url: str = Field(default="http://localhost:8003/health", alias="FORWARDER_HEALTH_URL")
+    event_retention_days: int = Field(default=7, alias="EVENT_RETENTION_DAYS")
+    cors_origins: str = Field(default="http://localhost:3000,http://127.0.0.1:3000", alias="CORS_ORIGINS")
+    slow_query_ms: int = Field(default=250, alias="SLOW_QUERY_MS")
+    api_title: str = "AuditLens Backend API"
+    api_version: str = "0.1.0"
+
+    @property
+    def database_mode(self) -> Literal["sqlite", "postgres"]:
+        if self.database_url.startswith("sqlite"):
+            return "sqlite"
+        if self.database_url.startswith(("postgresql://", "postgresql+psycopg://")):
+            return "postgres"
+        return "sqlite"
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()

@@ -79,7 +79,7 @@ def parse_prometheus_text(text: str) -> List[MetricValue]:
     return metrics
 
 
-def fetch_metrics(url: str = "http://localhost:8003/metrics", timeout: int = 5) -> Optional[List[MetricValue]]:
+def fetch_metrics(url: str = "http://auditlens-forwarder:8003/metrics", timeout: int = 5) -> Optional[List[MetricValue]]:
     """
     Fetch and parse metrics from the forwarder.
 
@@ -98,7 +98,7 @@ def fetch_metrics(url: str = "http://localhost:8003/metrics", timeout: int = 5) 
         return None
 
 
-def get_metrics_dict(url: str = "http://localhost:8003/metrics") -> Dict[str, Any]:
+def get_metrics_dict(url: str = "http://auditlens-forwarder:8003/metrics") -> Dict[str, Any]:
     """
     Fetch metrics and return as a simple dictionary.
 
@@ -127,7 +127,7 @@ def get_metrics_dict(url: str = "http://localhost:8003/metrics") -> Dict[str, An
     return result
 
 
-def get_forwarder_status(url: str = "http://localhost:8003/metrics") -> Dict[str, Any]:
+def get_forwarder_status(url: str = "http://auditlens-forwarder:8003/metrics") -> Dict[str, Any]:
     """
     Get a summary of forwarder status from metrics.
 
@@ -159,7 +159,7 @@ def get_forwarder_status(url: str = "http://localhost:8003/metrics") -> Dict[str
     }
 
 
-def get_criticality_distribution(url: str = "http://localhost:8003/metrics") -> Dict[str, int]:
+def get_criticality_distribution(url: str = "http://auditlens-forwarder:8003/metrics") -> Dict[str, int]:
     """
     Get event counts by criticality level from metrics.
 
@@ -182,7 +182,7 @@ def get_criticality_distribution(url: str = "http://localhost:8003/metrics") -> 
     return distribution
 
 
-def get_method_distribution(url: str = "http://localhost:8003/metrics") -> Dict[str, int]:
+def get_method_distribution(url: str = "http://auditlens-forwarder:8003/metrics") -> Dict[str, int]:
     """
     Get event counts by method name from metrics.
 
@@ -205,7 +205,7 @@ def get_method_distribution(url: str = "http://localhost:8003/metrics") -> Dict[
     return distribution
 
 
-def get_anomaly_counts(url: str = "http://localhost:8003/metrics") -> Dict[str, int]:
+def get_anomaly_counts(url: str = "http://auditlens-forwarder:8003/metrics") -> Dict[str, int]:
     """
     Get anomaly counts by type from metrics.
 
@@ -228,7 +228,7 @@ def get_anomaly_counts(url: str = "http://localhost:8003/metrics") -> Dict[str, 
     return anomalies
 
 
-def get_rate_metrics(url: str = "http://localhost:8003/metrics") -> Dict[str, float]:
+def get_rate_metrics(url: str = "http://auditlens-forwarder:8003/metrics") -> Dict[str, float]:
     """
     Get rate-based metrics (events per second, etc.).
 

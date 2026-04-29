@@ -16,7 +16,7 @@ import argparse
 import json
 import os
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Dict, Any
 
 from confluent_kafka import Consumer, KafkaError
@@ -167,7 +167,7 @@ def search_audit_logs(bootstrap_servers: str,
     consumer.subscribe([topic])
 
     results = []
-    start_time = datetime.utcnow() - timedelta(hours=hours_back)
+    start_time = datetime.now(timezone.utc) - timedelta(hours=hours_back)
 
     print(f"Searching audit logs from last {hours_back} hours...")
     print(f"Filters: {filters}")

@@ -10,12 +10,34 @@ import hashlib
 import hmac
 import logging
 import os
+import re
 import secrets
 import threading
 import time
 from dataclasses import dataclass, field
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import Dict, Any, Optional, Set
+
+
+def sanitize_label(value: str, max_length: int = 128) -> str:
+    """
+    Sanitize value for use as Prometheus label.
+
+    Removes injection characters that could break Prometheus format:
+    - Curly braces {} (label delimiter)
+    - Double quotes " (value delimiter)
+    - Newlines and backslashes
+
+    Args:
+        value: The raw value to sanitize
+        max_length: Maximum length of the output
+
+    Returns:
+        Sanitized string safe for use as label value
+    """
+    if not value:
+        return "unknown"
+    return re.sub(r'[{}"\n\\]', '_', str(value))[:max_length]
 
 logger = logging.getLogger(__name__)
 
@@ -136,7 +158,8 @@ class MetricsCollector:
         """Create a unique key for a metric with labels."""
         if not labels:
             return name
-        label_str = ",".join(f'{k}="{v}"' for k, v in sorted(labels.items()))
+        # Sanitize label values to prevent injection
+        label_str = ",".join(f'{k}="{sanitize_label(v)}"' for k, v in sorted(labels.items()))
         return f"{name}{{{label_str}}}"
 
     def format_prometheus(self) -> str:
@@ -171,7 +194,8 @@ class MetricsCollector:
 
                 for metric in data["values"]:
                     if metric.labels:
-                        label_str = ",".join(f'{k}="{v}"' for k, v in sorted(metric.labels.items()))
+                        # Sanitize all label values to prevent injection
+                        label_str = ",".join(f'{k}="{sanitize_label(v)}"' for k, v in sorted(metric.labels.items()))
                         lines.append(f"{metric.name}{{{label_str}}} {metric.value}")
                     else:
                         lines.append(f"{metric.name} {metric.value}")

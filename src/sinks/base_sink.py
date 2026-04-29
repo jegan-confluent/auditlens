@@ -6,7 +6,7 @@ All sinks (Kafka, S3, GCS, DLQ) implement this interface.
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import List, Dict, Any, Optional
 import logging
@@ -118,10 +118,10 @@ class BaseSink(ABC):
         self.metrics.total_writes += 1
         self.metrics.total_records += result.records_written
         self.metrics.total_failures += result.records_failed
-        self.metrics.last_write_time = datetime.utcnow()
+        self.metrics.last_write_time = datetime.now(timezone.utc)
 
         if result.errors:
-            self.metrics.last_error_time = datetime.utcnow()
+            self.metrics.last_error_time = datetime.now(timezone.utc)
             self.metrics.last_error = result.errors[-1]
 
         # Update rolling average latency
@@ -167,7 +167,7 @@ class BufferedSink(BaseSink):
         self.buffer_size = buffer_size
         self.flush_interval_seconds = flush_interval_seconds
         self._buffer: List[AuditEvent] = []
-        self._last_flush: datetime = datetime.utcnow()
+        self._last_flush: datetime = datetime.now(timezone.utc)
 
     async def write(self, events: List[AuditEvent]) -> SinkResult:
         """Add events to buffer, flush if necessary."""
@@ -205,7 +205,7 @@ class BufferedSink(BaseSink):
 
         events_to_write = self._buffer.copy()
         self._buffer.clear()
-        self._last_flush = datetime.utcnow()
+        self._last_flush = datetime.now(timezone.utc)
 
         return await self._write_batch(events_to_write)
 
@@ -216,7 +216,7 @@ class BufferedSink(BaseSink):
 
     def _time_since_flush_seconds(self) -> float:
         """Get seconds since last flush."""
-        return (datetime.utcnow() - self._last_flush).total_seconds()
+        return (datetime.now(timezone.utc) - self._last_flush).total_seconds()
 
     def get_buffer_status(self) -> Dict[str, Any]:
         """Get buffer status."""

@@ -13,7 +13,7 @@ import io
 import json
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 
 from .base_sink import BufferedSink, SinkResult, SinkStatus
@@ -96,7 +96,7 @@ class GCSSink(BufferedSink):
 
         try:
             # Generate file path with partitioning
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
             partition_path = self._get_partition_path(now)
             file_name = self._generate_file_name(now)
             gcs_path = f"{self.config.prefix}{partition_path}/{file_name}"

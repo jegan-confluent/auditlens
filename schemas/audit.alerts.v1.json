@@ -1,0 +1,18 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AuditLens Alert Record",
+  "type": "object",
+  "required": ["schema_version", "alert_type", "severity", "event_time", "recommended_action"],
+  "properties": {
+    "schema_version": { "const": "audit.alerts.v1" },
+    "alert_type": { "type": "string" },
+    "severity": { "enum": ["CRITICAL", "HIGH", "MEDIUM", "LOW"] },
+    "event_time": { "type": "string", "format": "date-time" },
+    "principal": { "type": ["string", "null"] },
+    "resource": { "type": ["string", "null"] },
+    "method_name": { "type": ["string", "null"] },
+    "recommended_action": { "type": "string" },
+    "confidence": { "type": "string", "enum": ["high", "medium", "low"] }
+  },
+  "additionalProperties": true
+}

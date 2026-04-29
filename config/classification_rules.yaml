@@ -23,10 +23,6 @@ critical_methods:
   - kafka.DeleteTopics
   - kafka.DeleteRecords
 
-  # ACL Operations (security-critical)
-  - kafka.DeleteAcls
-  - kafka.CreateAcls
-
   # Connector Operations
   - DeleteConnector
 
@@ -86,6 +82,10 @@ high_methods:
   - DeleteApiKey
   - UpdateApiKey
   - RotateApiKey
+
+  # ACL Operations (security-changing, but not destructive)
+  - kafka.CreateAcls
+  - kafka.DeleteAcls
 
   # Service Account Operations
   - CreateServiceAccount

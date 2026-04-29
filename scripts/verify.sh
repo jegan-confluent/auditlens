@@ -80,7 +80,7 @@ check_container() {
     fi
 }
 
-check_container "audit-forwarder" "8003" "http://localhost:8003/health"
+check_container "auditlens-forwarder" "8003" "http://localhost:8003/health"
 check_container "dashboard" "8503" "http://localhost:8503"
 check_container "audit-prometheus" "9090" "http://localhost:9090/-/ready"
 check_container "audit-grafana" "3000" "http://localhost:3000/api/health"
@@ -166,8 +166,8 @@ echo ""
 echo -e "${BLUE}━━━ Recent Activity ━━━${NC}"
 echo ""
 
-if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^audit-forwarder$"; then
-    RECENT=$(docker logs audit-forwarder --tail 5 2>&1 | tail -3)
+if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^auditlens-forwarder$"; then
+    RECENT=$(docker logs auditlens-forwarder --tail 5 2>&1 | tail -3)
     if [ -n "$RECENT" ]; then
         echo "  Last log entries:"
         echo "$RECENT" | while read -r line; do

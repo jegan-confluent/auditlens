@@ -1,0 +1,56 @@
+# MCP Server Dependencies
+# Inherits most dependencies from parent requirements.txt
+# Last updated: 2026-03-10
+
+# Kafka and Schema Registry
+confluent-kafka[json,avro]==2.6.0
+
+# Environment and configuration
+python-dotenv==1.0.1
+
+# HTTP client with HTTP/2 support
+httpx==0.26.0
+
+# Core dependencies
+attrs==23.2.0
+cachetools==5.3.3
+typing-extensions==4.12.2
+
+# Authentication
+authlib==1.3.1
+
+# HTTP requests
+requests==2.32.3
+
+# JSON schema validation
+referencing==0.35.1
+jsonschema==4.23.0
+
+# Data validation
+pydantic==2.9.2
+
+# RFC validation
+rfc3339-validator==0.1.4
+
+# Prometheus metrics
+prometheus-client==0.21.0
+
+# Retry logic
+tenacity==9.0.0
+
+# Fast JSON parsing (2-3x faster than json)
+orjson==3.10.12
+
+# YAML config parsing
+PyYAML==6.0.2
+
+# Data analysis (for Kafka data processing)
+pandas==2.2.3
+
+# MCP-specific dependencies
+# FastAPI for HTTP server (lightweight async framework)
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+
+# HTTP middleware and CORS
+starlette==0.41.3

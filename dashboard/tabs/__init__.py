@@ -1,6 +1,7 @@
 """Tab modules for Audit Dashboard"""
 
 from . import (
+    welcome,
     audit_trail,
     failures,
     deletions,
@@ -16,6 +17,7 @@ from . import (
 )
 
 __all__ = [
+    'welcome',
     'audit_trail',
     'failures',
     'deletions',

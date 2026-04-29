@@ -1,7 +1,4 @@
-"""
-Confluent AuditLens Configuration
-All configuration, constants, and themes
-"""
+"""AuditLens dashboard configuration."""
 
 import os
 import base64
@@ -15,9 +12,9 @@ load_dotenv(os.path.join(os.path.dirname(__file__), '..', '.secrets'))
 # =============================================================================
 # BRANDING CONFIGURATION
 # =============================================================================
-APP_NAME = "Confluent AuditLens"
+APP_NAME = "AuditLens"
 APP_VERSION = "v11.0"
-APP_TAGLINE = "Real-time Kafka Audit Intelligence"
+APP_TAGLINE = "Kafka-native audit intelligence"
 
 # Confluent Logo - loaded from static/logo.png
 def get_logo_base64():
@@ -37,11 +34,15 @@ DEST_API_KEY = os.getenv('DEST_API_KEY')
 DEST_API_SECRET = os.getenv('DEST_API_SECRET')
 
 # Topic names
-TOPIC_CRITICAL = os.getenv('AUDIT_TOPIC_CRITICAL', 'audit_events_critical')
-TOPIC_HIGH = os.getenv('AUDIT_TOPIC_HIGH', 'audit_events_high')
-TOPIC_MEDIUM = os.getenv('AUDIT_TOPIC_MEDIUM', 'audit_events_medium')
-TOPIC_ALL = os.getenv('DEST_TOPIC', 'audit_events_flattened')
-TOPIC_ALERTS = os.getenv('AUDIT_TOPIC_ALERTS', 'audit_events_alerts')
+TOPIC_ALL = os.getenv('DASHBOARD_SOURCE_TOPIC', os.getenv('AUDIT_ENRICHED_TOPIC', 'audit.enriched.v1'))
+TOPIC_DENIALS = os.getenv('DASHBOARD_DENIALS_TOPIC', os.getenv('AUDIT_SIGNALS_DENIALS_TOPIC', 'audit.signals.denials.v1'))
+TOPIC_ALERTS = os.getenv('DASHBOARD_ALERTS_TOPIC', os.getenv('AUDIT_ALERTS_TOPIC', 'audit.alerts.v1'))
+TOPIC_HIGHRISK = os.getenv('AUDIT_SIGNALS_HIGHRISK_TOPIC', 'audit.signals.highrisk.v1')
+
+# Service endpoints for health checks in containerized deployments
+DASHBOARD_FORWARDER_URL = os.getenv('DASHBOARD_FORWARDER_URL', f"http://auditlens-forwarder:{os.getenv('METRICS_PORT', '8003')}")
+DASHBOARD_GRAFANA_URL = os.getenv('DASHBOARD_GRAFANA_URL', 'http://grafana:3000')
+DASHBOARD_PROMETHEUS_URL = os.getenv('DASHBOARD_PROMETHEUS_URL', 'http://prometheus:9090')
 
 # =============================================================================
 # CONFLUENT CLOUD API (for ACL & Identity lookups)

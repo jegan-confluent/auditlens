@@ -1,0 +1,160 @@
+:root {
+  color-scheme: light;
+  --bg: #f7f8fa;
+  --panel: #ffffff;
+  --text: #17202a;
+  --muted: #667085;
+  --line: #d9dee7;
+  --accent: #116466;
+  --danger: #b42318;
+  --warn: #b54708;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.shell {
+  min-height: 100vh;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  height: 56px;
+  padding: 0 24px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.brand {
+  font-weight: 700;
+}
+
+.nav {
+  display: flex;
+  gap: 16px;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.page {
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 24px;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.panel,
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.panel {
+  padding: 16px;
+}
+
+.card {
+  padding: 14px;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.toolbar {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+input,
+select,
+button {
+  min-height: 36px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px 10px;
+  background: white;
+}
+
+button {
+  cursor: pointer;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+
+th,
+td {
+  padding: 10px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+
+th {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.status {
+  display: inline-flex;
+  border-radius: 999px;
+  padding: 3px 8px;
+  font-size: 12px;
+  background: #eef6f6;
+  color: var(--accent);
+}
+
+.status.failure {
+  background: #fef3f2;
+  color: var(--danger);
+}
+
+.drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  width: min(620px, 100vw);
+  height: 100vh;
+  overflow: auto;
+  background: var(--panel);
+  border-left: 1px solid var(--line);
+  padding: 20px;
+  box-shadow: -12px 0 30px rgba(16, 24, 40, 0.12);
+}
+
+pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: #101828;
+  color: #f9fafb;
+  border-radius: 8px;
+  padding: 12px;
+}

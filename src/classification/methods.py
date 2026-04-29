@@ -15,6 +15,7 @@ without code changes. Falls back to hardcoded values if YAML not found.
 """
 
 import logging
+import re
 from pathlib import Path
 from typing import FrozenSet, Tuple, Set
 
@@ -66,10 +67,6 @@ _CRITICAL_METHODS_DEFAULT = {
     # Kafka Topic Operations (destructive)
     'kafka.DeleteTopics',
     'kafka.DeleteRecords',
-
-    # ACL Operations (security-critical)
-    'kafka.DeleteAcls',
-    'kafka.CreateAcls',  # Creating ACLs can grant dangerous permissions
 
     # Connector Operations
     'DeleteConnector',
@@ -138,6 +135,10 @@ _HIGH_METHODS_DEFAULT = {
     'DeleteApiKey',
     'UpdateApiKey',
     'RotateApiKey',
+
+    # ACL Operations (security-changing, but not destructive)
+    'kafka.CreateAcls',
+    'kafka.DeleteAcls',
 
     # Service Account Operations
     'CreateServiceAccount',
@@ -419,13 +420,29 @@ _READ_ONLY_METHODS_DEFAULT = {
 
     # Get/Describe Operations
     'GetKafkaCluster',
+    'GetKafkaClusters',
     'GetEnvironment',
+    'GetEnvironments',
     'GetServiceAccount',
+    'GetServiceAccounts',
     'GetApiKey',
+    'GetApiKeys',
     'GetUser',
+    'GetUsers',
     'GetConnector',
+    'GetConnectors',
     'GetSchema',
     'DescribeConnector',
+    'GetKSQLClusters',
+    'ListWorkspaces',
+    'ListComputePools',
+    'ListSchemaRegistryClusters',
+    'GetPrivateLinkAttachments',
+    'GetPrivateLinkAttachmentConnections',
+    'GetNetworks',
+    'schema-registry.GetAllTagDefs',
+    'schema-registry.GetEntityByTypeAndName',
+    'SignIn',
 
     # Produce/Consume (routine operations)
     'kafka.Produce',
@@ -534,4 +551,17 @@ def is_sensitive_method(method_name: str) -> bool:
         return False
 
     method_lower = method_name.lower()
-    return any(keyword in method_lower for keyword in SENSITIVE_KEYWORDS)
+    tokenized = re.sub(r'([a-z0-9])([A-Z])', r'\1 \2', method_name).lower()
+    tokenized = re.sub(r'[^a-z0-9]+', ' ', tokenized)
+    tokens = set(tokenized.split())
+
+    for keyword in SENSITIVE_KEYWORDS:
+        normalized_keyword = keyword.replace('_', ' ').lower()
+        keyword_tokens = tuple(normalized_keyword.split())
+        if len(keyword_tokens) == 1:
+            if keyword_tokens[0] in tokens:
+                return True
+        elif all(token in tokens for token in keyword_tokens):
+            return True
+
+    return False

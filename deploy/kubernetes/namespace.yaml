@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: audit-forwarder
+  name: auditlens
   labels:
-    app.kubernetes.io/name: audit-forwarder
+    app.kubernetes.io/name: auditlens
     app.kubernetes.io/component: monitoring

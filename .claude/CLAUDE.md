@@ -59,7 +59,7 @@ dashboard/
 17. DROP_LOW_EVENTS saves ~89% storage - LOW events are routine and rarely investigated
 
 ## Security Patterns
-18. Never allow default passwords in docker-compose (use ${VAR:?error} syntax)
+18. Never allow default passwords in docker-compose; use ${VAR:-secure_default} for env_file compatibility (${VAR:?error} requires shell env, breaks with env_file)
 19. Run containers as non-root where possible (user: "uid:gid")
 20. Use hmac.compare_digest() for constant-time token comparison
 21. Defense-in-depth: non-root + network segmentation + secrets management
@@ -116,13 +116,29 @@ dashboard/
 54. After major fixes, run verification grep commands to prove changes are in place
 55. Tests passing is necessary but not sufficient - verify with production-like scenarios
 
-## Current State (Feb 17, 2025) - v3.0.1
+## Docker & Shell Patterns
+56. Docker compose `${VAR:?error}` requires shell env at parse time; use `${VAR:-default}` for env_file compatibility
+57. Check both exit code AND stderr for docker/shell commands; exit 0 doesn't guarantee success
+58. Pre-launch validation: check daemon running, compose available, config files exist, ports free before docker compose up
+59. Test shell scripts with piped input: `printf 'k\nk\nL\n' | ./script.sh 2>&1`
+60. For required config values, set defaults at load, save, AND docker-compose.yml levels (default cascade)
+
+## Current State (Feb 19, 2025) - v3.0.1
 
 ### Running Services
-- **Forwarder**: audit-forwarder:v3.0.0 on port 8003
+- **Forwarder**: audit-forwarder:v3.0.1 on port 8003
 - **Dashboard**: audit-dashboard:v11.0 on port 8503
 - **Monitoring**: Prometheus :9090, Grafana :3000
 - **Network**: kafka-network, monitoring, frontend-network
+
+### v3.0.1 Features (NEW - Feb 19, 2025)
+- **Smart Offset Detection** - Zero-config offset management
+  - Automatically detects optimal strategy: first-time setup, normal restart, extended downtime
+  - Decision logic: lag < 1h → committed, lag 10K-50K → timestamp (24h), lag > 50K → latest
+  - Audit trail: `/tmp/offset-detection-audit.log` logs all decisions
+  - Manual override supported: `OFFSET_STRATEGY=latest|committed|timestamp|earliest`
+  - Files: `scripts/smart-offset-detector.sh`, updated `scripts/entrypoint.sh`
+  - Docs: `docs/SMART-OFFSET-DETECTION.md`, `docs/OFFSET-MANAGEMENT-QUICK-REF.md`
 
 ### Dashboard v11.0 Features (NEW)
 - **12 tabs** (was 10) - added Topic × Identity Matrix and Identity Activity Timeline
@@ -192,7 +208,7 @@ Base: typescript-patterns, react-patterns, testing-patterns, api-patterns, datab
 Extended: supabase-patterns, security-first, deployment-patterns, performance-patterns
 
 ---
-Last Updated: 2025-02-15
+Last Updated: 2025-02-19
 
 ---
 

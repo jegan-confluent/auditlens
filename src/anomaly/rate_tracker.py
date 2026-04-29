@@ -17,6 +17,8 @@ from enum import Enum
 from threading import Lock
 from typing import Dict, Any, Optional, List, Callable, Tuple
 
+from cachetools import LRUCache
+
 logger = logging.getLogger(__name__)
 
 
@@ -182,7 +184,8 @@ class RateTracker:
         )
 
         # Track known IPs per principal (for new source detection)
-        self._known_ips: Dict[str, set] = defaultdict(set)
+        # Bounded to prevent memory leaks with high-cardinality principals
+        self._known_ips: LRUCache = LRUCache(maxsize=50000)
 
         # Track alerts to prevent duplicate alerting
         self._recent_alerts: Dict[str, float] = {}
@@ -265,14 +268,22 @@ class RateTracker:
 
         # Check for new source IP
         if client_ip and principal:
-            if client_ip not in self._known_ips[principal]:
+            known_ips_for_principal = self._known_ips.get(principal, set())
+            if client_ip not in known_ips_for_principal:
                 # First time seeing this IP for this principal
-                if len(self._known_ips[principal]) > 0:
+                if len(known_ips_for_principal) > 0:
                     # They have a history of IPs, this is a new one
-                    alert = self._create_new_ip_alert(principal, client_ip)
+                    alert = self._create_new_ip_alert(principal, client_ip, known_ips_for_principal)
                     if alert and self._should_alert(alert):
                         alerts.append(alert)
-                self._known_ips[principal].add(client_ip)
+                # Update the set (create new if not exists)
+                new_ips = known_ips_for_principal.copy() if known_ips_for_principal else set()
+                new_ips.add(client_ip)
+                # Limit IPs per principal to prevent memory issues
+                if len(new_ips) > 100:
+                    # Keep most recent 100 IPs (approximation - just trim)
+                    new_ips = set(list(new_ips)[-100:])
+                self._known_ips[principal] = new_ips
 
         # Trigger callbacks
         for alert in alerts:
@@ -373,7 +384,7 @@ class RateTracker:
         return None
 
     def _create_new_ip_alert(
-        self, principal: str, client_ip: str
+        self, principal: str, client_ip: str, known_ips: set
     ) -> AnomalyAlert:
         """Create an alert for a new source IP."""
         return AnomalyAlert(
@@ -386,7 +397,7 @@ class RateTracker:
             window_seconds=0,
             timestamp=datetime.now(timezone.utc),
             details={
-                'known_ips': list(self._known_ips[principal]),
+                'known_ips': list(known_ips)[:10],  # Limit to 10 for alert payload
                 'new_ip': client_ip,
             },
         )
@@ -419,7 +430,7 @@ class RateTracker:
         return {
             'tracked_principals': len(self._principal_activity),
             'tracked_ips': len(self._ip_activity),
-            'known_ip_mappings': sum(len(ips) for ips in self._known_ips.values()),
+            'known_ip_mappings': sum(len(ips) for ips in self._known_ips.values() if isinstance(ips, set)),
             'recent_alerts': len(self._recent_alerts),
         }
 

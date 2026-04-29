@@ -8,7 +8,7 @@ for later analysis and retry.
 import json
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 
 from .base_sink import BaseSink, SinkResult, SinkStatus
@@ -36,8 +36,8 @@ class DLQEvent:
         self.source_partition = source_partition
         self.source_offset = source_offset
         self.retry_count = retry_count
-        self.first_failure = datetime.utcnow()
-        self.last_failure = datetime.utcnow()
+        self.first_failure = datetime.now(timezone.utc)
+        self.last_failure = datetime.now(timezone.utc)
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""

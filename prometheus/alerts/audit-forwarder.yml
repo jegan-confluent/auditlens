@@ -43,7 +43,7 @@ groups:
 
       # Forwarder down
       - alert: AuditForwarderDown
-        expr: up{job="audit-forwarder"} == 0
+        expr: up{job="auditlens-forwarder"} == 0
         for: 1m
         labels:
           severity: critical
@@ -63,13 +63,69 @@ groups:
 
       # Memory pressure (if process metrics enabled)
       - alert: AuditForwarderHighMemory
-        expr: process_resident_memory_bytes{job="audit-forwarder"} > 1.5e9
+        expr: process_resident_memory_bytes{job="auditlens-forwarder"} > 1.5e9
         for: 5m
         labels:
           severity: warning
         annotations:
           summary: "Audit forwarder high memory usage"
           description: "Memory usage is {{ $value | humanize1024 }}B."
+
+
+      # SQLite storage pressure
+      - alert: AuditForwarderLowDiskWarning
+        expr: audit_forwarder_persistence_free_disk_bytes < 1073741824
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "AuditLens persistence disk space is low"
+          description: "Free disk for the SQLite volume is below 1GB (current: {{ $value | humanize1024 }}B)."
+
+      - alert: AuditForwarderLowDiskCritical
+        expr: audit_forwarder_persistence_free_disk_bytes < 209715200
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "AuditLens persistence disk space is critically low"
+          description: "Free disk for the SQLite volume is below 200MB (current: {{ $value | humanize1024 }}B)."
+
+      - alert: AuditForwarderSQLiteDbTooLarge
+        expr: audit_forwarder_persistence_db_file_bytes > audit_forwarder_persistence_db_max_bytes
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "AuditLens SQLite database exceeds configured limit"
+          description: "SQLite DB size {{ $value | humanize1024 }}B is above the configured maximum."
+
+      - alert: AuditForwarderSQLiteWalTooLarge
+        expr: audit_forwarder_persistence_wal_file_bytes > 1073741824
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "AuditLens SQLite WAL is too large"
+          description: "SQLite WAL size has remained above 1GB for 10 minutes."
+
+      - alert: AuditForwarderCheckpointFailure
+        expr: audit_forwarder_persistence_checkpoint_status < 1
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "AuditLens WAL checkpoint is failing"
+          description: "WAL checkpoint status has remained unhealthy for 10 minutes."
+
+      - alert: AuditForwarderCleanupFailure
+        expr: audit_forwarder_persistence_cleanup_status < 1
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "AuditLens persistence cleanup is failing"
+          description: "SQLite retention cleanup status has remained unhealthy for 10 minutes."
 
   - name: audit_security_alerts
     rules:

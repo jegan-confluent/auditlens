@@ -260,11 +260,15 @@ def classify_event(row):
         if pattern.lower() in method_name.lower():
             return 'HIGH'
 
-    # Failures are at least HIGH
+    # Signal-driven authn/authz failures should not become high-risk per event
+    if method_name.endswith('.Authorize') and granted is False:
+        return 'LOW'
+    if 'Authentication' in method_name and result_status in FAILURE_STATUSES:
+        return 'LOW'
     if granted == False or result_status in FAILURE_STATUSES:
-        return 'HIGH'
+        return 'MEDIUM'
 
-    return 'MEDIUM'
+    return 'LOW'
 
 
 def enhance_events_dataframe(df):
@@ -273,16 +277,28 @@ def enhance_events_dataframe(df):
         return df
 
     # Extract user display
+    if 'principal_normalized' not in df.columns and 'principal' in df.columns:
+        df['principal_raw'] = df['principal']
+        df['principal_normalized'] = df['principal'].astype(str).str.replace(r'^User:', '', regex=True)
+
+    if 'principal_type' not in df.columns and 'principal_normalized' in df.columns:
+        df['principal_type'] = np.select(
+            [
+                df['principal_normalized'].astype(str).str.startswith('sa-'),
+                df['principal_normalized'].astype(str).str.startswith('u-'),
+            ],
+            ['service_account', 'user'],
+            default='unknown'
+        )
+
     if 'principal' in df.columns:
         def get_user_display(row):
-            principal = str(row.get('principal', '') or '')
+            principal = str(row.get('principal_normalized') or row.get('principal', '') or '')
             # For User:<numeric> format, prefer principalResourceId
-            if principal.startswith('User:'):
-                user_part = principal.replace('User:', '')
-                if user_part.isdigit():
-                    prid = row.get('principalResourceId') or row.get('principal_resource_id')
-                    if prid and pd.notna(prid):
-                        return str(prid)
+            if principal.isdigit():
+                prid = row.get('principalResourceId') or row.get('principal_resource_id')
+                if prid and pd.notna(prid):
+                    return str(prid)
             return extract_user_display(principal)
 
         df['user'] = df.apply(get_user_display, axis=1)
@@ -336,6 +352,17 @@ def enhance_events_dataframe(df):
 
     # Failure detection
     df['is_failure'] = df.apply(is_failure_event, axis=1)
+
+    # Default-noise suppression marker for successful authz checks
+    if 'methodName' in df.columns:
+        method_series = df['methodName'].astype(str)
+        df['is_successful_authz_noise'] = (
+            method_series.str.endswith('.Authorize', na=False) &
+            df.get('granted', pd.Series([None] * len(df))).eq(True) &
+            df.get('resultStatus', pd.Series([''] * len(df))).fillna('').astype(str).str.upper().isin(['', 'SUCCESS'])
+        )
+    else:
+        df['is_successful_authz_noise'] = False
 
     # Classify criticality (use existing if set by forwarder)
     if 'criticality' not in df.columns:

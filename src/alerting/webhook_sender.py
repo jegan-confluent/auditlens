@@ -10,7 +10,7 @@ import time
 import json
 import logging
 from typing import Dict, Any, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 from collections import defaultdict
 import requests
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
@@ -144,7 +144,7 @@ class WebhookSender:
         principal = event.get('principal', 'unknown')
         result_status = event.get('resultStatus', 'unknown')
         source_ip = event.get('source_ip') or event.get('clientIp', 'unknown')
-        event_time = event.get('time', datetime.utcnow().isoformat())
+        event_time = event.get('time', datetime.now(timezone.utc).isoformat())
         criticality = event.get('criticality', 'UNKNOWN')
         
         # Color based on criticality
@@ -215,7 +215,7 @@ class WebhookSender:
         return {
             "alert_type": "critical_audit_event",
             "severity": event.get('criticality', 'CRITICAL'),
-            "timestamp": event.get('time', datetime.utcnow().isoformat()),
+            "timestamp": event.get('time', datetime.now(timezone.utc).isoformat()),
             "event": {
                 "method": event.get('methodName'),
                 "principal": event.get('principal'),
@@ -440,7 +440,7 @@ class WebhookSender:
         return {
             "alert_type": "aggregated_auth_denials",
             "severity": alert.get('criticality', 'HIGH'),
-            "timestamp": alert.get('window_end', datetime.utcnow().isoformat()),
+            "timestamp": alert.get('window_end', datetime.now(timezone.utc).isoformat()),
             "aggregation": {
                 "principal": alert.get('principal'),
                 "denial_count": alert.get('denial_count'),
@@ -469,7 +469,7 @@ class WebhookSender:
             'principal': 'System:test',
             'resultStatus': 'SUCCESS',
             'source_ip': '127.0.0.1',
-            'time': datetime.utcnow().isoformat() + 'Z',
+            'time': datetime.now(timezone.utc).isoformat() + 'Z',
             'criticality': 'CRITICAL',
             'classification_reason': 'Test alert to verify webhook configuration',
         }

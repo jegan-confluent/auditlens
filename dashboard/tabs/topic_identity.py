@@ -126,11 +126,14 @@ def enrich_with_identity_names(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def get_acl_data(cluster_ids: List[str]) -> Dict[str, List[Dict[str, Any]]]:
+@st.cache_data(ttl=300)  # Cache ACL data for 5 minutes
+def get_acl_data(cluster_ids: tuple) -> Dict[str, List[Dict[str, Any]]]:
     """
     Get ACL data for the specified clusters.
 
     Returns dict mapping topic_name to list of ACL entries.
+
+    Note: cluster_ids must be a tuple for hashability (Streamlit caching requirement).
     """
     if not ENRICHMENT_AVAILABLE:
         return {}
@@ -208,28 +211,26 @@ def find_stale_acls(
     if activity_df.empty or not acl_data:
         return pd.DataFrame()
 
-    # Get active principals per topic
-    active_principals: Dict[str, set] = {}
+    # Get active principals per topic using vectorized operations
     cutoff_time = datetime.now(timezone.utc) - timedelta(days=stale_days)
 
-    for _, row in activity_df.iterrows():
-        topic = row.get('topic_resource')
-        principal = row.get('principal')
-        last_seen = row.get('last_seen')
+    # Ensure last_seen is datetime with timezone
+    df_copy = activity_df.copy()
+    df_copy['last_seen'] = pd.to_datetime(df_copy['last_seen'], errors='coerce')
+    if df_copy['last_seen'].dt.tz is None:
+        df_copy['last_seen'] = df_copy['last_seen'].dt.tz_localize('UTC')
 
-        if not topic or not principal:
-            continue
+    # Filter to recent activity
+    recent = df_copy[
+        df_copy['topic_resource'].notna() &
+        df_copy['principal'].notna() &
+        (df_copy['last_seen'] >= cutoff_time)
+    ]
 
-        # Check if activity is recent
-        if pd.notna(last_seen):
-            if isinstance(last_seen, str):
-                last_seen = pd.to_datetime(last_seen)
-            if last_seen.tzinfo is None:
-                last_seen = last_seen.replace(tzinfo=timezone.utc)
-            if last_seen >= cutoff_time:
-                if topic not in active_principals:
-                    active_principals[topic] = set()
-                active_principals[topic].add(principal)
+    # Build active_principals dict using groupby
+    active_principals: Dict[str, set] = {}
+    for topic, group in recent.groupby('topic_resource'):
+        active_principals[topic] = set(group['principal'].dropna().unique())
 
     # Find ACL principals with no activity
     stale_entries = []
@@ -315,8 +316,8 @@ def render_topic_identity_tab(df: pd.DataFrame):
     activity_df = aggregate_topic_activity(filtered_df)
     activity_df = enrich_with_identity_names(activity_df)
 
-    # Get ACL data
-    cluster_ids = filtered_df['cluster_id'].dropna().unique().tolist()
+    # Get ACL data (tuple for caching hashability)
+    cluster_ids = tuple(filtered_df['cluster_id'].dropna().unique().tolist())
     acl_data = get_acl_data(cluster_ids) if cloud_api_key else {}
 
     # Find stale ACLs
@@ -496,20 +497,24 @@ def render_sankey_diagram(activity_df: pd.DataFrame):
     node_labels = identities + topics
     node_colors = ['#3498db'] * len(identities) + ['#2ecc71'] * len(topics)
 
-    # Create links
-    sources = []
-    targets = []
-    values = []
+    # Create links using vectorized operations
+    # Build index maps for fast lookup
+    identity_idx = {name: idx for idx, name in enumerate(identities)}
+    topic_idx = {name: len(identities) + idx for idx, name in enumerate(topics)}
 
-    for _, row in activity_df.iterrows():
-        identity = row['display_name']
-        topic = row['topic_resource']
-        count = row['event_count']
+    # Filter to rows with valid identities and topics
+    valid_rows = activity_df[
+        activity_df['display_name'].isin(identity_idx) &
+        activity_df['topic_resource'].isin(topic_idx)
+    ]
 
-        if identity in identities and topic in topics:
-            sources.append(identities.index(identity))
-            targets.append(len(identities) + topics.index(topic))
-            values.append(count)
+    if valid_rows.empty:
+        return
+
+    # Vectorized mapping
+    sources = valid_rows['display_name'].map(identity_idx).tolist()
+    targets = valid_rows['topic_resource'].map(topic_idx).tolist()
+    values = valid_rows['event_count'].tolist()
 
     if not sources:
         return

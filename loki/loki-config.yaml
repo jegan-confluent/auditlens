@@ -21,7 +21,7 @@ query_range:
     cache:
       embedded_cache:
         enabled: true
-        max_size_mb: 100
+        max_size_mb: 32
 
 schema_config:
   configs:
@@ -37,9 +37,9 @@ ruler:
   alertmanager_url: http://localhost:9093
 
 limits_config:
-  retention_period: 744h  # 31 days
-  ingestion_rate_mb: 10
-  ingestion_burst_size_mb: 20
+  retention_period: 168h  # 7 days for local full mode
+  ingestion_rate_mb: 4
+  ingestion_burst_size_mb: 8
 
 # Auto-compaction and deletion
 compactor:
@@ -47,5 +47,5 @@ compactor:
   compaction_interval: 10m
   retention_enabled: true
   retention_delete_delay: 2h
-  retention_delete_worker_count: 150
+  retention_delete_worker_count: 4
   delete_request_store: filesystem

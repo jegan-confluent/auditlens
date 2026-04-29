@@ -1,51 +1,32 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: audit-forwarder-config
-  namespace: audit-forwarder
+  name: auditlens-config
+  namespace: auditlens
   labels:
-    app.kubernetes.io/name: audit-forwarder
+    app.kubernetes.io/name: auditlens
 data:
-  # Source topic
+  APP_NAME: "AuditLens"
   AUDIT_TOPIC: "confluent-audit-log-events"
-  GROUP_ID: "audit-forwarder-v2"
-
-  # Destination topic
-  DEST_TOPIC: "audit-logs-processed"
-
-  # Processing configuration
-  BATCH_SIZE: "500"
-  NUM_WORKERS: "3"
-  # NOTE: Offsets are managed by Kafka consumer groups (not file-based)
-
-  # Enabled sinks (comma-separated)
-  ENABLED_SINKS: "kafka"
-
-  # S3 configuration (if enabled)
-  S3_ENABLED: "false"
-  S3_PREFIX: "confluent-audit-logs/"
-  S3_REGION: "us-west-2"
-  S3_FORMAT: "parquet"
-  S3_COMPRESSION: "snappy"
-
-  # GCS configuration (if enabled)
-  GCS_ENABLED: "false"
-  GCS_PREFIX: "confluent-audit-logs/"
-  GCS_FORMAT: "parquet"
-  GCS_COMPRESSION: "snappy"
-
-  # DLQ configuration
-  DLQ_ENABLED: "true"
-  DLQ_TOPIC: "audit-forwarder-dlq"
-
-  # Observability
-  METRICS_PORT: "8000"
+  GROUP_ID: "auditlens-forwarder-v1"
+  AUTO_OFFSET_RESET: "latest"
+  AUDIT_RAW_TOPIC: "audit.raw.v1"
+  AUDIT_NORMALIZED_TOPIC: "audit.normalized.v1"
+  AUDIT_ENRICHED_TOPIC: "audit.enriched.v1"
+  AUDIT_SIGNALS_DENIALS_TOPIC: "audit.signals.denials.v1"
+  AUDIT_SIGNALS_HIGHRISK_TOPIC: "audit.signals.highrisk.v1"
+  AUDIT_ALERTS_TOPIC: "audit.alerts.v1"
+  DLQ_TOPIC: "audit.dlq.v1"
+  ENABLE_DENIAL_AGGREGATION: "true"
+  ALERT_ON_HIGH_RISK: "true"
+  METRICS_PORT: "8003"
+  PERSISTENCE_ENABLED: "true"
+  PERSISTENCE_BACKEND: "sqlite"
+  PERSISTENCE_DB_PATH: "/var/lib/auditlens/auditlens.db"
+  API_AUTH_ENABLED: "false"
+  API_AUTH_TOKEN_FILE: "/run/secrets/auditlens-api-tokens.json"
+  API_MAX_SEARCH_RESULTS: "500"
+  API_EXPORT_MAX_ROWS: "5000"
+  API_EXPORT_MAX_HOURS: "168"
   LOG_LEVEL: "INFO"
   LOG_FORMAT: "json"
-
-  # MCP server
-  MCP_ENABLED: "true"
-
-  # Query cache
-  CACHE_ENABLED: "false"
-  CACHE_BACKEND: "sqlite"

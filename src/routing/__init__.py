@@ -1,5 +1,9 @@
 """
-Routing module for multi-topic event routing based on criticality.
+Legacy routing module.
+
+The AuditLens foundation does not use criticality-specific transport topics as
+its primary contract. This module remains only for explicit compatibility
+testing behind `ENABLE_LEGACY_MULTI_TOPIC_ROUTING=true`.
 """
 
 from .topic_router import (

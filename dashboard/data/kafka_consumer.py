@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from confluent_kafka import Consumer, KafkaError, TopicPartition
 from config import (
     DEST_BOOTSTRAP, DEST_API_KEY, DEST_API_SECRET,
-    TOPIC_CRITICAL, TOPIC_HIGH, TOPIC_MEDIUM, TOPIC_ALERTS
+    TOPIC_ALL, TOPIC_DENIALS, TOPIC_ALERTS
 )
 from .transformations import enhance_events_dataframe
 from .email_cache import GLOBAL_EMAIL_CACHE, build_cache_from_dataframe, enrich_email_from_cache
@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 
-@st.cache_data(ttl=15, show_spinner=False)  # 15s cache for responsive data
+@st.cache_data(ttl=15, max_entries=2, show_spinner=False)  # bounded cache for responsive data
 def load_events_from_kafka(criticality_filter='All', time_minutes=60, max_events=1500):
     """Load LATEST events from Kafka topics using PARALLEL partition reading.
 
@@ -31,15 +31,7 @@ def load_events_from_kafka(criticality_filter='All', time_minutes=60, max_events
         st.error("⚠️ Kafka connection not configured. Check .env file.")
         return pd.DataFrame()
 
-    # Select topics based on filter
-    if criticality_filter == 'CRITICAL':
-        topics = [TOPIC_CRITICAL]
-    elif criticality_filter == 'HIGH':
-        topics = [TOPIC_HIGH]
-    elif criticality_filter == 'MEDIUM':
-        topics = [TOPIC_MEDIUM]
-    else:  # 'All'
-        topics = [TOPIC_CRITICAL, TOPIC_HIGH, TOPIC_MEDIUM]
+    topics = [TOPIC_ALL]
 
     if not topics:
         return pd.DataFrame()
@@ -53,8 +45,8 @@ def load_events_from_kafka(criticality_filter='All', time_minutes=60, max_events
         'group.id': 'auditlens-dashboard-viewer',  # Static group - no more group explosion
         'auto.offset.reset': 'latest',  # Explicit: start at latest if no committed offset
         'enable.auto.commit': False,
-        'fetch.max.bytes': 52428800,  # 50MB
-        'max.partition.fetch.bytes': 10485760,  # 10MB
+        'fetch.max.bytes': 16777216,  # 16MB
+        'max.partition.fetch.bytes': 4194304,  # 4MB
         'fetch.min.bytes': 1,
         'fetch.wait.max.ms': 100,
         'socket.timeout.ms': 30000,  # 30s socket timeout
@@ -134,6 +126,8 @@ def load_events_from_kafka(criticality_filter='All', time_minutes=60, max_events
         return pd.DataFrame()
 
     logger.info(f"[KafkaConsumer] Loaded {len(events)} raw events from Kafka")
+    if len(events) > max_events:
+        events = events[:max_events]
     df = pd.DataFrame(events)
 
     # EARLY DEDUPLICATION
@@ -154,6 +148,9 @@ def load_events_from_kafka(criticality_filter='All', time_minutes=60, max_events
             df = df[df['time'] >= cutoff_time]
             logger.info(f"[KafkaConsumer] Time filter: {before_filter} -> {len(df)} events (cutoff={cutoff_time})")
 
+    if len(df) > max_events:
+        df = df.head(max_events).copy()
+
     # Enhance dataframe
     df = enhance_events_dataframe(df)
 
@@ -173,11 +170,14 @@ def load_events_from_kafka(criticality_filter='All', time_minutes=60, max_events
             axis=1
         )
 
+    if len(df) > max_events:
+        df = df.head(max_events).copy()
+
     return df
 
 
 def load_security_alerts(time_minutes=60, max_alerts=500):
-    """Load security alerts from the aggregated alerts topic."""
+    """Load denial aggregation summaries from the signals topic."""
     if not DEST_BOOTSTRAP or not DEST_API_KEY:
         return pd.DataFrame()
 
@@ -195,15 +195,15 @@ def load_security_alerts(time_minutes=60, max_alerts=500):
     alerts = []
 
     try:
-        md = consumer.list_topics(TOPIC_ALERTS, timeout=10)
-        if TOPIC_ALERTS not in md.topics:
+        md = consumer.list_topics(TOPIC_DENIALS, timeout=10)
+        if TOPIC_DENIALS not in md.topics:
             return pd.DataFrame()
 
-        partitions = md.topics[TOPIC_ALERTS].partitions
+        partitions = md.topics[TOPIC_DENIALS].partitions
         msgs_per_partition = max(50, max_alerts // max(len(partitions), 1))
 
         for p in partitions.keys():
-            tp = TopicPartition(TOPIC_ALERTS, p)
+            tp = TopicPartition(TOPIC_DENIALS, p)
             low, high = consumer.get_watermark_offsets(tp, timeout=5)
 
             if high > low:

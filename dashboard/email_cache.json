@@ -172,5 +172,10 @@
   "u-0xynp7p": "sstokes@confluent.io",
   "u-6k6dod6": "mblumberg+csta@confluent.io",
   "sa-7y6xj82": "22894-krogahn_metrics@serviceaccounts.confluent.cloud",
-  "sa-gq3nr7m": "22894-kraut-sa-terraform@serviceaccounts.confluent.cloud"
+  "sa-gq3nr7m": "22894-kraut-sa-terraform@serviceaccounts.confluent.cloud",
+  "sa-38rprrm": "22894-datadogserviceaccount@serviceaccounts.confluent.cloud",
+  "u-81rvr0q": "nbhasme+copstam@confluent.io",
+  "sa-pvqqxy": "22894-knanao-terraform@serviceaccounts.confluent.cloud",
+  "sa-w7dwx79": "22894-dvogiatzis_metrics_and_billing_viewer@serviceaccounts.confluent.cloud",
+  "sa-6krvz28": "22894-billing-bot-sa@serviceaccounts.confluent.cloud"
 }

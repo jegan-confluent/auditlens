@@ -22,6 +22,7 @@ from components.metrics import render_metric_card
 from components.filters import render_alert_banner, render_quick_filters, apply_quick_filter
 
 # Tabs
+import tabs.welcome as welcome
 import tabs.audit_trail as audit_trail
 import tabs.failures as failures
 import tabs.deletions as deletions
@@ -34,6 +35,42 @@ import tabs.export as export_tab
 import tabs.security_alerts as security_alerts
 import tabs.topic_identity as topic_identity
 import tabs.identity_activity as identity_activity
+
+
+RAW_PAYLOAD_CACHE_MAX = 200
+
+
+def dataframe_memory_summary(df: pd.DataFrame) -> dict:
+    if df is None or df.empty:
+        return {"rows": 0, "columns": 0, "memory_bytes": 0, "memory_mib": 0.0}
+    memory_bytes = int(df.memory_usage(deep=True).sum())
+    return {
+        "rows": int(len(df)),
+        "columns": int(len(df.columns)),
+        "memory_bytes": memory_bytes,
+        "memory_mib": round(memory_bytes / (1024 * 1024), 2),
+    }
+
+
+def stash_raw_payloads_and_trim(df: pd.DataFrame) -> pd.DataFrame:
+    """Keep bulky raw JSON out of table DataFrames while preserving details lookup."""
+    if df is None or df.empty or "data_json" not in df.columns:
+        return df
+
+    cache = st.session_state.setdefault("auditlens_raw_payloads", {})
+    id_columns = [column for column in ("id", "event_id", "requestId", "correlationId") if column in df.columns]
+    if id_columns:
+        for _, row in df[["data_json", *id_columns]].head(RAW_PAYLOAD_CACHE_MAX).iterrows():
+            payload = row.get("data_json")
+            if pd.isna(payload):
+                continue
+            cache_key = next((str(row.get(column)) for column in id_columns if pd.notna(row.get(column)) and row.get(column)), None)
+            if cache_key:
+                cache[cache_key] = payload
+        while len(cache) > RAW_PAYLOAD_CACHE_MAX:
+            cache.pop(next(iter(cache)))
+
+    return df.drop(columns=["data_json"])
 
 # =============================================================================
 # STREAMLIT PAGE CONFIG
@@ -183,6 +220,12 @@ with st.sidebar:
         help="Hide operations on UUID-named resources (internal Confluent Cloud operations)"
     )
 
+    hide_authz_noise = st.checkbox(
+        "Hide successful authz noise",
+        value=True,
+        help="Hide successful Authorize checks from the default operator views"
+    )
+
     # Cluster filter (populated after data load)
     filter_cluster = st.text_input(
         "Filter by Cluster",
@@ -279,6 +322,8 @@ df = load_events_from_kafka(
     time_minutes=time_minutes,
     max_events=max_events
 )
+df = stash_raw_payloads_and_trim(df)
+runtime_memory_summary = dataframe_memory_summary(df)
 
 # Debug: Show raw data count
 raw_count = len(df)
@@ -298,14 +343,21 @@ if filter_environment and 'environment_id' in df.columns:
     df = df[df['environment_id'].str.contains(filter_environment, case=False, na=False)]
 
 if filter_principal and 'principal' in df.columns:
-    df = df[df['principal'].str.contains(filter_principal, case=False, na=False) |
-            (df['email'].str.contains(filter_principal, case=False, na=False) if 'email' in df.columns else False)]
+    principal_mask = df['principal'].str.contains(filter_principal, case=False, na=False)
+    if 'principal_normalized' in df.columns:
+        principal_mask = principal_mask | df['principal_normalized'].astype(str).str.contains(filter_principal, case=False, na=False)
+    if 'email' in df.columns:
+        principal_mask = principal_mask | df['email'].astype(str).str.contains(filter_principal, case=False, na=False)
+    df = df[principal_mask]
 
 if filter_method and 'methodName' in df.columns:
     df = df[df['methodName'].str.contains(filter_method, case=False, na=False)]
 
 if filter_resource and 'resourceName' in df.columns:
     df = df[df['resourceName'].str.contains(filter_resource, case=False, na=False)]
+
+if hide_authz_noise and 'is_successful_authz_noise' in df.columns:
+    df = df[~df['is_successful_authz_noise']]
 
 # Detect anomalies
 anomalies = detect_anomalies(df) if not df.empty else []
@@ -414,7 +466,8 @@ if 'metric_filter' in st.session_state and st.session_state.metric_filter:
 # =============================================================================
 st.markdown("---")
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12 = st.tabs([
+tab0, tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12 = st.tabs([
+    "🏠 Welcome",
     "🔍 Audit Trail",
     "🚨 All Failures",
     "🗑️ Deletions",
@@ -433,8 +486,12 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12 = st.t
 tab_config = {
     'time_minutes': time_minutes,
     'timezone': selected_tz,
-    'hide_internal': hide_internal
+    'hide_internal': hide_internal,
+    'hide_authz_noise': hide_authz_noise,
 }
+
+with tab0:
+    welcome.render(df, tab_config)
 
 with tab1:
     audit_trail.render_tab(df, tab_config)
@@ -488,6 +545,14 @@ with st.expander("⌨️ Keyboard Shortcuts"):
     """)
 
 st.caption("Confluent AuditLens | Powered by Streamlit & Confluent Kafka")
+
+with st.expander("Runtime Memory"):
+    st.json({
+        "dataframe": runtime_memory_summary,
+        "raw_payload_cache_entries": len(st.session_state.get("auditlens_raw_payloads", {})),
+        "raw_payload_cache_max": RAW_PAYLOAD_CACHE_MAX,
+        "streamlit_cache": "load_events_from_kafka ttl=15s max_entries=2",
+    })
 
 # Keyboard shortcuts JavaScript
 st.markdown("""

@@ -22,6 +22,8 @@ from .methods import (
     is_sensitive_method,
 )
 
+SIGNAL_ONLY_METHODS = AUTHENTICATION_METHODS | AUTHORIZATION_CHECK_METHODS
+
 
 class CriticalityLevel(str, Enum):
     """Criticality levels for audit events."""
@@ -42,6 +44,8 @@ class ClassificationResult:
     is_modification: bool
     method_category: str
     elevated: bool  # True if criticality was elevated due to failure status
+    is_signal_candidate: bool
+    signal_type: Optional[str] = None
 
 
 def calculate_criticality(event: Dict[str, Any]) -> ClassificationResult:
@@ -81,10 +85,26 @@ def calculate_criticality(event: Dict[str, Any]) -> ClassificationResult:
 
     elevated = False
 
-    # Priority 1: Security failures are always CRITICAL
+    is_auth_signal_method = method_name in SIGNAL_ONLY_METHODS
+
+    # Priority 1: authentication/authorization failures are signal-driven, not high-risk per event
+    if result_status in SECURITY_FAILURE_STATUSES and is_auth_signal_method:
+        return ClassificationResult(
+            criticality=CriticalityLevel.LOW,
+            reason=f"Signal-driven auth failure: {method_name} ({result_status})",
+            is_security_event=True,
+            is_deletion=is_deletion,
+            is_creation=is_creation,
+            is_modification=is_modification,
+            method_category=method_category,
+            elevated=False,
+            is_signal_candidate=True,
+            signal_type="auth_failure",
+        )
+
     if result_status in SECURITY_FAILURE_STATUSES:
         return ClassificationResult(
-            criticality=CriticalityLevel.CRITICAL,
+            criticality=CriticalityLevel.MEDIUM,
             reason=f"Security failure: {result_status}",
             is_security_event=True,
             is_deletion=is_deletion,
@@ -92,6 +112,8 @@ def calculate_criticality(event: Dict[str, Any]) -> ClassificationResult:
             is_modification=is_modification,
             method_category=method_category,
             elevated=True,
+            is_signal_candidate=True,
+            signal_type="auth_failure",
         )
 
     # Priority 2: Denied access handling
@@ -101,38 +123,44 @@ def calculate_criticality(event: Dict[str, Any]) -> ClassificationResult:
         if method_name in AUTHORIZATION_CHECK_METHODS:
             # Routine authorization check denial - classify as MEDIUM
             return ClassificationResult(
-                criticality=CriticalityLevel.MEDIUM,
+                criticality=CriticalityLevel.LOW,
                 reason=f"Authorization check denied: {method_name}",
-                is_security_event=False,  # Routine, not a security event
+                is_security_event=True,
                 is_deletion=is_deletion,
                 is_creation=is_creation,
                 is_modification=is_modification,
                 method_category=method_category,
                 elevated=False,
+                is_signal_candidate=True,
+                signal_type="authz_denial",
             )
         elif method_name in CRITICAL_METHODS or method_name in HIGH_METHODS:
             # Denied access on important methods is CRITICAL
             return ClassificationResult(
-                criticality=CriticalityLevel.CRITICAL,
+                criticality=CriticalityLevel.HIGH,
                 reason=f"Access denied on sensitive operation: {method_name}",
                 is_security_event=True,
                 is_deletion=is_deletion,
                 is_creation=is_creation,
                 is_modification=is_modification,
                 method_category=method_category,
-                elevated=True,
+                elevated=False,
+                is_signal_candidate=True,
+                signal_type="access_denied",
             )
         else:
-            # Other denied access - classify as HIGH (not CRITICAL)
+            # Other denied access is searchable but not high-risk per event
             return ClassificationResult(
-                criticality=CriticalityLevel.HIGH,
+                criticality=CriticalityLevel.LOW,
                 reason=f"Access denied: {method_name}",
                 is_security_event=True,
                 is_deletion=is_deletion,
                 is_creation=is_creation,
                 is_modification=is_modification,
                 method_category=method_category,
-                elevated=True,
+                elevated=False,
+                is_signal_candidate=True,
+                signal_type="access_denied",
             )
 
     # Priority 3: Check explicit method classifications
@@ -146,6 +174,7 @@ def calculate_criticality(event: Dict[str, Any]) -> ClassificationResult:
             is_modification=is_modification,
             method_category=method_category,
             elevated=False,
+            is_signal_candidate=False,
         )
 
     if method_name in HIGH_METHODS:
@@ -158,6 +187,7 @@ def calculate_criticality(event: Dict[str, Any]) -> ClassificationResult:
             is_modification=is_modification,
             method_category=method_category,
             elevated=False,
+            is_signal_candidate=False,
         )
 
     if method_name in MEDIUM_METHODS:
@@ -170,6 +200,7 @@ def calculate_criticality(event: Dict[str, Any]) -> ClassificationResult:
             is_modification=is_modification,
             method_category=method_category,
             elevated=False,
+            is_signal_candidate=False,
         )
 
     # Priority 4: Pattern-based classification for unknown methods
@@ -212,6 +243,7 @@ def calculate_criticality(event: Dict[str, Any]) -> ClassificationResult:
         is_modification=is_modification,
         method_category=method_category,
         elevated=elevated,
+        is_signal_candidate=False,
     )
 
 
@@ -239,6 +271,8 @@ def classify_event(event: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
         'is_modification': result.is_modification,
         'method_category': result.method_category,
         'criticality_elevated': result.elevated,
+        'is_signal_candidate': result.is_signal_candidate,
+        'signal_type': result.signal_type,
     }
 
     return result.criticality.value, enrichment

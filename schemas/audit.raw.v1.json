@@ -1,0 +1,16 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AuditLens Raw Audit Event",
+  "type": "object",
+  "required": ["schema_version", "ingested_at", "source_topic", "raw_event"],
+  "properties": {
+    "schema_version": { "const": "audit.raw.v1" },
+    "ingested_at": { "type": "string", "format": "date-time" },
+    "source_topic": { "type": "string" },
+    "source_partition": { "type": "integer" },
+    "source_offset": { "type": "integer" },
+    "forwarder_version": { "type": "string" },
+    "raw_event": { "type": "object" }
+  },
+  "additionalProperties": true
+}

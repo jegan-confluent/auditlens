@@ -119,11 +119,23 @@ def render_tab(df, config=None):
             'Subject': event.get('subject'),
         })
 
+    raw_payload = event.get('data_json') if 'data_json' in event.index else None
+    if raw_payload is None or (not isinstance(raw_payload, (dict, list)) and pd.isna(raw_payload)):
+        cache_key = next(
+            (
+                str(event.get(column))
+                for column in ('id', 'event_id', 'requestId', 'correlationId')
+                if column in event.index and pd.notna(event.get(column)) and event.get(column)
+            ),
+            None,
+        )
+        raw_payload = st.session_state.get('auditlens_raw_payloads', {}).get(cache_key)
+
     # Full data_json
-    if 'data_json' in event.index and pd.notna(event.get('data_json')):
+    if raw_payload is not None and (isinstance(raw_payload, (dict, list)) or not pd.isna(raw_payload)):
         with st.expander("🔍 View Full Event Data (JSON)", expanded=False):
             try:
-                data = json.loads(event['data_json']) if isinstance(event['data_json'], str) else event['data_json']
+                data = json.loads(raw_payload) if isinstance(raw_payload, str) else raw_payload
                 st.json(data)
             except Exception:
-                st.text(str(event['data_json']))
+                st.text(str(raw_payload))

@@ -13,7 +13,7 @@ import io
 import json
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
@@ -97,7 +97,7 @@ class S3Sink(BufferedSink):
 
         try:
             # Generate file path with partitioning
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
             partition_path = self._get_partition_path(now)
             file_name = self._generate_file_name(now)
             s3_key = f"{self.config.prefix}{partition_path}/{file_name}"

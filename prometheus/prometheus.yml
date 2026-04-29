@@ -15,9 +15,9 @@ rule_files:
 
 scrape_configs:
   # Audit Forwarder metrics
-  - job_name: 'audit-forwarder'
+  - job_name: 'auditlens-forwarder'
     static_configs:
-      - targets: ['audit-forwarder:8003']
+      - targets: ['auditlens-forwarder:8003']
     metrics_path: /metrics
     scrape_interval: 15s
     scrape_timeout: 10s
@@ -39,7 +39,7 @@ scrape_configs:
   # Docker containers (if running docker-compose)
   - job_name: 'docker'
     static_configs:
-      - targets: ['audit-forwarder:8003']
+      - targets: ['auditlens-forwarder:8003']
     relabel_configs:
       - source_labels: [__address__]
         target_label: instance
