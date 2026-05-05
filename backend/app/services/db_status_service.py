@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -38,24 +39,42 @@ def sqlite_path(database_url: str) -> str | None:
     return str(Path(path))
 
 
-def _count_events(engine) -> tuple[int, int]:
+def _count_events(engine, *, since: datetime | None = None, until: datetime | None = None) -> tuple[int, int]:
     with engine.connect() as conn:
-        total = conn.execute(select(func.count()).select_from(AuditEvent.__table__)).scalar_one()
-        missing_source_ip = conn.execute(
-            select(func.count()).select_from(AuditEvent.__table__).where(
-                (AuditEvent.source_ip.is_(None)) | (AuditEvent.source_ip == "")
-            )
-        ).scalar_one()
+        query = select(func.count()).select_from(AuditEvent.__table__)
+        missing_query = select(func.count()).select_from(AuditEvent.__table__).where((AuditEvent.source_ip.is_(None)) | (AuditEvent.source_ip == ""))
+        if since is not None:
+            query = query.where(AuditEvent.timestamp >= since)
+            missing_query = missing_query.where(AuditEvent.timestamp >= since)
+        if until is not None:
+            query = query.where(AuditEvent.timestamp <= until)
+            missing_query = missing_query.where(AuditEvent.timestamp <= until)
+        total = conn.execute(query).scalar_one()
+        missing_source_ip = conn.execute(missing_query).scalar_one()
     return int(total or 0), int(missing_source_ip or 0)
 
 
-def build_status_payload(*, api_database_url: str | None = None, forwarder_database_url: str | None = None) -> dict[str, Any]:
+def _coverage(total: int, missing: int) -> float:
+    if total <= 0:
+        return 0.0
+    covered = max(total - missing, 0)
+    return round(covered / total * 100.0, 1)
+
+
+def build_status_payload(
+    *,
+    api_database_url: str | None = None,
+    forwarder_database_url: str | None = None,
+    recent_window_hours: int = 4,
+) -> dict[str, Any]:
     settings = get_settings()
     api_url = api_database_url or settings.database_url
     forwarder_url = forwarder_database_url or os.environ.get("FORWARDER_DATABASE_URL") or api_url
     api_engine = build_engine(api_url)
     init_db(api_engine)
     total_rows, missing_source_ip = _count_events(api_engine)
+    recent_cutoff = datetime.now(timezone.utc) - timedelta(hours=max(recent_window_hours, 0))
+    recent_rows, recent_missing_source_ip = _count_events(api_engine, since=recent_cutoff)
     payload: dict[str, Any] = {
         "db_mode": database_mode(api_url),
         "api_db": redact_database_url(api_url),
@@ -63,6 +82,11 @@ def build_status_payload(*, api_database_url: str | None = None, forwarder_datab
         "urls_match": redact_database_url(api_url) == redact_database_url(forwarder_url),
         "audit_events_rows": total_rows,
         "missing_source_ip_rows": missing_source_ip,
+        "source_ip_coverage": _coverage(total_rows, missing_source_ip),
+        "recent_window_hours": recent_window_hours,
+        "recent_rows": recent_rows,
+        "recent_missing_source_ip_rows": recent_missing_source_ip,
+        "recent_source_ip_coverage": _coverage(recent_rows, recent_missing_source_ip),
     }
     api_mode = database_mode(api_url)
     if api_mode == "sqlite":
@@ -83,6 +107,9 @@ def format_status_lines(payload: dict[str, Any]) -> list[str]:
         f"API and forwarder DB URLs match: {'yes' if payload['urls_match'] else 'no'}",
         f"audit_events rows: {payload['audit_events_rows']}",
         f"missing source_ip rows: {payload['missing_source_ip_rows']}",
+        f"source_ip coverage: {payload['source_ip_coverage']}%",
+        f"recent {payload['recent_window_hours']}h rows: {payload['recent_rows']}",
+        f"recent {payload['recent_window_hours']}h missing source_ip rows: {payload['recent_missing_source_ip_rows']}",
     ]
     if payload["db_mode"] == "sqlite" and payload.get("sqlite_path"):
         lines.append(f"SQLite file: {payload['sqlite_path']}")

@@ -97,6 +97,56 @@ After product mode is running, a safe source-field backfill dry run is:
 PYTHONPATH=. ./.venv/bin/python scripts/backfill_event_fields.py --source-fields --dry-run
 ```
 
+## Backfill Source Fields Safely
+
+Use historical source-field backfill only when upgrading from an older version that did not persist `source_ip` or source context fields. New customers do not need a historical backfill.
+
+Start with a dry run:
+
+```bash
+DATABASE_URL="postgresql+psycopg://auditlens:auditlens@127.0.0.1:5432/auditlens" \
+PYTHONPATH=. ./.venv/bin/python scripts/backfill_event_fields.py --source-fields --dry-run --hours 4 --limit 10000
+```
+
+For a recent production window, prefer the safe wrapper:
+
+```bash
+DATABASE_URL="postgresql+psycopg://auditlens:auditlens@127.0.0.1:5432/auditlens" ./scripts/backfill_recent_source_fields.sh
+```
+
+For progressive batches, keep the window tight and let the runner advance in smaller chunks:
+
+```bash
+DATABASE_URL="postgresql+psycopg://auditlens:auditlens@127.0.0.1:5432/auditlens" \
+BACKFILL_HOURS=4 BACKFILL_LIMIT=10000 BACKFILL_SLEEP_MS=250 ./scripts/backfill_recent_source_fields.sh
+```
+
+To backfill a specific older window:
+
+```bash
+PYTHONPATH=. ./.venv/bin/python scripts/backfill_event_fields.py --source-fields --since 2026-05-05T00:00:00Z --until 2026-05-05T04:00:00Z --limit 10000
+```
+
+Run a cron job every 5 minutes only if you need a slow catch-up for historical rows:
+
+```cron
+*/5 * * * * cd /Users/jegan/playground/AuditLens && DATABASE_URL="postgresql+psycopg://auditlens:auditlens@127.0.0.1:5432/auditlens" BACKFILL_HOURS=4 BACKFILL_LIMIT=10000 ./scripts/backfill_recent_source_fields.sh >> logs/backfill_recent_source_fields.cron.log 2>&1
+```
+
+Stop cron by removing that entry from your crontab:
+
+```bash
+crontab -e
+```
+
+Monitor progress with:
+
+```bash
+scripts/db_status.sh
+```
+
+Do not run millions of rows in one shot. Keep the time window short and advance in batches until the coverage stabilizes.
+
 Open:
 
 - UI: `http://127.0.0.1:3000/events`

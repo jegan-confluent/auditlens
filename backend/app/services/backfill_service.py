@@ -1,9 +1,11 @@
 import json
 import logging
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
+from time import sleep
 from typing import Any
 
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, tuple_
 from sqlalchemy.orm import Session
 
 from backend.app.db.models import AuditEvent
@@ -88,6 +90,30 @@ def _has_column(event: AuditEvent, column_name: str) -> bool:
 
 def _top_level_keys(payload: dict[str, Any]) -> list[str]:
     return sorted(str(key) for key in payload.keys())
+
+
+def _effective_since(*, hours: int | None = None, since: datetime | None = None) -> datetime | None:
+    candidates: list[datetime] = []
+    if since is not None:
+        candidates.append(since)
+    if hours is not None:
+        if hours < 0:
+            raise ValueError("hours must be >= 0")
+        candidates.append(datetime.now(timezone.utc) - timedelta(hours=hours))
+    if not candidates:
+        return None
+    result = max(candidates)
+    if result.tzinfo is None:
+        result = result.replace(tzinfo=timezone.utc)
+    return result
+
+
+def _normalize_dt(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
 
 
 def _source_ip_from_payload(payload: dict[str, Any], event: AuditEvent | None = None) -> str:
@@ -196,78 +222,151 @@ def _needs_source_backfill(event: AuditEvent, *, force: bool) -> bool:
     return any(getattr(event, FIELD_ATTRS[field]) in (None, "") for field in SOURCE_FIELDS)
 
 
+def _build_batch_query(
+    *,
+    since: datetime | None,
+    until: datetime | None,
+    force: bool,
+    target_id: int | None,
+    order: str,
+    cursor: tuple[datetime, int] | None,
+    batch_size: int,
+):
+    query = select(AuditEvent)
+    if target_id is not None:
+        query = query.where(AuditEvent.id == target_id)
+    else:
+        if since is not None:
+            query = query.where(AuditEvent.timestamp >= since)
+        if until is not None:
+            query = query.where(AuditEvent.timestamp <= until)
+        if not force:
+            query = query.where(
+                or_(
+                    AuditEvent.source_ip.is_(None),
+                    AuditEvent._source_context.is_(None),
+                    AuditEvent._client_id.is_(None),
+                    AuditEvent._connection_id.is_(None),
+                    AuditEvent._request_id.is_(None),
+                    AuditEvent.environment_id.is_(None),
+                    AuditEvent.flink_region.is_(None),
+                    AuditEvent.network_id.is_(None),
+                )
+            )
+            query = query.where(
+                or_(
+                    AuditEvent.raw_payload_json.contains('"clientIp"'),
+                    AuditEvent.raw_payload_json.contains('"client_ip"'),
+                    AuditEvent.raw_payload_json.contains('"requestMetadata"'),
+                    AuditEvent.raw_payload_json.contains('"clientAddress"'),
+                    AuditEvent.raw_payload_json.contains('"data_json"'),
+                )
+            )
+        if cursor is not None:
+            if order == "newest":
+                query = query.where(tuple_(AuditEvent.timestamp, AuditEvent.id) < cursor)
+            else:
+                query = query.where(tuple_(AuditEvent.timestamp, AuditEvent.id) > cursor)
+    if order == "newest":
+        query = query.order_by(AuditEvent.timestamp.desc(), AuditEvent.id.desc())
+    else:
+        query = query.order_by(AuditEvent.timestamp.asc(), AuditEvent.id.asc())
+    return query.limit(batch_size)
+
+
 def backfill_source_fields_from_raw_payload(
     db: Session,
     *,
     dry_run: bool = True,
     limit: int = 1000,
     force: bool = False,
+    hours: int | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    order: str = "oldest",
+    sleep_ms: int = 0,
     target_id: int | None = None,
     debug_sample: int = 0,
 ) -> dict[str, Any]:
     limit = max(1, min(int(limit), 10000))
-    query = select(AuditEvent).order_by(AuditEvent.id.asc(), AuditEvent.timestamp.asc()).limit(limit)
-    if target_id is not None:
-        query = query.where(AuditEvent.id == target_id).limit(1)
-    if not force:
-        query = query.where(
-            or_(
-                AuditEvent.source_ip.is_(None),
-                AuditEvent._source_context.is_(None),
-                AuditEvent._client_id.is_(None),
-                AuditEvent._connection_id.is_(None),
-                AuditEvent._request_id.is_(None),
-                AuditEvent.environment_id.is_(None),
-                AuditEvent.flink_region.is_(None),
-                AuditEvent.network_id.is_(None),
-            )
-    )
+    order = order.lower().strip()
+    if order not in {"oldest", "newest"}:
+        raise ValueError("order must be oldest or newest")
+    sleep_ms = max(0, int(sleep_ms))
+    effective_since = _effective_since(hours=hours, since=_normalize_dt(since))
+    effective_until = _normalize_dt(until)
     result = BackfillResult(dry_run=dry_run, force=force)
-    if target_id is None and not force:
-        query = query.where(
-            or_(
-                AuditEvent.raw_payload_json.contains('"clientIp"'),
-                AuditEvent.raw_payload_json.contains('"client_ip"'),
-                AuditEvent.raw_payload_json.contains('"requestMetadata"'),
-                AuditEvent.raw_payload_json.contains('"clientAddress"'),
-                AuditEvent.raw_payload_json.contains('"data_json"'),
-            )
+    processed = 0
+    batch_size = min(limit, 1000)
+    cursor: tuple[datetime, int] | None = None
+    while processed < limit:
+        current_limit = min(batch_size, limit - processed)
+        query = _build_batch_query(
+            since=effective_since,
+            until=effective_until,
+            force=force,
+            target_id=target_id,
+            order=order,
+            cursor=cursor,
+            batch_size=current_limit,
         )
-    for event in db.scalars(query).all():
-        result.scanned += 1
-        try:
-            payload = json.loads(event.raw_payload_json) if event.raw_payload_json else {}
-        except json.JSONDecodeError:
-            result.invalid_json += 1
-            continue
-        source_info = extract_source_info(payload, event)
-        source_ip = _source_ip_from_payload(payload, event) or source_info.get("source_ip")
-        changed = False
-        for field in SOURCE_FIELDS:
-            attr = FIELD_ATTRS[field]
-            current = getattr(event, attr)
-            next_value = source_ip if field == "source_ip" else source_info.get(field)
-            if next_value in (None, ""):
+        batch = db.scalars(query).all()
+        if not batch:
+            break
+        for event in batch:
+            processed += 1
+            result.scanned += 1
+            try:
+                payload = json.loads(event.raw_payload_json) if event.raw_payload_json else {}
+            except json.JSONDecodeError:
+                result.invalid_json += 1
+                if debug_sample > 0:
+                    decision = _backfill_decision(event, {}, force=force)
+                    print(
+                        "row "
+                        f"id={decision['id']} "
+                        f"has_raw_payload_json={'yes' if decision['has_raw_payload_json'] else 'no'} "
+                        f"has_data_json_column={'yes' if decision['has_data_json_column'] else 'no'} "
+                        f"raw_payload_top_level_keys={','.join(decision['raw_payload_top_level_keys']) or '-'} "
+                        f"extracted_source_ip={decision['extracted_source_ip'] or '-'} "
+                        f"extracted_source_context={decision['extracted_source_context'] or '-'} "
+                        f"update_reason={decision['update_reason']}"
+                    )
+                    debug_sample -= 1
                 continue
-            if force or current in (None, ""):
-                changed = True
-                if not dry_run:
-                    setattr(event, field, next_value)
-        if changed:
-            result.updated += 1
-        if debug_sample > 0:
-            decision = _backfill_decision(event, payload, force=force)
-            print(
-                "row "
-                f"id={decision['id']} "
-                f"has_raw_payload_json={'yes' if decision['has_raw_payload_json'] else 'no'} "
-                f"has_data_json_column={'yes' if decision['has_data_json_column'] else 'no'} "
-                f"raw_payload_top_level_keys={','.join(decision['raw_payload_top_level_keys']) or '-'} "
-                f"extracted_source_ip={decision['extracted_source_ip'] or '-'} "
-                f"extracted_source_context={decision['extracted_source_context'] or '-'} "
-                f"update_reason={decision['update_reason']}"
-            )
-            debug_sample -= 1
+            source_info = extract_source_info(payload, event)
+            source_ip = _source_ip_from_payload(payload, event) or source_info.get("source_ip")
+            changed = False
+            for field in SOURCE_FIELDS:
+                attr = FIELD_ATTRS[field]
+                current = getattr(event, attr)
+                next_value = source_ip if field == "source_ip" else source_info.get(field)
+                if next_value in (None, ""):
+                    continue
+                if force or current in (None, ""):
+                    changed = True
+                    if not dry_run:
+                        setattr(event, field, next_value)
+            if changed:
+                result.updated += 1
+            if debug_sample > 0:
+                decision = _backfill_decision(event, payload, force=force)
+                print(
+                    "row "
+                    f"id={decision['id']} "
+                    f"has_raw_payload_json={'yes' if decision['has_raw_payload_json'] else 'no'} "
+                    f"has_data_json_column={'yes' if decision['has_data_json_column'] else 'no'} "
+                    f"raw_payload_top_level_keys={','.join(decision['raw_payload_top_level_keys']) or '-'} "
+                    f"extracted_source_ip={decision['extracted_source_ip'] or '-'} "
+                    f"extracted_source_context={decision['extracted_source_context'] or '-'} "
+                    f"update_reason={decision['update_reason']}"
+                )
+                debug_sample -= 1
+            cursor = (event.timestamp, event.id)
+        if len(batch) < current_limit:
+            break
+        if sleep_ms > 0 and processed < limit:
+            sleep(sleep_ms / 1000.0)
     if not dry_run:
         db.commit()
     logger.info("source field backfill complete scanned=%s updated=%s invalid_json=%s dry_run=%s force=%s", result.scanned, result.updated, result.invalid_json, dry_run, force)

@@ -1,7 +1,11 @@
 import json
+import os
 from datetime import datetime, timezone
+from datetime import timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import subprocess
+import sys
 
 from sqlalchemy.orm import sessionmaker
 
@@ -157,6 +161,129 @@ def test_source_backfill_extracts_nested_data_json_client_ip():
         tmp.cleanup()
 
 
+def test_source_backfill_hours_applies_timestamp_filter():
+    tmp, SessionLocal = _session()
+    try:
+        now = datetime.now(timezone.utc)
+        with SessionLocal() as db:
+            old_event = create_event(
+                db,
+                {
+                    "id": "backfill-old",
+                    "timestamp": (now - timedelta(hours=6)).isoformat(),
+                    "methodName": "kafka.Authentication",
+                    "principal": "u-source",
+                    "requestMetadata": {"clientAddress": [{"ip": "165.1.202.190"}]},
+                },
+            )
+            new_event = create_event(
+                db,
+                {
+                    "id": "backfill-new",
+                    "timestamp": (now - timedelta(hours=1)).isoformat(),
+                    "methodName": "kafka.Authentication",
+                    "principal": "u-source",
+                    "requestMetadata": {"clientAddress": [{"ip": "165.1.202.190"}]},
+                },
+            )
+            old_event.source_ip = None
+            new_event.source_ip = None
+            db.commit()
+
+            result = backfill_source_fields_from_raw_payload(db, dry_run=True, hours=4, limit=10)
+            assert result["scanned"] == 1
+            assert result["updated"] == 1
+    finally:
+        tmp.cleanup()
+
+
+def test_source_backfill_since_until_applies_timestamp_filter():
+    tmp, SessionLocal = _session()
+    try:
+        now = datetime.now(timezone.utc)
+        with SessionLocal() as db:
+            create_event(
+                db,
+                {
+                    "id": "backfill-before-window",
+                    "timestamp": (now - timedelta(hours=10)).isoformat(),
+                    "methodName": "kafka.Authentication",
+                    "principal": "u-source",
+                    "requestMetadata": {"clientAddress": [{"ip": "165.1.202.190"}]},
+                },
+            ).source_ip = None
+            target_event = create_event(
+                db,
+                {
+                    "id": "backfill-window",
+                    "timestamp": (now - timedelta(hours=2)).isoformat(),
+                    "methodName": "kafka.Authentication",
+                    "principal": "u-source",
+                    "requestMetadata": {"clientAddress": [{"ip": "165.1.202.190"}]},
+                },
+            )
+            target_event.source_ip = None
+            create_event(
+                db,
+                {
+                    "id": "backfill-after-window",
+                    "timestamp": (now + timedelta(hours=1)).isoformat(),
+                    "methodName": "kafka.Authentication",
+                    "principal": "u-source",
+                    "requestMetadata": {"clientAddress": [{"ip": "165.1.202.190"}]},
+                },
+            ).source_ip = None
+            db.commit()
+
+            result = backfill_source_fields_from_raw_payload(
+                db,
+                dry_run=True,
+                since=now - timedelta(hours=3),
+                until=now - timedelta(hours=1),
+                limit=10,
+            )
+            assert result["scanned"] == 1
+            assert result["updated"] == 1
+    finally:
+        tmp.cleanup()
+
+
+def test_source_backfill_order_newest_selects_newest_rows_first(capsys):
+    tmp, SessionLocal = _session()
+    try:
+        now = datetime.now(timezone.utc)
+        with SessionLocal() as db:
+            old_event = create_event(
+                db,
+                {
+                    "id": "backfill-order-old",
+                    "timestamp": (now - timedelta(hours=2)).isoformat(),
+                    "methodName": "kafka.Authentication",
+                    "principal": "u-source",
+                    "requestMetadata": {"clientAddress": [{"ip": "165.1.202.190"}]},
+                },
+            )
+            new_event = create_event(
+                db,
+                {
+                    "id": "backfill-order-new",
+                    "timestamp": (now - timedelta(minutes=10)).isoformat(),
+                    "methodName": "kafka.Authentication",
+                    "principal": "u-source",
+                    "requestMetadata": {"clientAddress": [{"ip": "165.1.202.190"}]},
+                },
+            )
+            old_event.source_ip = None
+            new_event.source_ip = None
+            db.commit()
+
+            backfill_source_fields_from_raw_payload(db, dry_run=True, order="newest", limit=1, debug_sample=1)
+            output = capsys.readouterr().out
+            assert f"id={new_event.id}" in output
+    finally:
+        tmp.cleanup()
+
+
 def test_source_backfill_does_not_overwrite_without_force():
     tmp, SessionLocal = _session()
     try:
@@ -183,3 +310,18 @@ def test_source_backfill_does_not_overwrite_without_force():
             assert result["updated"] == 1
     finally:
         tmp.cleanup()
+
+
+def test_source_backfill_invalid_timestamp_errors_cleanly(tmp_path):
+    db_url = f"sqlite:///{tmp_path / 'auditlens-invalid-timestamp.db'}"
+    env = {"DATABASE_URL": db_url, "FORWARDER_DATABASE_URL": db_url}
+    result = subprocess.run(
+        [sys.executable, str(Path(__file__).resolve().parents[1] / "scripts" / "backfill_event_fields.py"), "--source-fields", "--dry-run", "--since", "not-a-timestamp"],
+        cwd=Path(__file__).resolve().parents[1],
+        env={**os.environ, **env},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "invalid --since timestamp" in result.stderr
