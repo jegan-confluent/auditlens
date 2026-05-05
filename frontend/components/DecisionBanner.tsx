@@ -25,12 +25,15 @@ function actionFor(summary: SummaryResponse) {
 
 function ctaFor(summary: SummaryResponse) {
   if (summary.overall_status === "action_required") {
-    return { label: "Investigate critical events", patch: { signal: "action_required", hide_noise: "true" } };
+    const patch: Partial<EventFilters> = { mode: "decision", signal: "action_required", hide_noise: "true" };
+    return { label: "Investigate critical events", patch };
   }
   if (summary.overall_status === "review_needed") {
-    return { label: "Show changes to review", patch: { signal: "attention", hide_noise: "true" } };
+    const patch: Partial<EventFilters> = { mode: "decision", signal: "attention", hide_noise: "true" };
+    return { label: "Show changes to review", patch };
   }
-  return { label: "View routine activity", patch: { signal: "", hide_noise: "false" } };
+  const patch: Partial<EventFilters> = { mode: "audit_trail", time_window: "72h", signal: "", hide_noise: "false" };
+  return { label: "Show full audit trail", patch };
 }
 
 export default function DecisionBanner({ summary, onApplyDecision }: {

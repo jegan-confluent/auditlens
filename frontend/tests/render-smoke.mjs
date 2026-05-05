@@ -26,6 +26,9 @@ const filtersSource = fs.readFileSync(new URL("../lib/eventFilters.ts", import.m
 if (!filtersSource.includes('params.set("signal_type", value.trim())')) {
   throw new Error("Action Needed quick filter must use signal_type=action_required");
 }
+if (!filtersSource.includes('params.set("mode", value.trim())')) {
+  throw new Error("Mode filter must be passed through as a backend query param");
+}
 if (!filtersSource.includes('params.set("hide_noise", "true")')) {
   throw new Error("Hide Noise quick filter must use hide_noise=true");
 }
@@ -33,8 +36,8 @@ if (!filtersSource.includes('impact_type')) {
   throw new Error("Impact filters must be backend-backed query params");
 }
 const filterBarSource = fs.readFileSync(new URL("../components/FilterBar.tsx", import.meta.url), "utf8");
-if (!filterBarSource.includes('label: "Review", patch: { signal: "attention"')) {
-  throw new Error("Review quick filter must use signal_type=attention");
+if (!filterBarSource.includes('label: "Review", patch: { mode: "decision", signal: "attention"')) {
+  throw new Error("Review quick filter must use mode-aware attention filters");
 }
 if (!filtersSource.includes('key === "hide_noise"') || !filtersSource.includes('value === "true"')) {
   throw new Error("Clear/show-noise state must remove signal_type and hide_noise params");
@@ -60,8 +63,8 @@ if (!tableSource.includes("event.resource_name && event.resource_name !==")) {
 if (!tableSource.includes("actor_display_name") || !tableSource.includes("actor_raw_id")) {
   throw new Error("Table must show enriched actor display with raw ID fallback");
 }
-if (!tableSource.includes("Not provided by audit event") || !tableSource.includes("event.source_ip || event.source_context")) {
-  throw new Error("Source/IP column must not use cluster/source_context as an IP fallback");
+if (!tableSource.includes("No source IP / context:") || !tableSource.includes("No source IP in audit event")) {
+  throw new Error("Source/IP column must clearly label missing IP fallback");
 }
 if (!tableSource.includes("triage_status")) {
   throw new Error("Table must render triage status");
@@ -77,7 +80,7 @@ if (tableSource.includes("Unknown source") || drawerSource.includes("Unknown sou
 }
 
 const decisionSource = fs.readFileSync(new URL("../components/DecisionBanner.tsx", import.meta.url), "utf8");
-for (const text of ["Critical activity detected", "Changes detected", "Investigate critical events", "Show changes to review", "View routine activity"]) {
+for (const text of ["Critical activity detected", "Changes detected", "Investigate critical events", "Show changes to review", "Show full audit trail"]) {
   if (!decisionSource.includes(text)) {
     throw new Error(`Decision banner missing CTA/copy: ${text}`);
   }
@@ -89,27 +92,27 @@ if (!signalSource.includes("Filter by this activity") || !signalSource.includes(
 }
 
 const eventsSource = fs.readFileSync(new URL("../app/events/page.tsx", import.meta.url), "utf8");
-if (!eventsSource.includes("Only attention and action-required events are shown") || !eventsSource.includes("Show all activity")) {
-  throw new Error("Events page must expose latest mode and show-all controls");
+if (!eventsSource.includes("Decision mode. Routine informational activity is hidden.") || !eventsSource.includes("Show all activity") || !eventsSource.includes("Back to decision mode")) {
+  throw new Error("Events page must expose decision mode and audit trail controls");
 }
 if (!eventsSource.includes("Show only destructive changes")) {
   throw new Error("Events page must expose destructive activity CTA");
 }
 const emptySource = fs.readFileSync(new URL("../components/EmptyState.tsx", import.meta.url), "utf8");
-if (!emptySource.includes("Show all activity") || !emptySource.includes("Reset to latest mode")) {
+if (!emptySource.includes("Show all activity") || !emptySource.includes("Reset to decision mode")) {
   throw new Error("Empty state must explain filter recovery actions");
 }
-if (!filtersSource.includes('time_window: "2h"') || !filtersSource.includes('signal: "attention,action_required"')) {
-  throw new Error("Default filters must use latest mode");
+if (!filtersSource.includes('mode: "decision"') || !filtersSource.includes('mode: "audit_trail"')) {
+  throw new Error("Default filters must expose decision and audit trail modes");
 }
 if (!filtersSource.includes('limit: "50"')) {
   throw new Error("Events page must fetch only 50 rows initially");
 }
-if (!filtersSource.includes("Only important activity") || !filtersSource.includes("Routine noise hidden")) {
+if (!filtersSource.includes("Decision mode") || !filtersSource.includes("Full audit trail mode")) {
   throw new Error("Active filter labels must be human-readable");
 }
-if (!eventsSource.includes("Some events are hidden due to filters")) {
-  throw new Error("Events page must explain over-filtering visibility");
+if (!eventsSource.includes("Decision mode is active. Routine informational activity is hidden.") || !eventsSource.includes("Full audit trail mode is active. Routine read/list activity is included.")) {
+  throw new Error("Events page must explain mode visibility");
 }
 
 console.log("frontend smoke checks passed");

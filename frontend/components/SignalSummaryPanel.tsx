@@ -21,6 +21,7 @@ function resourceTypeForFamily(family: string) {
 
 function flowPatch(group: SummaryResponse["flow_groups"][number]): Partial<EventFilters> {
   return {
+    mode: group.signal_type === "noise" ? "audit_trail" : "decision",
     actor: group.subject || "",
     signal: group.signal_type || "",
     resource_type: resourceTypeForFamily(group.resource_family),

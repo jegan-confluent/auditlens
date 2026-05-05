@@ -18,6 +18,7 @@ MAX_EVENT_LIMIT = 500
 SIGNAL_FILTER_MAX_SCAN = 5000
 SIGNAL_FILTER_BATCH_SIZE = 500
 VALID_SIGNAL_TYPES = {"noise", "informational", "attention", "action_required"}
+VALID_MODES = {"decision", "audit_trail"}
 VALID_IMPACT_TYPES = {
     "constructive",
     "destructive",
@@ -38,6 +39,7 @@ CHANGE_TYPE_ALIASES = {
     "read": {"read/listed"},
     "listed": {"read/listed"},
 }
+DECISION_ACTION_CATEGORIES = {"create", "delete", "modify", "api key"}
 logger = logging.getLogger("auditlens.backend.events")
 TIME_WINDOW_RE = re.compile(r"^([1-9][0-9]*)([mh])$")
 EVENT_LIST_COLUMNS = (
@@ -229,6 +231,28 @@ def _parse_change_types(change_type: str | None) -> set[str]:
     return values
 
 
+def _normalize_mode(mode: str | None) -> str:
+    value = (mode or "decision").strip().lower()
+    if value not in VALID_MODES:
+        raise ValueError("mode must be decision or audit_trail")
+    return value
+
+
+def _decision_mode_condition():
+    return or_(
+        func.lower(AuditEvent.action_category).in_(DECISION_ACTION_CATEGORIES),
+        AuditEvent.is_failure.is_(True),
+        AuditEvent.is_denied.is_(True),
+        func.lower(AuditEvent.result).in_({"failure", "denied"}),
+        func.lower(AuditEvent.normalized_action).like("%acl%"),
+        func.lower(AuditEvent.normalized_action).like("%api key%"),
+        func.lower(AuditEvent.normalized_action).like("%apikey%"),
+        func.lower(AuditEvent.normalized_action).like("%role%"),
+        func.lower(AuditEvent.normalized_action).like("%grant%"),
+        func.lower(AuditEvent.normalized_action).like("%revoke%"),
+    )
+
+
 def _matches_derived_filters(
     event: AuditEvent,
     signal_types: set[str],
@@ -261,6 +285,7 @@ def list_events_result(
     *,
     limit: int = 100,
     offset: int = 0,
+    mode: str = "decision",
     signal_type: str | None = None,
     hide_noise: bool = False,
     impact_type: str | None = None,
@@ -270,13 +295,16 @@ def list_events_result(
 ) -> EventListResult:
     limit = min(max(limit, 1), MAX_EVENT_LIMIT)
     offset = max(offset, 0)
+    mode = _normalize_mode(mode)
     signal_types = _parse_signal_types(signal_type)
     impact_types = _parse_impact_types(impact_type)
     change_types = _parse_change_types(change_type)
     derived_filter_applied = bool(signal_types or impact_types or change_types) or hide_noise
     filters = _apply_derived_prefilters(filters, impact_types, change_types)
-    active_filters = {key: value for key, value in filters.items() if isinstance(value, str) and value.strip()}
+    active_filters = {key: value for key, value in {**filters, "mode": mode}.items() if isinstance(value, str) and value.strip()}
     conditions = _event_filter_conditions(**filters)
+    if mode == "decision":
+        conditions.append(_decision_mode_condition())
     count_query = select(func.count(AuditEvent.id))
     item_query = select(AuditEvent).options(load_only(*EVENT_LIST_COLUMNS), defer(AuditEvent.raw_payload_json, raiseload=True))
     if conditions:
@@ -293,7 +321,7 @@ def list_events_result(
             scanned_events=len(items),
             signal_filter_applied=False,
             hide_noise_applied=False,
-            debug=_debug_info(db, filters, pre_filter_total, len(items), len(items), False) if debug else None,
+            debug=_debug_info(db, filters, mode, pre_filter_total, len(items), len(items), False) if debug else None,
         )
 
     collected: list[AuditEvent] = []
@@ -318,13 +346,14 @@ def list_events_result(
         signal_filter_applied=bool(signal_types),
         hide_noise_applied=hide_noise,
         result_limit_reached=result_limit_reached,
-        debug=_debug_info(db, filters, pre_filter_total, scanned, len(collected), True) if debug else None,
+        debug=_debug_info(db, filters, mode, pre_filter_total, scanned, len(collected), True) if debug else None,
     )
 
 
 def _debug_info(
     db: Session,
     filters: dict[str, Any],
+    mode: str,
     pre_filter_total: int,
     scanned_events: int,
     post_filter_total: int,
@@ -340,6 +369,7 @@ def _debug_info(
         distribution[key] = distribution.get(key, 0) + int(count)
     return {
         "applied_filters": {key: value for key, value in filters.items() if value not in (None, "")},
+        "mode": mode,
         "row_count_before_derived_filtering": pre_filter_total,
         "scanned_events": scanned_events,
         "row_count_after_derived_filtering": post_filter_total,

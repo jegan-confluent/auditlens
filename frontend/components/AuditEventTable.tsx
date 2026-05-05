@@ -39,7 +39,9 @@ function actorSecondary(event: AuditEvent) {
 }
 
 function displaySourceIp(event: AuditEvent) {
-  return event.source_ip || event.source_context || "Not provided by audit event";
+  if (event.source_ip) return event.source_ip;
+  if (event.source_context) return `No source IP / context: ${event.source_context}`;
+  return "No source IP in audit event";
 }
 
 function displaySummary(event: AuditEvent) {

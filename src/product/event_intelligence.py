@@ -356,10 +356,12 @@ def source_context(payload: dict[str, Any], event: Any | None = None) -> str:
     return context or "Not provided by audit event"
 
 
-def decision_reason_for(classification: dict[str, str], title: str) -> str:
+def decision_reason_for(classification: dict[str, str], title: str, *, failed: bool = False) -> str:
     impact = classification["impact_type"]
     change = classification["change_type"]
     family = classification["resource_family"].replace("_", " ")
+    if failed and impact == "read_only":
+        return "Failed read request. Review if expected or caused by stale/missing resource."
     if change == "denied" or impact == "security_sensitive":
         return "Authorization failure detected"
     if impact == "destructive":
@@ -379,7 +381,7 @@ def decision_reason_for(classification: dict[str, str], title: str) -> str:
     return "Audit activity classified by deterministic rules"
 
 
-def _title_for(change_type: str, impact: str, family: str) -> str:
+def _title_for(change_type: str, impact: str, family: str, *, failed: bool = False) -> str:
     family_label = {
         "api_key": "API key",
         "schema_registry": "Schema Registry",
@@ -389,6 +391,8 @@ def _title_for(change_type: str, impact: str, family: str) -> str:
         "ksql": "ksqlDB",
         "flink": "Flink statement",
     }.get(family, family.replace("_", " ").title() if family != "unknown" else "Resource")
+    if failed and impact == "read_only":
+        return f"{family_label} read failed" if family != "unknown" else "Failed read request"
     if change_type == "denied":
         return "Authorization denied" if impact == "security_sensitive" else "Request denied"
     if impact == "authorization_check":
@@ -414,8 +418,9 @@ def event_digest(payload: dict[str, Any], event: Any | None = None) -> dict[str,
     source_info = extract_source_info(payload, event)
     source_ip = _as_text(source_info.get("source_ip")) or _first(getattr(event, "source_ip", ""))
     method = _method(payload) or _as_text(getattr(event, "action", ""))
-    title = _title_for(classification["change_type"], classification["impact_type"], classification["resource_family"])
-    decision_reason = decision_reason_for(classification, title)
+    failed = _is_failure(payload, event)
+    title = _title_for(classification["change_type"], classification["impact_type"], classification["resource_family"], failed=failed)
+    decision_reason = decision_reason_for(classification, title, failed=failed)
 
     if classification["impact_type"] == "authorization_check":
         verb = "was denied authorization for" if classification["change_type"] == "denied" else "authorization checked"
@@ -424,7 +429,7 @@ def event_digest(payload: dict[str, Any], event: Any | None = None) -> dict[str,
         outcome = "failed authentication" if _is_failure(payload, event) else "authenticated"
         summary = f"{subject} {outcome} from {source_ip or source}"
     elif classification["change_type"] == "read/listed":
-        summary = f"{subject} read/listed {resource}"
+        summary = f"{subject} failed to read {resource}" if failed else f"{subject} read/listed {resource}"
     elif classification["change_type"] in {"created", "deleted", "updated", "configured"}:
         summary = f"{subject} {classification['change_type']} {resource}"
     else:

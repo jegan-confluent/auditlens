@@ -82,9 +82,11 @@ export default function EventsPage() {
   };
   const resetFilters = () => updateFilters(defaultFilters);
   const showAllActivity = () => updateFilters(allActivityFilters);
+  const showDecisionMode = () => updateFilters(defaultFilters);
   const applyFlowFilters = (patch: Partial<EventFilters>) => updateFilters({ ...filters, ...patch });
   const applyDecisionFilters = (patch: Partial<EventFilters>) => updateFilters({ ...filters, ...patch });
   const activeFilters = activeFilterLabels(filters);
+  const isDecisionMode = filters.mode === "decision";
 
   if (error) return <main className="page"><ErrorState message={error} systemState={system?.db_writer_state || system?.consumer_state} /></main>;
   const renderedEvents = data ? data.items : [];
@@ -93,10 +95,10 @@ export default function EventsPage() {
     <main className="page">
       <h1>Events</h1>
       <div className="mode-bar">
-        <strong>Latest mode: showing important activity from the last 2 hours. Routine noise is hidden. Only attention and action-required events are shown.</strong>
-        <button onClick={resetFilters}>Latest changes</button>
+        <strong>{isDecisionMode ? "Decision mode. Routine informational activity is hidden." : "Full audit trail mode. Routine read/list activity is included."}</strong>
+        <button onClick={showDecisionMode}>Back to decision mode</button>
         <button onClick={showAllActivity}>Show all activity</button>
-        <button onClick={() => updateFilters({ ...filters, impact_type: "destructive", hide_noise: "false", signal: "" })}>Show only destructive changes</button>
+        <button onClick={() => updateFilters({ ...filters, mode: "decision", impact_type: "destructive", hide_noise: "false", signal: "" })}>Show only destructive changes</button>
       </div>
       {summary ? (
         <>
@@ -106,11 +108,18 @@ export default function EventsPage() {
         </>
       ) : summaryLoading ? <LoadingState label="Loading decision summary" /> : summaryError ? <p className="active-filters">Decision summary unavailable: {summaryError}</p> : null}
       <FilterBar filters={filters} options={options} onChange={updateFilters} onReset={resetFilters} />
-      {(filters.hide_noise === "true" || filters.signal) ? <p className="active-filters">Some events are hidden due to filters. Use Show all activity to remove signal and noise filters.</p> : null}
-      {filters.hide_noise === "true" ? <p className="active-filters">Routine noise hidden. Use Show Noise to include authentication and authorization checks.</p> : null}
+      <p className="active-filters">
+        {isDecisionMode
+          ? "Decision mode is active. Routine informational activity is hidden."
+          : "Full audit trail mode is active. Routine read/list activity is included."}
+      </p>
       {!data ? <LoadingState /> : renderedEvents.length ? <AuditEventTable events={renderedEvents} onSelect={selectEvent} /> : (
         <EmptyState
-          diagnostics={filters.hide_noise === "true" ? "Only routine noise matched this window. Show noise to inspect authentication and authorization checks." : `Nothing matched these filters. Total matching rows: ${data.total}.`}
+          diagnostics={
+            isDecisionMode
+              ? `No decision events matched this window. Total matching rows: ${data.total}. Switch to audit trail mode to inspect routine reads and informational activity.`
+              : `Nothing matched these filters. Total matching rows: ${data.total}.`
+          }
           activeFilters={activeFilters}
           onReset={resetFilters}
           onShowAll={showAllActivity}

@@ -14,6 +14,8 @@ from backend.app.services.event_service import (
     _matches_derived_filters,
     _parse_change_types,
     _parse_impact_types,
+    _decision_mode_condition,
+    _normalize_mode,
     _parse_signal_types,
 )
 from src.product.event_intelligence import flow_group_key
@@ -118,18 +120,22 @@ def _flow_groups(events: list[AuditEvent], limit: int = 5) -> list[dict[str, Any
 def get_summary(
     db: Session,
     *,
+    mode: str = "audit_trail",
     signal_type: str | None = None,
     hide_noise: bool = False,
     impact_type: str | None = None,
     change_type: str | None = None,
     **filters: Any,
 ) -> dict:
+    mode = _normalize_mode(mode)
     signal_types = _parse_signal_types(signal_type)
     impact_types = _parse_impact_types(impact_type)
     change_types = _parse_change_types(change_type)
     derived_filter_applied = bool(signal_types or impact_types or change_types) or hide_noise
     filters = _apply_derived_prefilters(filters, impact_types, change_types)
     conditions = _event_filter_conditions(**filters)
+    if mode == "decision":
+        conditions.append(_decision_mode_condition())
     count_query = select(func.count(AuditEvent.id))
     failures_query = select(func.count(AuditEvent.id)).where(AuditEvent.is_failure.is_(True))
     denials_query = select(func.count(AuditEvent.id)).where(AuditEvent.is_denied.is_(True))

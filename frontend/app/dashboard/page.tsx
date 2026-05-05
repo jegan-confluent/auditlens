@@ -23,8 +23,8 @@ export default function DashboardPage() {
   const emptyEvents: EventListResponse = { items: [], limit: 5, offset: 0, total: 0, scanned_events: 0, signal_filter_applied: false, hide_noise_applied: false, result_limit_reached: false };
 
   useEffect(() => {
-    getEvents(new URLSearchParams({ limit: "10", time_window: "2h", hide_noise: "true" })).then(setRecent).catch((err: Error) => setError(err.message));
-    getSummary(new URLSearchParams({ time_window: "2h" })).then((data) => {
+    getEvents(new URLSearchParams({ limit: "10", time_window: "2h", mode: "decision" })).then(setRecent).catch((err: Error) => setError(err.message));
+    getSummary(new URLSearchParams({ time_window: "2h", mode: "decision" })).then((data) => {
       setSummary(data);
       setLastUpdated(new Date().toLocaleTimeString());
     }).catch((err: Error) => setError(err.message));
@@ -42,15 +42,15 @@ export default function DashboardPage() {
   };
 
   if (error) return <main className="page"><ErrorState message={error} /></main>;
-  if (!recent) return <main className="page"><LoadingState label="Loading recent events" /></main>;
+  if (!recent) return <main className="page"><LoadingState label="Loading recent decision events" /></main>;
   const failureEvents = failures || emptyEvents;
   const deletionEvents = deletions || emptyEvents;
 
   return (
     <main className="page">
-      {summary ? <SummaryCards summary={summary} lastUpdated={lastUpdated} /> : <ErrorState message="Summary is still loading or unavailable. Recent events are shown below." />}
+      {summary ? <SummaryCards summary={summary} lastUpdated={lastUpdated} /> : <ErrorState message="Summary is still loading or unavailable. Recent decision events are shown below." />}
       <section className="panel" style={{ marginTop: 16 }}>
-        <h2>Recent Events</h2>
+        <h2>Recent Decision Events</h2>
         {recent.items.length ? <AuditEventTable events={recent.items} onSelect={selectEvent} /> : <EmptyState />}
       </section>
       <div className="grid" style={{ marginTop: 16 }}>

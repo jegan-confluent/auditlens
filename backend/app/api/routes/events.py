@@ -20,6 +20,7 @@ class TriageUpdate(BaseModel):
 @router.get("/events", response_model=EventListResponse)
 def events(
     time_window: str | None = Query(default=None, pattern=r"^[1-9][0-9]*[mh]$"),
+    mode: str = Query(default="decision"),
     resource_type: str | None = None,
     resource: str | None = None,
     action_category: str | None = None,
@@ -38,6 +39,7 @@ def events(
         result_set = list_events_result(
             db,
             time_window=time_window,
+            mode=mode,
             resource_type=resource_type,
             resource=resource,
             action_category=action_category,

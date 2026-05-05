@@ -69,6 +69,8 @@ def test_flink_statement_primary_resource_and_source_context():
     assert digest["resource_display_short"] == "c360-loyalty-revenue-job"
     assert digest["change_type"] == "read/listed"
     assert digest["impact_type"] == "read_only"
+    assert digest["event_title"] == "Flink statement read failed"
+    assert digest["decision_reason"] == "Failed read request. Review if expected or caused by stale/missing resource."
 
 
 def test_flink_statement_method_classification():

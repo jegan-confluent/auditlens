@@ -57,8 +57,8 @@ export default function LayoutLabPage() {
           <p className="muted">Static mockups for comparing decision-first audit investigation layouts. Not production behavior.</p>
         </div>
         <div className="filter-chips">
-          <LabBadge>Latest mode</LabBadge>
-          <LabBadge>Noise hidden</LabBadge>
+          <LabBadge>Decision mode</LabBadge>
+          <LabBadge>Routine hidden</LabBadge>
           <LabBadge>Sampled summary</LabBadge>
           <LabBadge>Backend filtered</LabBadge>
         </div>
@@ -75,7 +75,7 @@ export default function LayoutLabPage() {
             <div className="eyebrow">Decision</div>
             <h2>Action required</h2>
             <p>Topic deletion and failed access attempts were detected in the latest two-hour window.</p>
-            <span>Sampled summary: latest 5,000 matching events. Filters: Latest mode, Noise hidden.</span>
+            <span>Sampled summary: latest 5,000 matching events. Filters: Decision mode, routine hidden.</span>
           </div>
           <div className="decision-action">
             <strong>Recommended action</strong>
@@ -99,7 +99,7 @@ export default function LayoutLabPage() {
         </div>
         <div className="lab-timeline-shell">
           <div className="panel lab-timeline">
-            <div className="eyebrow">Latest activity timeline</div>
+            <div className="eyebrow">Decision activity timeline</div>
             {mockEvents.map((event) => (
               <div key={`timeline-${event.time}`} className="lab-timeline-row">
                 <strong>{event.time}</strong>
@@ -134,11 +134,11 @@ export default function LayoutLabPage() {
           <div className="metric-card danger"><span className="metric-label">Risk posture</span><div className="metric-value compact">Review required</div><p className="metric-note">1 destructive change detected</p></div>
           <div className="metric-card"><span className="metric-label">Coverage</span><div className="metric-value">5,000</div><p className="metric-note">Latest matching events sampled</p></div>
           <div className="metric-card accent"><span className="metric-label">Top change</span><div className="metric-value compact">Topic delete</div><p className="metric-note">jegan-testing</p></div>
-          <div className="metric-card"><span className="metric-label">Noise hidden</span><div className="metric-value">Yes</div><p className="metric-note">Routine auth/authz suppressed</p></div>
+          <div className="metric-card"><span className="metric-label">Routine hidden</span><div className="metric-value">Yes</div><p className="metric-note">Routine auth/authz suppressed</p></div>
         </div>
         <div className="panel compliance-summary">
           <h3>Compliance-friendly summary</h3>
-          <p>AuditLens detected a destructive topic operation in the latest mode window. The action should be reconciled against the approved change record and resource owner.</p>
+          <p>AuditLens detected a destructive topic operation in the decision mode window. The action should be reconciled against the approved change record and resource owner.</p>
           <button>Drill into matching events</button>
         </div>
       </section>

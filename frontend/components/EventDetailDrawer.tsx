@@ -28,6 +28,12 @@ function displaySummary(event: AuditEvent) {
   return raw && actor && raw !== actor ? summary.replace(raw, actor) : summary;
 }
 
+function displaySource(event: AuditEvent) {
+  if (event.source_ip) return event.source_ip;
+  if (event.source_context) return `No source IP / context: ${event.source_context}`;
+  return "No source IP in audit event";
+}
+
 function copyText(value: string) {
   if (!value || typeof navigator === "undefined" || !navigator.clipboard) return;
   navigator.clipboard.writeText(value).catch(() => undefined);
@@ -75,7 +81,7 @@ export default function EventDetailDrawer({ event, onClose, onTriage }: {
         <div><div className="detail-label">Resource Type</div><strong>{event.resource_type || "unknown"}</strong></div>
         <div><div className="detail-label">Environment</div><strong>{event.environment_id || "Not provided by audit event"}</strong></div>
         <div><div className="detail-label">Region</div><strong>{event.flink_region || "Not provided by audit event"}</strong></div>
-        <div><div className="detail-label">Source IP</div><strong>{event.source_ip || event.source_display || "Not provided by audit event"}</strong></div>
+        <div><div className="detail-label">Source IP</div><strong>{displaySource(event)}</strong></div>
         <div><div className="detail-label">Cluster</div><strong>{event.cluster_id || "Not provided by audit event"}</strong></div>
         <div><div className="detail-label">Client ID</div><strong>{event.client_id || "Not provided by audit event"}</strong></div>
         <div><div className="detail-label">Connection ID</div><strong>{event.connection_id || "Not provided by audit event"}</strong></div>

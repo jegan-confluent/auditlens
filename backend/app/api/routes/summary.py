@@ -12,6 +12,7 @@ router = APIRouter(tags=["summary"])
 @router.get("/summary", response_model=SummaryResponse)
 def summary(
     time_window: str | None = Query(default=None, pattern=r"^[1-9][0-9]*[mh]$"),
+    mode: str = Query(default="decision"),
     resource_type: str | None = None,
     resource: str | None = None,
     action_category: str | None = None,
@@ -27,6 +28,7 @@ def summary(
         return get_summary(
             db,
             time_window=time_window,
+            mode=mode,
             resource_type=resource_type,
             resource=resource,
             action_category=action_category,

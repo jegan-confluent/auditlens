@@ -52,7 +52,7 @@ def test_health_returns_ok(client):
 def test_seeded_data_exists(client):
     response = client.get("/events")
     assert response.status_code == 200
-    assert response.json()["total"] == len(SEED_EVENTS)
+    assert response.json()["total"] == len(SEED_EVENTS) - 2
 
 
 def test_topic_create_jegan_testing_filter(client):
@@ -123,6 +123,117 @@ def test_time_window_rejects_invalid_values(client):
     for value in ("", "0m", "-1h", "24d", "not-a-window", "15"):
         response = client.get("/events", params={"time_window": value, "limit": 1})
         assert response.status_code == 422
+
+
+def test_mode_decision_hides_routine_reads_but_keeps_mutations_and_failures(client):
+    db_override = next(iter(client.app.dependency_overrides.values()))
+    session_gen = db_override()
+    try:
+        db = next(session_gen)
+        create_event(
+            db,
+            {
+                "id": "mode-read-1",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "methodName": "ListOrganizations",
+                "action": "ListOrganizations",
+                "user": "u-org-reader",
+                "resourceType": "Organization",
+                "resourceName": "organization=o-1",
+                "summary": "u-org-reader listed organization 'o-1'",
+                "resultStatus": "Success",
+            },
+        )
+        create_event(
+            db,
+            {
+                "id": "mode-delete-1",
+                "timestamp": (datetime.now(timezone.utc) + timedelta(seconds=1)).isoformat(),
+                "methodName": "kafka.DeleteTopics",
+                "action": "DeleteTopics",
+                "user": "u-admin-delete",
+                "resourceType": "Topic",
+                "resourceName": "topic=payments",
+                "summary": "u-admin-delete deleted topic 'payments'",
+                "resultStatus": "Success",
+            },
+        )
+        create_event(
+            db,
+            {
+                "id": "mode-create-1",
+                "timestamp": (datetime.now(timezone.utc) + timedelta(seconds=2)).isoformat(),
+                "methodName": "kafka.CreateTopics",
+                "action": "CreateTopics",
+                "user": "u-admin-create",
+                "resourceType": "Topic",
+                "resourceName": "topic=orders",
+                "summary": "u-admin-create created topic 'orders'",
+                "resultStatus": "Success",
+            },
+        )
+        create_event(
+            db,
+            {
+                "id": "mode-failure-1",
+                "timestamp": (datetime.now(timezone.utc) + timedelta(seconds=3)).isoformat(),
+                "methodName": "GetStatement",
+                "action": "GetStatement",
+                "user": "u-failed-reader",
+                "resourceType": "Statement",
+                "resourceName": "statement=missing-statement",
+                "summary": "u-failed-reader failed to read statement 'missing-statement'",
+                "resultStatus": "404 NOT_FOUND",
+            },
+        )
+        create_event(
+            db,
+            {
+                "id": "mode-denied-1",
+                "timestamp": (datetime.now(timezone.utc) + timedelta(seconds=4)).isoformat(),
+                "methodName": "kafka.Authorize",
+                "action": "Authorize",
+                "user": "u-failed-denied",
+                "resourceType": "Topic",
+                "resourceName": "topic=restricted",
+                "summary": "u-failed-denied was denied access to topic 'restricted'",
+                "resultStatus": "Denied",
+                "granted": False,
+            },
+        )
+    finally:
+        session_gen.close()
+
+    decision_read = client.get("/events", params={"mode": "decision", "actor": "u-org-reader", "limit": 10})
+    assert decision_read.status_code == 200
+    assert decision_read.json()["total"] == 0
+
+    audit_read = client.get("/events", params={"mode": "audit_trail", "actor": "u-org-reader", "limit": 10})
+    assert audit_read.status_code == 200
+    assert audit_read.json()["total"] == 1
+
+    decision_delete = client.get("/events", params={"mode": "decision", "actor": "u-admin-delete", "limit": 10})
+    assert decision_delete.status_code == 200
+    assert decision_delete.json()["total"] == 1
+
+    decision_create = client.get("/events", params={"mode": "decision", "actor": "u-admin-create", "limit": 10})
+    assert decision_create.status_code == 200
+    assert decision_create.json()["total"] == 1
+
+    decision_failure = client.get("/events", params={"mode": "decision", "actor": "u-failed-reader", "limit": 10})
+    assert decision_failure.status_code == 200
+    assert decision_failure.json()["total"] == 1
+
+    decision_denied = client.get("/events", params={"mode": "decision", "actor": "u-failed-denied", "limit": 10})
+    assert decision_denied.status_code == 200
+    assert decision_denied.json()["total"] == 1
+
+    summary_read_decision = client.get("/summary", params={"mode": "decision", "actor": "u-org-reader"})
+    summary_read_audit = client.get("/summary", params={"mode": "audit_trail", "actor": "u-org-reader"})
+    assert summary_read_decision.status_code == 200
+    assert summary_read_audit.status_code == 200
+    assert summary_read_decision.json()["total_events"] == 0
+    assert summary_read_audit.json()["total_events"] == 1
 
 
 def test_failures_endpoint_returns_failed_events(client):
@@ -207,7 +318,7 @@ def test_events_list_does_not_access_raw_payload_json(client):
     finally:
         session_gen.close()
 
-    response = client.get("/events", params={"actor": "u-raw-guard", "limit": 1})
+    response = client.get("/events", params={"mode": "audit_trail", "actor": "u-raw-guard", "limit": 1})
     assert response.status_code == 200
     item = response.json()["items"][0]
     assert item["source_context"] == "Not provided by audit event"
@@ -301,7 +412,7 @@ def test_events_list_uses_persisted_source_ip_for_request_metadata(client):
     finally:
         session_gen.close()
 
-    list_response = client.get("/events", params={"resource": "c360-loyalty-revenue-job", "limit": 1})
+    list_response = client.get("/events", params={"mode": "audit_trail", "resource": "c360-loyalty-revenue-job", "limit": 1})
     assert list_response.status_code == 200
     item = list_response.json()["items"][0]
     assert item["source_ip"] == "165.1.202.190"
@@ -351,9 +462,9 @@ def test_summary_aggregates_work(client):
     response = client.get("/summary")
     assert response.status_code == 200
     body = response.json()
-    assert body["total_events"] == len(SEED_EVENTS)
+    assert body["total_events"] == len(SEED_EVENTS) - 2
     assert body["summary_scope"] == "complete"
-    assert body["scanned_events"] == len(SEED_EVENTS)
+    assert body["scanned_events"] == len(SEED_EVENTS) - 2
     assert body["sample_limit"] == 5000
     assert body["failures"] >= 2
     assert body["by_action_category"]["Create"] >= 2
@@ -576,7 +687,7 @@ def test_batch_upsert_deduplicates_events(client):
     finally:
         session_gen.close()
     assert inserted == 0
-    assert total == len(SEED_EVENTS)
+    assert total == len(SEED_EVENTS) - 2
 
 
 def test_retention_cleanup_dry_run_and_delete(client):
