@@ -43,6 +43,51 @@ FIELD_ATTRS = {
 }
 
 
+def _load_json(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str) or not value.strip():
+        return {}
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _nested(mapping: dict[str, Any], *path: str) -> Any:
+    current: Any = mapping
+    for part in path:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(part)
+    return current
+
+
+def _client_address_ip(value: Any) -> str:
+    if isinstance(value, list) and value:
+        first = value[0]
+        if isinstance(first, dict):
+            return str(first.get("ip") or first.get("address") or "").strip()
+        return str(first).strip()
+    if isinstance(value, dict):
+        return str(value.get("ip") or value.get("address") or "").strip()
+    return str(value).strip() if value is not None else ""
+
+
+def _source_ip_from_payload(payload: dict[str, Any]) -> str:
+    data = _load_json(payload.get("data_json")) if isinstance(payload.get("data_json"), str) else payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    request_metadata = _nested(data, "requestMetadata") or payload.get("requestMetadata") or {}
+    return (
+        str(payload.get("clientIp") or "").strip()
+        or str(payload.get("client_ip") or "").strip()
+        or _client_address_ip(_nested(payload, "requestMetadata", "clientAddress"))
+        or _client_address_ip(_nested(data, "requestMetadata", "clientAddress"))
+        or _client_address_ip(_nested(request_metadata, "clientAddress"))
+        or _client_address_ip(payload.get("clientAddress"))
+    )
+
+
 def _needs_source_backfill(event: AuditEvent, *, force: bool) -> bool:
     if force:
         return True
@@ -74,11 +119,12 @@ def backfill_source_fields_from_raw_payload(db: Session, *, dry_run: bool = True
             result.invalid_json += 1
             continue
         source_info = extract_source_info(payload, event)
+        source_ip = _source_ip_from_payload(payload) or source_info.get("source_ip")
         changed = False
         for field in SOURCE_FIELDS:
             attr = FIELD_ATTRS[field]
             current = getattr(event, attr)
-            next_value = source_info.get(field)
+            next_value = source_ip if field == "source_ip" else source_info.get(field)
             if next_value in (None, ""):
                 continue
             if force or current in (None, ""):

@@ -96,6 +96,62 @@ def test_source_backfill_invalid_json_does_not_crash():
         tmp.cleanup()
 
 
+def test_source_backfill_extracts_top_level_client_ip_from_raw_payload_json():
+    tmp, SessionLocal = _session()
+    try:
+        with SessionLocal() as db:
+            db.add(
+                AuditEvent(
+                    event_fingerprint="top-level-client-ip",
+                    timestamp=datetime.now(timezone.utc),
+                    actor="u-source",
+                    action="kafka.Authentication",
+                    normalized_action="kafka.Authentication",
+                    action_category="Data",
+                    resource_type="unknown",
+                    resource_name="-",
+                    resource_display="Unknown",
+                    summary="top level client ip",
+                    raw_payload_json='{"clientIp":"165.1.202.190","data_json":"{\\"requestMetadata\\":{\\"clientAddress\\":[{\\"ip\\":\\"165.1.202.190\\"}]}}"}',
+                )
+            )
+            db.commit()
+            result = backfill_source_fields_from_raw_payload(db, dry_run=False)
+            event = db.query(AuditEvent).filter_by(event_fingerprint="top-level-client-ip").one()
+            assert result["updated"] == 1
+            assert event.source_ip == "165.1.202.190"
+    finally:
+        tmp.cleanup()
+
+
+def test_source_backfill_extracts_nested_data_json_client_ip():
+    tmp, SessionLocal = _session()
+    try:
+        with SessionLocal() as db:
+            db.add(
+                AuditEvent(
+                    event_fingerprint="nested-data-json-client-ip",
+                    timestamp=datetime.now(timezone.utc),
+                    actor="u-source",
+                    action="kafka.Authentication",
+                    normalized_action="kafka.Authentication",
+                    action_category="Data",
+                    resource_type="unknown",
+                    resource_name="-",
+                    resource_display="Unknown",
+                    summary="nested client ip",
+                    raw_payload_json='{"data_json":"{\\"requestMetadata\\":{\\"clientAddress\\":[{\\"ip\\":\\"165.1.202.190\\"}]},\\"clientIp\\":\\"165.1.202.190\\"}"}',
+                )
+            )
+            db.commit()
+            result = backfill_source_fields_from_raw_payload(db, dry_run=False)
+            event = db.query(AuditEvent).filter_by(event_fingerprint="nested-data-json-client-ip").one()
+            assert result["updated"] == 1
+            assert event.source_ip == "165.1.202.190"
+    finally:
+        tmp.cleanup()
+
+
 def test_source_backfill_does_not_overwrite_without_force():
     tmp, SessionLocal = _session()
     try:
