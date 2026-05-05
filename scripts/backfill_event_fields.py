@@ -21,6 +21,8 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=1000)
     parser.add_argument("--force", action="store_true", help="Overwrite existing source fields.")
     parser.add_argument("--allow-empty", action="store_true", help="Allow updates even when the target database is empty.")
+    parser.add_argument("--debug-sample", type=int, default=0, help="Print redacted diagnostics for the first N candidate rows.")
+    parser.add_argument("--id", type=int, dest="target_id", help="Restrict the backfill to a single AuditEvent id.")
     args = parser.parse_args()
     if not args.source_fields:
         parser.error("choose at least one backfill target, for example --source-fields")
@@ -37,7 +39,14 @@ def main() -> int:
         if not args.dry_run and not args.allow_empty and status["audit_events_rows"] == 0:
             print("Refusing to update an empty audit_events table. Re-run with --allow-empty if this is intentional.", file=sys.stderr)
             return 1
-        result = backfill_source_fields_from_raw_payload(db, dry_run=args.dry_run, limit=args.limit, force=args.force)
+        result = backfill_source_fields_from_raw_payload(
+            db,
+            dry_run=args.dry_run,
+            limit=args.limit,
+            force=args.force,
+            target_id=args.target_id,
+            debug_sample=args.debug_sample,
+        )
     print(json.dumps(result, sort_keys=True))
     return 0
 

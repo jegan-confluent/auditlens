@@ -86,7 +86,7 @@ def test_source_backfill_invalid_json_does_not_crash():
                     resource_name="stmt",
                     resource_display="Statement: stmt",
                     summary="bad json",
-                    raw_payload_json="{not-json",
+                    raw_payload_json='{"clientIp":"165.1.202.190",',
                 )
             )
             db.commit()
@@ -116,6 +116,11 @@ def test_source_backfill_extracts_top_level_client_ip_from_raw_payload_json():
                 )
             )
             db.commit()
+            result = backfill_source_fields_from_raw_payload(db, dry_run=True)
+            event = db.query(AuditEvent).filter_by(event_fingerprint="top-level-client-ip").one()
+            assert result["updated"] == 1
+            assert event.source_ip is None
+
             result = backfill_source_fields_from_raw_payload(db, dry_run=False)
             event = db.query(AuditEvent).filter_by(event_fingerprint="top-level-client-ip").one()
             assert result["updated"] == 1
