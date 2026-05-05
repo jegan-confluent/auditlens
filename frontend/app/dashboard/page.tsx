@@ -18,34 +18,37 @@ export default function DashboardPage() {
   const [deletions, setDeletions] = useState<EventListResponse | null>(null);
   const [system, setSystem] = useState<SystemStatus | null>(null);
   const [selected, setSelected] = useState<AuditEvent | null>(null);
+  const [lastUpdated, setLastUpdated] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
+  const emptyEvents: EventListResponse = { items: [], limit: 5, offset: 0, total: 0, scanned_events: 0, signal_filter_applied: false, hide_noise_applied: false, result_limit_reached: false };
 
   useEffect(() => {
-    Promise.all([
-      getSummary(),
-      getEvents(new URLSearchParams({ limit: "10" })),
-      getFailures(),
-      getDeletions(),
-      getSystemStatus()
-    ])
-      .then(([summaryData, recentData, failuresData, deletionsData, systemData]) => {
-        setSummary(summaryData);
-        setRecent(recentData);
-        setFailures(failuresData);
-        setDeletions(deletionsData);
-        setSystem(systemData);
-      })
-      .catch((err: Error) => setError(err.message));
+    getEvents(new URLSearchParams({ limit: "10", time_window: "2h", hide_noise: "true" })).then(setRecent).catch((err: Error) => setError(err.message));
+    getSummary(new URLSearchParams({ time_window: "2h" })).then((data) => {
+      setSummary(data);
+      setLastUpdated(new Date().toLocaleTimeString());
+    }).catch((err: Error) => setError(err.message));
+    getFailures().then(setFailures).catch(() => setFailures(emptyEvents));
+    getDeletions().then(setDeletions).catch(() => setDeletions(emptyEvents));
+    getSystemStatus().then(setSystem).catch(() => setSystem(null));
   }, []);
 
-  const selectEvent = async (event: AuditEvent) => setSelected(await getEvent(event.id));
+  const selectEvent = async (event: AuditEvent) => {
+    try {
+      setSelected(await getEvent(event.id));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to load event detail");
+    }
+  };
 
   if (error) return <main className="page"><ErrorState message={error} /></main>;
-  if (!summary || !recent || !failures || !deletions || !system) return <main className="page"><LoadingState /></main>;
+  if (!recent) return <main className="page"><LoadingState label="Loading recent events" /></main>;
+  const failureEvents = failures || emptyEvents;
+  const deletionEvents = deletions || emptyEvents;
 
   return (
     <main className="page">
-      <SummaryCards summary={summary} />
+      {summary ? <SummaryCards summary={summary} lastUpdated={lastUpdated} /> : <ErrorState message="Summary is still loading or unavailable. Recent events are shown below." />}
       <section className="panel" style={{ marginTop: 16 }}>
         <h2>Recent Events</h2>
         {recent.items.length ? <AuditEventTable events={recent.items} onSelect={selectEvent} /> : <EmptyState />}
@@ -53,14 +56,14 @@ export default function DashboardPage() {
       <div className="grid" style={{ marginTop: 16 }}>
         <section className="panel">
           <h2>Failures</h2>
-          {failures.items.length ? <AuditEventTable events={failures.items} onSelect={selectEvent} /> : <EmptyState diagnostics="No failed events in the current data set." />}
+          {failureEvents.items.length ? <AuditEventTable events={failureEvents.items} onSelect={selectEvent} /> : <EmptyState diagnostics="No failed events in the current data set." />}
         </section>
         <section className="panel">
           <h2>Deletions</h2>
-          {deletions.items.length ? <AuditEventTable events={deletions.items} onSelect={selectEvent} /> : <EmptyState diagnostics="No delete-category events in the current data set." />}
+          {deletionEvents.items.length ? <AuditEventTable events={deletionEvents.items} onSelect={selectEvent} /> : <EmptyState diagnostics="No delete-category events in the current data set." />}
         </section>
       </div>
-      <div style={{ marginTop: 16 }}><SystemStatusPanel status={system} /></div>
+      {system ? <div style={{ marginTop: 16 }}><SystemStatusPanel status={system} /></div> : null}
       <EventDetailDrawer event={selected} onClose={() => setSelected(null)} />
     </main>
   );

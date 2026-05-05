@@ -22,7 +22,7 @@ source:
   # Example: pkc-xxxxx.us-west-2.aws.confluent.cloud:9092
   # Get this from the Kafka cluster settings for the audit-log cluster.
   # It does NOT come from `confluent audit-log describe`.
-  bootstrap: "pkc-4ywp7.us-west-2.aws.confluent.cloud:9092"
+  bootstrap: "pkc-xxxxx.us-west-2.aws.confluent.cloud:9092"
 
   # Required. Kafka API key for the audit-log cluster.
   # This must match the audit-log cluster, not the workload cluster.
@@ -30,10 +30,10 @@ source:
   #   confluent audit-log describe
   #   confluent api-key list --resource <CLUSTER_ID>
   #   confluent api-key create --service-account <SERVICE_ACCOUNT_ID> --resource <CLUSTER_ID>
-  api_key: "KIFUHSEYOHJIU77V"
+  api_key: ""
 
   # Required. Kafka API secret for the audit-log cluster.
-  api_secret: "cfltk5gzgUHZdZA1IV4NIzm2uTvMcYMsh9Y90G01SCT8VEITpBA9d934wje5XWFg"
+  api_secret: ""
 
   # Required. Audit log topic name. The default is usually correct.
   # Get the actual topic name from `confluent audit-log describe`.
@@ -52,13 +52,13 @@ destination:
 
   # Required. Bootstrap endpoint for the destination/internal Kafka cluster.
   # Example: pkc-yyyyy.ap-south-1.aws.confluent.cloud:9092
-  bootstrap: "pkc-4v1gp.ap-northeast-1.aws.confluent.cloud:9092"
+  bootstrap: "pkc-yyyyy.ap-northeast-1.aws.confluent.cloud:9092"
 
   # Required. Kafka API key for the destination cluster.
-  api_key: "GH6HKWLFJDZOJ76P"
+  api_key: ""
 
   # Required. Kafka API secret for the destination cluster.
-  api_secret: "cflt7u2E/3TJ2CSygurRkdMmg8mGHO0qWl7LyI3CwUqNlPhR+xPUntYFX3G77z4A"
+  api_secret: ""
 
   # Required. Set true if the canonical AuditLens topics already exist.
   # Set false if you want the installer to create them.
@@ -70,13 +70,13 @@ schema_registry:
 
   # Required only when enabled is true.
   # Example: https://psrc-xxxxx.us-west-2.aws.confluent.cloud
-  url: "https://psrc-epkz2.ap-southeast-2.aws.confluent.cloud"
+  url: "https://psrc-xxxxx.ap-southeast-2.aws.confluent.cloud"
 
   # Required only when enabled is true.
-  api_key: "X7BAO7CW5MMHULFH"
+  api_key: ""
 
   # Required only when enabled is true.
-  api_secret: "cfltxvMCGYbfvzGU4viqsTBvLG5j6P1zIy9TF9Is2YAODk+AOu+2VP0dC9/iXxiA"
+  api_secret: ""
 
 product:
   # Recommended. Protect API endpoints with token auth.

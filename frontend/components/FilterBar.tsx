@@ -1,26 +1,24 @@
 "use client";
 
 import type { FilterOptions } from "../lib/types";
+import { activeFilterLabels, applyQuickFilter, type EventFilters } from "../lib/eventFilters";
+export { activeFilterLabels, defaultFilters, type EventFilters } from "../lib/eventFilters";
 
-export type EventFilters = {
-  time_window: string;
-  resource_type: string;
-  resource: string;
-  action_category: string;
-  actor: string;
-  result: string;
-};
+const quickFilters: Array<{ label: string; patch: Partial<EventFilters> }> = [
+  { label: "Latest changes", patch: { time_window: "2h", signal: "attention,action_required", hide_noise: "true", impact_type: "" } },
+  { label: "Action Needed", patch: { signal: "action_required", hide_noise: "true" } },
+  { label: "Review", patch: { signal: "attention", hide_noise: "true" } },
+  { label: "Hide Noise", patch: { hide_noise: "true", signal: "" } },
+  { label: "Show Noise", patch: { hide_noise: "false", signal: "" } },
+  { label: "Failed/Denied", patch: { result: "Failure", hide_noise: "false" } },
+  { label: "Destructive", patch: { impact_type: "destructive", hide_noise: "false" } },
+  { label: "Config Changes", patch: { impact_type: "configuration_change", hide_noise: "false" } },
+  { label: "Access Changes", patch: { impact_type: "access_change", hide_noise: "false" } }
+];
 
-const defaultFilters: EventFilters = {
-  time_window: "72h",
-  resource_type: "",
-  resource: "",
-  action_category: "",
-  actor: "",
-  result: ""
-};
-
-export { defaultFilters };
+function isQuickFilterActive(filters: EventFilters, patch: Partial<EventFilters>) {
+  return Object.entries(patch).every(([key, value]) => filters[key as keyof EventFilters] === value);
+}
 
 export default function FilterBar({ filters, options, onChange, onReset }: {
   filters: EventFilters;
@@ -29,10 +27,31 @@ export default function FilterBar({ filters, options, onChange, onReset }: {
   onReset: () => void;
 }) {
   const update = (key: keyof EventFilters, value: string) => onChange({ ...filters, [key]: value });
+  const apply = (patch: Partial<EventFilters>) => onChange(applyQuickFilter(filters, patch));
+  const activeLabels = activeFilterLabels(filters);
+
   return (
-    <>
-      <div className="toolbar">
-        <input value={filters.time_window} onChange={(event) => update("time_window", event.target.value)} placeholder="72h" />
+    <section className="filter-panel">
+      <div className="quick-filter-row" aria-label="Quick filters">
+        {quickFilters.map((filter) => (
+          <button
+            key={filter.label}
+            className={`quick-filter ${isQuickFilterActive(filters, filter.patch) ? "active" : ""}`}
+            onClick={() => apply(filter.patch)}
+          >
+            {filter.label}
+          </button>
+        ))}
+        <button className="quick-filter reset" onClick={onReset}>Clear Filters</button>
+      </div>
+      <div className="toolbar filter-toolbar">
+        <select value={filters.time_window} onChange={(event) => update("time_window", event.target.value)} aria-label="Time window">
+          <option value="10m">Last 10 mins</option>
+          <option value="1h">Last hour</option>
+          <option value="2h">Last 2 hours</option>
+          <option value="24h">Last 24 hours</option>
+          <option value="72h">Last 72 hours</option>
+        </select>
         <select value={filters.resource_type} onChange={(event) => update("resource_type", event.target.value)}>
           <option value="">All resource types</option>
           {(options?.resource_types || []).map((value) => <option key={value} value={value}>{value}</option>)}
@@ -47,9 +66,8 @@ export default function FilterBar({ filters, options, onChange, onReset }: {
           <option value="">All results</option>
           {(options?.results || []).map((value) => <option key={value} value={value}>{value}</option>)}
         </select>
-        <button onClick={onReset}>Reset filters</button>
       </div>
-      <p className="muted">Active filters: {Object.entries(filters).filter(([, value]) => value).map(([key, value]) => `${key}=${value}`).join(", ") || "none"}</p>
-    </>
+      <p className="active-filters">Active filters: {activeLabels.length ? activeLabels.join(", ") : "none"}</p>
+    </section>
   );
 }

@@ -6,6 +6,8 @@
 # ============================================================================
 .secrets
 .env
+.env.*
+schema-watcher/.env.example
 install.local.yaml
 install.*.local.yaml
 *.install.local.yaml
@@ -36,11 +38,11 @@ confluent.properties
 *.backup
 *.bak
 *.env.backup
-.env.*
 
 # Python
 # ============================================================================
 __pycache__/
+*__pycache__*
 *.py[cod]
 *$py.class
 *.so
@@ -102,10 +104,14 @@ htmlcov/
 
 # Kubernetes
 *.kubeconfig
+.terraform/
+.terraform.lock.hcl
 
 # Offsets and state
 # ============================================================================
 offsets.json
+forwarder_offsets.json
+dashboard/email_cache.json
 *.offset
 consumer_offsets/
 
@@ -125,6 +131,14 @@ temp/
 # ============================================================================
 frontend/.next/
 frontend/node_modules/
+node_modules/
+
+# Local runtime data and databases
+# ============================================================================
+data/
+*.db
+*.db-wal
+*.db-shm
 
 # macOS
 # ============================================================================
@@ -136,6 +150,7 @@ frontend/node_modules/
 # Archives (might contain sensitive data)
 # ============================================================================
 *.zip
+*.bundle
 *.tar.gz
 *.tgz
 
@@ -144,6 +159,7 @@ frontend/node_modules/
 !.gitkeep
 !README.md
 !LICENSE
+!/.env.example
 
 # Claude Code
 logs/tokens-*.jsonl

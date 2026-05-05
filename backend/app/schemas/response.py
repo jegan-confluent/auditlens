@@ -2,7 +2,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from backend.app.schemas.event import AuditEventOut
+from backend.app.schemas.event import AuditEventListOut
 
 
 class HealthResponse(BaseModel):
@@ -12,10 +12,15 @@ class HealthResponse(BaseModel):
 
 
 class EventListResponse(BaseModel):
-    items: list[AuditEventOut]
+    items: list[AuditEventListOut]
     limit: int
     offset: int
     total: int
+    scanned_events: int = 0
+    signal_filter_applied: bool = False
+    hide_noise_applied: bool = False
+    result_limit_reached: bool = False
+    debug: dict[str, Any] | None = None
 
 
 class FilterOptionsResponse(BaseModel):
@@ -27,8 +32,29 @@ class FilterOptionsResponse(BaseModel):
 
 class SummaryResponse(BaseModel):
     total_events: int
+    scanned_events: int = 0
     failures: int
     denials: int
+    noise_count: int = 0
+    informational_count: int = 0
+    attention_count: int = 0
+    action_required_count: int = 0
+    failure_count: int = 0
+    denied_count: int = 0
+    destructive_count: int = 0
+    configuration_change_count: int = 0
+    access_change_count: int = 0
+    top_subjects: list[dict[str, Any]] = []
+    top_resources: list[dict[str, Any]] = []
+    top_actions: list[dict[str, Any]] = []
+    top_signal_reasons: list[dict[str, Any]] = []
+    flow_groups: list[dict[str, Any]] = []
+    summary_scope: str = "complete"
+    sample_limit: int = 0
+    sample_warning: str | None = None
+    overall_status: str = "all_clear"
+    headline: str = "No action needed. Most activity is routine authentication and authorization."
+    short_digest: str = "No destructive or failed events detected in the selected window."
     by_action_category: dict[str, int]
     by_resource_type: dict[str, int]
     by_result: dict[str, int]

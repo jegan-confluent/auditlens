@@ -19,7 +19,9 @@ from sqlalchemy import (
     create_engine,
     delete,
     func,
+    inspect,
     select,
+    text,
 )
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -46,6 +48,13 @@ audit_events = Table(
     Column("timestamp", DateTime(timezone=True), nullable=False),
     Column("result", String(32), nullable=False),
     Column("actor", String(255), nullable=False),
+    Column("actor_id", String(255), nullable=True),
+    Column("actor_display_name", String(255), nullable=True),
+    Column("actor_email", String(255), nullable=True),
+    Column("actor_type", String(64), nullable=True),
+    Column("actor_source", String(64), nullable=True),
+    Column("actor_confidence", String(32), nullable=True),
+    Column("actor_enriched_at", String(64), nullable=True),
     Column("action", String(255), nullable=False),
     Column("normalized_action", String(255), nullable=False),
     Column("action_category", String(64), nullable=False),
@@ -54,6 +63,13 @@ audit_events = Table(
     Column("resource_display", String(768), nullable=False),
     Column("cluster_id", String(255), nullable=True),
     Column("source_ip", String(128), nullable=True),
+    Column("source_context", String(255), nullable=True),
+    Column("client_id", String(255), nullable=True),
+    Column("connection_id", String(255), nullable=True),
+    Column("request_id", String(255), nullable=True),
+    Column("environment_id", String(255), nullable=True),
+    Column("flink_region", String(255), nullable=True),
+    Column("network_id", String(255), nullable=True),
     Column("summary", Text, nullable=False),
     Column("raw_payload_json", Text, nullable=False),
     Column("is_failure", Boolean, nullable=False),
@@ -65,8 +81,11 @@ audit_events = Table(
 Index("idx_audit_events_timestamp", audit_events.c.timestamp)
 Index("idx_audit_events_event_fingerprint", audit_events.c.event_fingerprint)
 Index("idx_audit_events_actor", audit_events.c.actor)
+Index("idx_audit_events_actor_id", audit_events.c.actor_id)
 Index("idx_audit_events_resource_type", audit_events.c.resource_type)
 Index("idx_audit_events_resource_name", audit_events.c.resource_name)
+Index("idx_audit_events_source_ip", audit_events.c.source_ip)
+Index("idx_audit_events_environment_id", audit_events.c.environment_id)
 Index("idx_audit_events_action_category", audit_events.c.action_category)
 Index("idx_audit_events_result", audit_events.c.result)
 Index("idx_audit_events_timestamp_desc", audit_events.c.timestamp.desc())
@@ -99,10 +118,41 @@ class AuditEventDbWriter:
         connect_args = {"check_same_thread": False} if self.database_url.startswith("sqlite") else {}
         self.engine = create_engine(self.database_url, future=True, pool_pre_ping=True, connect_args=connect_args)
         metadata.create_all(self.engine)
+        self._ensure_columns()
 
     @property
     def mode(self) -> str:
         return "postgres" if self.database_url.startswith("postgresql") else "sqlite"
+
+    def _ensure_columns(self) -> None:
+        inspector = inspect(self.engine)
+        if "audit_events" not in inspector.get_table_names():
+            return
+        existing = {column["name"] for column in inspector.get_columns("audit_events")}
+        additions = {
+            "actor_id": "VARCHAR(255)",
+            "actor_display_name": "VARCHAR(255)",
+            "actor_email": "VARCHAR(255)",
+            "actor_type": "VARCHAR(64)",
+            "actor_source": "VARCHAR(64)",
+            "actor_confidence": "VARCHAR(32)",
+            "actor_enriched_at": "VARCHAR(64)",
+            "source_context": "VARCHAR(255)",
+            "client_id": "VARCHAR(255)",
+            "connection_id": "VARCHAR(255)",
+            "request_id": "VARCHAR(255)",
+            "environment_id": "VARCHAR(255)",
+            "flink_region": "VARCHAR(255)",
+            "network_id": "VARCHAR(255)",
+        }
+        with self.engine.begin() as conn:
+            for name, type_sql in additions.items():
+                if name in existing:
+                    continue
+                if self.mode == "postgres":
+                    conn.execute(text(f"ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS {name} {type_sql}"))
+                else:
+                    conn.execute(text(f"ALTER TABLE audit_events ADD COLUMN {name} {type_sql}"))
 
     def _row(self, payload: dict[str, Any]) -> dict[str, Any]:
         normalized = normalize_event(payload)

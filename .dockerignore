@@ -25,6 +25,7 @@ Jenkinsfile
 
 # Python cache and build artifacts
 __pycache__/
+*__pycache__*
 *.py[cod]
 *$py.class
 *.so
@@ -67,6 +68,8 @@ htmlcov/
 .env
 .env.*
 .secrets
+.secrets.*
+.secrets
 *.key
 *.pem
 *.crt
@@ -75,7 +78,12 @@ htmlcov/
 data/
 logs/
 *.log
+*.db
+*.db-wal
+*.db-shm
 offsets.json
+forwarder_offsets.json
+dashboard/email_cache.json
 
 # Docker files (don't need in container)
 Dockerfile*
@@ -96,11 +104,14 @@ promtail-config.yml
 
 # Backup and temporary files
 backup/
+backups/
 tmp/
 temp/
 *.tmp
 *.bak
 *.orig
+*.bundle
+*.zip
 
 # OS files
 Thumbs.db

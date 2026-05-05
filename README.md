@@ -1,211 +1,231 @@
 # AuditLens
 
-AuditLens is a Kafka-native audit intelligence foundation for Confluent Cloud audit logs.
+AuditLens is real-time audit intelligence for Confluent/Kafka audit events.
 
-It helps teams turn raw audit traffic into something usable:
-- searchable audit events
-- high-risk activity views
-- denial burst summaries
-- exportable investigation data
-- replay-based rebuild from Kafka evidence
+Runtime path:
 
-AuditLens is designed as a **single-instance, single-customer deployment model** for the first release.
-
-## What AuditLens Does
-
-AuditLens ingests Confluent Cloud audit logs, preserves replay-safe evidence, normalizes and enriches events, generates explainable signals, and exposes both a dashboard and a small API.
-
-The canonical runtime flow is:
-
-1. Consume audit events from the source audit topic
-2. Write replay-safe raw records
-3. Normalize and enrich events
-4. Classify criticality and generate signals
-5. Persist recent product data
-6. Expose health, search, alerts, and exports
-
-## Canonical Topic Contracts
-
-- `audit.raw.v1`
-- `audit.normalized.v1`
-- `audit.enriched.v1`
-- `audit.signals.denials.v1`
-- `audit.signals.highrisk.v1`
-- `audit.alerts.v1`
-- `audit.dlq.v1`
-
-## Foundation Scope
-
-Included in this release:
-- Kafka-native ingest
-- canonical event contracts
-- centralized classification
-- denial aggregation
-- high-risk signals
-- API v1
-- API authentication
-- role-based access control
-- export controls
-- SQLite product persistence
-- replay/rebuild from Kafka
-- Docker and Kubernetes deployment
-- health, lag, freshness, coverage, and replay visibility
-
-Not included in this release:
-- HA / multi-instance coordination
-- Flink as default processing path
-- Tableflow as default analytics path
-- MCP as core product surface
-- decision engine / automated response layer
-
-## Main Surfaces
-
-- Open AuditLens: `http://localhost:8088`
-- Dashboard: `http://localhost:8503`
-- Metrics: `http://localhost:8003/metrics`
-- Health/API: `http://localhost:8003/api/v1/health`
-- Grafana: `http://localhost:3000`
-- Prometheus: `http://localhost:9090`
-
-## Guided Install
-
-Recommended first-time flow:
-
-```bash
-cp install.template.yaml install.local.yaml
-# edit install.local.yaml with your real cluster details and secrets
-bash setup.sh --config-file install.local.yaml
+```text
+Kafka -> audit_forwarder -> DB -> FastAPI -> Next.js UI
 ```
 
-`install.local.yaml` is intentionally gitignored because it is sensitive. Do not
-put real credentials into tracked files.
+Streamlit dashboards are still present for compatibility, but the product path is the FastAPI + Next.js UI.
+
+## Modes
+
+- SQLite demo mode: API + frontend with local SQLite and sample seed data.
+- Postgres product mode: Kafka forwarder + Postgres + FastAPI + frontend.
+- Observability mode: optional Prometheus, Grafana, Loki, and Promtail profile.
+
+Default Docker Compose does not start Prometheus, Grafana, Loki, or Promtail.
+
+## Prerequisites
+
+- Docker Desktop
+- Docker Compose v2
+- Kafka/Confluent audit topic credentials for real ingestion
+- Node.js and Python only if running pieces outside Docker
+
+## Fresh Clone Setup
 
 ```bash
-bash setup.sh
+cp .env.example .env
 ```
 
-If you prefer prompts instead of a file, interactive mode remains available:
+Never commit `.env`, `.secrets`, API keys, tokens, or local database files.
+
+## SQLite Demo Quickstart
+
+SQLite demo mode does not require Kafka credentials. It starts the API and frontend, then seeds sample audit events.
 
 ```bash
-bash setup.sh
+scripts/run_sqlite_demo.sh
 ```
 
-The guided installer will:
+Open:
 
-- validate Docker, Docker Compose, Python, outbound DNS, and local port conflicts first
-- read `install.local.yaml` when provided and validate each field before proceeding
-- optionally prompt only for missing required values if the config file is incomplete
-- validate source audit-log cluster details
-- validate destination Kafka details
-- optionally validate Schema Registry
-- prompt for API auth preference
-- validate persistence before startup, including Docker volume writeability for SQLite
-- deploy with Docker or Kubernetes
-- validate health, auth, persistence, metrics, dashboard reachability, and enriched output
+- UI: `http://127.0.0.1:3000/events`
+- API: `http://127.0.0.1:8080`
 
-Then open:
-
-- AuditLens landing page: `http://localhost:8088`
-- Dashboard: `http://localhost:8503`
-- Health/API: `http://localhost:8003/api/v1/health`
-
-Manual `.env` and `.secrets` editing is still available for advanced use, but it is not the primary first-time setup path.
-
-The installer is designed to stop early and clearly for common failure classes:
-
-- Kafka SASL authentication failure
-- wrong cluster and API-key pairing
-- bad bootstrap endpoint or blocked private networking
-- blocked TCP `9092` to Kafka or HTTPS `443` to Schema Registry
-- Schema Registry authentication failure
-- persistence database open/write failure
-- local port conflicts
-
-Use Schema Registry only when your deployment actually depends on it. The core
-Kafka-native AuditLens foundation does not require Schema Registry by default.
-
-## Finding Source Audit-Log Details
-
-Start with the Confluent CLI:
+Useful checks:
 
 ```bash
-confluent login --save
-confluent audit-log describe
+scripts/health_check.sh
+curl -s 'http://127.0.0.1:8080/events?resource_type=Topic&action_category=Create'
 ```
 
-Use the output to identify the audit-log environment ID, cluster ID, service
-account ID, and topic name. Then select the source context if needed:
+Expected demo data includes:
+
+```text
+u-75rw9o created topic 'jegan-testing'
+```
+
+## Postgres Product Quickstart
+
+1. Copy the template:
 
 ```bash
-confluent environment use <ENVIRONMENT_ID>
-confluent kafka cluster use <CLUSTER_ID>
-confluent api-key list --resource <CLUSTER_ID>
-confluent api-key create --service-account <SERVICE_ACCOUNT_ID> --resource <CLUSTER_ID>
+cp .env.example .env
 ```
 
-Field mapping:
+2. Fill Kafka values in `.env`:
 
-- `source.audit_topic`: topic name from `confluent audit-log describe`
-- `source.bootstrap`: Kafka bootstrap endpoint from the audit-log cluster settings, not audit-log describe
-- `source.api_key` / `source.api_secret`: Kafka API key and secret for the audit-log cluster
-- `source.display_name`: display-only label chosen by you
+```text
+KAFKA_BOOTSTRAP_SERVERS=
+KAFKA_API_KEY=
+KAFKA_API_SECRET=
+KAFKA_AUDIT_TOPIC=confluent-audit-log-events
+```
 
-Manual read check:
+If your destination Kafka cluster differs from the audit source, also set:
+
+```text
+DEST_BOOTSTRAP=
+DEST_API_KEY=
+DEST_API_SECRET=
+```
+
+3. Start product mode:
 
 ```bash
-confluent kafka topic consume --from-beginning <AUDIT_LOG_TOPIC>
+scripts/run_postgres_product.sh
 ```
 
-## Required Configuration
+Open:
 
-Required secrets:
+- UI: `http://127.0.0.1:3000/events`
+- API: `http://127.0.0.1:8080`
+- Forwarder health: `http://127.0.0.1:8003/health`
 
-- `AUDIT_BOOTSTRAP`
-- `AUDIT_API_KEY`
-- `AUDIT_API_SECRET`
-- `DEST_BOOTSTRAP`
-- `DEST_API_KEY`
-- `DEST_API_SECRET`
+## Observability Mode
 
-Required non-secret contract:
+Observability is optional and not started by default.
 
-- `AUDIT_TOPIC`
-- `GROUP_ID`
-- `AUDIT_RAW_TOPIC`
-- `AUDIT_NORMALIZED_TOPIC`
-- `AUDIT_ENRICHED_TOPIC`
-- `AUDIT_SIGNALS_DENIALS_TOPIC`
-- `AUDIT_SIGNALS_HIGHRISK_TOPIC`
-- `AUDIT_ALERTS_TOPIC`
-- `DLQ_TOPIC`
+```bash
+docker compose --profile observability up -d prometheus grafana loki promtail
+```
 
-See [docs/CONFIG_REFERENCE.md](docs/CONFIG_REFERENCE.md) for the complete grouped contract.
+Grafana requires a non-default admin password via `.secrets`:
 
-## API v1
+```text
+GF_SECURITY_ADMIN_PASSWORD=<set-a-local-password>
+```
 
-AuditLens exposes a minimal API directly from the forwarder:
+## Health Checks
 
-- `GET /api/v1/health`
-- `GET /api/v1/events/search`
-- `GET /api/v1/events/high-risk`
-- `GET /api/v1/signals/denials`
-- `GET /api/v1/export`
-- `POST /api/v1/replay`
+```bash
+scripts/health_check.sh
+```
 
-See [docs/API_V1.md](docs/API_V1.md) for endpoint details.
-See [docs/OPERATIONS_MODEL.md](docs/OPERATIONS_MODEL.md) for offset, recovery, persistence, and export behavior.
+The script checks:
 
-## Deployment
+- `docker compose ps`
+- API `/ready`
+- API `/system/status`
+- API `/events?limit=1`
+- UI `/events`
 
-- Docker Compose: [docker-compose.yml](docker-compose.yml)
-- Bootstrap-generated Kubernetes manifests: [deploy/kubernetes](deploy/kubernetes)
+## Stop Everything
 
-The runtime is environment-driven and stateless. Offsets are stored in Kafka
-consumer groups, not local files. Recent product search/export is backed by a
-lightweight SQLite store on a mounted volume.
+Preserve volumes:
 
-Foundation deployment note:
+```bash
+scripts/stop_all.sh
+```
 
-- Docker Compose: persistent named volume
-- Kubernetes: single forwarder replica plus PVC
-- This keeps the foundation portable and simple, but it is not yet a multi-replica HA query tier
+Remove volumes too:
+
+```bash
+scripts/stop_all.sh --volumes
+```
+
+## Security Check
+
+Run before pushing or packaging:
+
+```bash
+scripts/security_scan.sh
+```
+
+## Local Security Posture
+
+AuditLens defaults to a local, single-customer deployment. Docker ports are bound
+to `127.0.0.1` where the local compose file exposes them. Do not expose the API,
+frontend, metrics, or observability ports publicly without network controls and
+API authentication.
+
+For shared environments, set `API_AUTH_ENABLED=true` and provide
+`API_AUTH_TOKENS_JSON` or `API_AUTH_TOKEN_FILE`. Raw audit payloads are available
+only from the event detail endpoint, not from the event list endpoint.
+
+The scan ignores `.git`, `node_modules`, `.next`, `data`, backup directories, and `.env.example` placeholders.
+
+## Troubleshooting
+
+Docker not running:
+
+```bash
+docker compose ps
+```
+
+Port already in use:
+
+Set alternate ports in `.env`:
+
+```text
+BACKEND_PORT=18080
+FRONTEND_PORT=13000
+METRICS_PORT=18003
+POSTGRES_PORT=15432
+```
+
+Kafka credentials missing:
+
+```bash
+scripts/run_postgres_product.sh
+```
+
+The script prints the missing variables. Fill `KAFKA_*` or the `AUDIT_*` and `DEST_*` aliases in `.env`.
+
+DB not ready:
+
+```bash
+curl -s http://127.0.0.1:8080/ready
+docker compose logs api
+docker compose logs postgres
+```
+
+UI cannot reach API:
+
+Confirm `.env` has:
+
+```text
+NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:8080
+```
+
+Then rebuild the frontend:
+
+```bash
+docker compose up --build -d frontend
+```
+
+No events visible:
+
+- SQLite demo: rerun `docker compose exec -T api python -m backend.scripts.seed_data`.
+- Postgres product: check `http://127.0.0.1:8003/health` and Kafka credentials.
+
+Estimated event counts:
+
+For unfiltered Postgres event lists, AuditLens uses a lightweight planner estimate for the total count so `/events` stays fast on larger tables. Filtered totals remain exact.
+
+## Validation Commands
+
+```bash
+python3 -m compileall audit_forwarder.py src/product/db_writer.py backend/app
+API_AUTH_ENABLED=false pytest -q tests/test_productization.py backend/tests/test_api.py tests/test_foundation_contract.py
+npm --prefix frontend test
+npm --prefix frontend run build
+docker compose config --services
+docker compose --profile postgres config --services
+docker compose --profile observability config --services
+scripts/security_scan.sh
+```

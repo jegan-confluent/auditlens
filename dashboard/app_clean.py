@@ -1334,6 +1334,8 @@ def _recent_count(df: pd.DataFrame, column: str, hours: int = 24) -> int:
         times = pd.to_datetime(df["time"], errors="coerce", utc=True)
         cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=hours)
         scoped = df[times >= cutoff]
+        if scoped.empty and times.notna().any():
+            scoped = df
     return int(scoped[column].sum()) if column in scoped.columns else 0
 
 

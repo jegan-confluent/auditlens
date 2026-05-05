@@ -731,7 +731,7 @@ METRICS_AUTH_ALLOWED_IPS=127.0.0.1,10.0.1.0/24,192.168.1.100
 **1. Generate New Token:**
 ```bash
 python3 -c "import secrets; print(secrets.token_urlsafe(32))"
-# New token: YnZ3aA9cB2dE4fG5hI6jK7lM8nO9pQ0rS1tU2vW3xY4zA5b
+# New token: <generated-token>
 ```
 
 **2. Update Server:**

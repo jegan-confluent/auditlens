@@ -1,10 +1,11 @@
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+from src.product.event_normalization import canonical_resource_type
 
 
-class AuditEventOut(BaseModel):
+class AuditEventListOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
@@ -24,10 +25,54 @@ class AuditEventOut(BaseModel):
     is_failure: bool
     is_denied: bool
     is_routine_noise: bool
+    impact_type: str
+    risk_level: str
+    change_type: str
+    resource_family: str
+    event_title: str
+    event_summary: str
+    subject: str
+    subject_type: str
+    actor_id: str | None = None
+    actor_display_name: str
+    actor_email: str | None = None
+    actor_type: str
+    actor_raw_id: str | None = None
+    actor_source: str = "fallback"
+    actor_confidence: str = "low"
+    actor_enriched_at: str | None = None
+    resource_display_short: str
+    source_context: str
+    environment_id: str | None = None
+    flink_region: str | None = None
+    network_id: str | None = None
+    signal_type: str
+    signal_reason: str
+    decision_reason: str
+    decision_label: str
+    recommended_action: str
+    triage_status: str = "open"
+    triage_actor: str | None = None
+    triage_timestamp: str | None = None
+    triage_note: str | None = None
+
+    @field_validator("resource_type", mode="before")
+    @classmethod
+    def normalize_resource_type(cls, value: object) -> str:
+        return canonical_resource_type(value)
 
 
-class AuditEventDetail(AuditEventOut):
+class AuditEventDetailOut(AuditEventListOut):
+    source_display: str
+    source_reason: str
+    client_id: str | None = None
+    connection_id: str | None = None
+    request_id: str | None = None
     raw_payload_json: str
+
+
+AuditEventOut = AuditEventListOut
+AuditEventDetail = AuditEventDetailOut
 
 
 class AuditEventCreate(BaseModel):

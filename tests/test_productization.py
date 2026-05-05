@@ -9,6 +9,7 @@ import orjson
 import audit_forwarder as forwarder
 from src.product.auth import AccessToken, AuthConfig, Authenticator, Role
 from src.product.db_writer import AuditEventDbWriter, DbWriteResult
+from src.product.event_normalization import event_fingerprint
 from src.product.persistence import PersistenceConfig, SQLiteProductStore
 
 
@@ -98,10 +99,26 @@ def test_forwarder_db_writer_batch_insert_deduplicates_and_normalizes(tmp_path):
         ).mappings().one()
     assert row["normalized_action"] == "Create topic"
     assert row["action_category"] == "Create"
-    assert row["resource_type"] == "Topic"
+    assert row["resource_type"] == "topic"
     assert row["resource_name"] == "jegan-testing"
     assert row["is_failure"] in (False, 0)
     assert row["is_denied"] in (False, 0)
+
+
+def test_fingerprint_for_timestamp_missing_event_is_stable():
+    event = {
+        "methodName": "kafka.CreateTopics",
+        "action": "CreateTopics",
+        "user": "u-75rw9o",
+        "cluster_id": "lkc-demo",
+        "resourceName": "crn://confluent.cloud/topic=jegan-testing",
+        "summary": "u-75rw9o created topic 'jegan-testing'",
+        "source_topic": "confluent-audit-log-events",
+        "source_partition": 0,
+        "source_offset": 42,
+    }
+
+    assert event_fingerprint(event) == event_fingerprint(dict(event))
 
 
 def test_forwarder_db_writer_retention_cleanup_deletes_old_rows(tmp_path):

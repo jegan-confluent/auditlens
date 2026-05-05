@@ -323,3 +323,184 @@ Session memory note:
   Why deferred: Requires API validation change outside this testing-only pass.
 - Broad or no-match filtered event queries are slow on the current Postgres dataset.
   Why deferred: Requires query-plan review and likely index/count-query tuning.
+
+## [2026-04-29] Session [Fresh Runability]
+
+### Fixed
+- Cleaned fresh-machine runability by ignoring local bundles, archives, env files, frontend build output, Python caches, data directories, and SQLite database files.
+  Why: A fresh clone should not pick up local runtime artifacts or package backup files.
+  Files: .gitignore, .dockerignore
+
+- Made Docker Compose modes clearer: default product mode is forwarder/API/frontend, Postgres profile adds Postgres, observability profile adds only monitoring services, and Streamlit remains available behind the `streamlit` profile.
+  Why: The production path should start cleanly without optional observability or legacy UI services unless explicitly requested.
+  Files: docker-compose.yml
+
+- Sanitized install templates and documentation token examples.
+  Why: Safe templates must not contain real-looking credentials or copy-pasteable secret values.
+  Files: install.template.yaml, docs/MCP_INTEGRATION_GUIDE.md
+
+### Added
+- Added a safe `.env.example` for SQLite demo, Postgres product mode, forwarder DB writer settings, and frontend API URL configuration.
+  Why: A fresh user needs a known-good local template without real secrets.
+  Files: .env.example
+
+- Added operational scripts for SQLite demo startup, Postgres product startup, stop, health checks, and security scanning.
+  Why: A fresh user should be able to copy `.env.example`, run one script, and verify API/UI health.
+  Files: scripts/run_sqlite_demo.sh, scripts/run_postgres_product.sh, scripts/stop_all.sh, scripts/health_check.sh, scripts/security_scan.sh
+
+- Rewrote README quickstart for SQLite demo, Postgres product mode, optional observability, health checks, stopping, troubleshooting, and security hygiene.
+  Why: Fresh-machine setup should be command-driven and easy to validate.
+  Files: README.md
+
+### Removed
+- Removed checked-in Terraform provider cache binaries from `deploy/terraform/aws/.terraform`.
+  Why: Provider caches are local machine artifacts, are very large, and should be restored by Terraform rather than committed.
+  Files: deploy/terraform/aws/.terraform/providers/registry.terraform.io/hashicorp/aws/5.100.0/darwin_arm64/LICENSE.txt, deploy/terraform/aws/.terraform/providers/registry.terraform.io/hashicorp/aws/5.100.0/darwin_arm64/terraform-provider-aws_v5.100.0_x5, deploy/terraform/aws/.terraform/providers/registry.terraform.io/hashicorp/random/3.7.2/darwin_arm64/LICENSE.txt, deploy/terraform/aws/.terraform/providers/registry.terraform.io/hashicorp/random/3.7.2/darwin_arm64/terraform-provider-random_v3.7.2_x5
+
+### Architecture Decisions
+- Keep Streamlit present but outside the default product startup path.
+  Why: Streamlit is preserved for compatibility while the production path remains FastAPI + Next.js.
+  Impact: Use `docker compose --profile streamlit up -d dashboard` when the legacy dashboard is needed.
+
+### Known Issues / Not Done
+- Postgres product mode was not started with real Kafka credentials in this pass.
+  Why deferred: Local `.env` was intentionally removed for security hygiene; the script was validated to fail clearly when credentials are missing.
+
+## [2026-04-29] Session [2]
+
+### Fixed
+- SQLite demo API startup now repairs fresh Docker named-volume ownership for `/var/lib/auditlens` before starting uvicorn.
+  Why: Fresh volumes are root-owned, and the API must be able to create/open `/var/lib/auditlens/auditlens_api.db` while still serving as UID/GID 1000.
+  Files: backend/docker_entrypoint.py, backend/Dockerfile, docker-compose.yml
+
+- SQLite demo seeding now executes inside the API container as UID/GID 1000.
+  Why: After the API service starts as root only long enough to drop privileges, exec commands default to root; with dropped capabilities, root could not read some app files during seed execution.
+  Files: scripts/run_sqlite_demo.sh
+
+### Added
+- API Docker entrypoint that creates/prepares the runtime data directory, chowns it to UID/GID 1000, and then drops privileges before execing the API command.
+  Why: Fixes the fresh-volume permission blocker without keeping the API server process root.
+  Files: backend/docker_entrypoint.py
+
+### Removed
+- none
+  Why: Streamlit dashboards and existing product architecture were intentionally preserved.
+  Files: none
+
+### Architecture Decisions
+- Allow the API container to start briefly as root with only `CHOWN`, `SETUID`, and `SETGID` capabilities, then run the actual API process as UID/GID 1000.
+  Why: Docker named volumes require startup ownership repair on first use, but the long-running API process should remain non-root.
+  Impact: Future API container changes should preserve the entrypoint privilege drop and avoid reintroducing service-level `user: "1000:1000"` unless volume ownership is handled elsewhere.
+
+### Known Issues / Not Done
+- none for the SQLite fresh-volume permission blocker.
+  Why deferred: Not applicable; validation passed with a fresh volume, seed data, health checks, and Topic/Create filtering.
+
+## [2026-04-29] Session [3]
+
+### Fixed
+- `/ready` now reports strict operational readiness with HTTP 503 for DB, forwarder, or DB writer degradation and HTTP 200 only when all required product-path dependencies are ready.
+  Why: Readiness probes must not mark the API ready when ingestion or DB writes are degraded.
+  Files: backend/app/api/routes/readiness.py, backend/tests/test_api.py
+
+- `/admin/retention/cleanup` now requires an admin token when `API_AUTH_ENABLED=true` while preserving unauthenticated dev mode when auth is disabled.
+  Why: Retention cleanup can delete data and must not be exposed as an unauthenticated production endpoint.
+  Files: backend/app/api/routes/admin.py, backend/tests/test_api.py
+
+- Event fingerprints for timestamp-missing payloads no longer include wall-clock fallback time.
+  Why: Restart/replay of malformed timestamp-missing events must not create duplicate rows.
+  Files: src/product/event_normalization.py, tests/test_productization.py
+
+### Added
+- Final v1 session wrap for the next Codex/browser session.
+  Why: The next session needs a concise handoff for real Kafka/Postgres demo validation without reconstructing the full thread.
+  Files: docs/session-history/CODEX_SESSION_WRAP_2026_04_29_FINAL_V1.md
+
+### Removed
+- none.
+  Why: This wrap/fix entry did not remove product code.
+  Files: none
+
+### Architecture Decisions
+- Treat `/health` as process liveness and `/ready` as strict operational readiness.
+  Why: Operators need a clear distinction between an API process that is alive and a full ingestion path that is ready.
+  Impact: Demo scripts or deployments should use `/health` for liveness and `/ready` for full product-path readiness.
+
+### Known Issues / Not Done
+- Postgres product mode still needs the next live run with real Kafka credentials and create/delete topic evidence.
+  Why deferred: This session focused on hardening, cleanup, validation, and handoff, not a new live Kafka demo run.
+
+## [2026-05-05] Session [1]
+
+### Fixed
+- Source/IP display now uses actual audit payload source information and never falls back to cluster IDs.
+  Why: The Events table was misleadingly showing values like `lkc-k9382g` in the Source/IP column when Confluent did not provide a client IP.
+  Files: src/product/source_enrichment.py, src/product/event_normalization.py, src/product/event_intelligence.py, backend/app/db/models.py, backend/app/schemas/event.py, frontend/components/AuditEventTable.tsx, frontend/components/EventDetailDrawer.tsx, backend/tests/test_api.py, tests/test_event_intelligence.py
+
+- Actor display now uses computed enrichment fields with manual mapping support and safe fallbacks for raw Confluent IDs.
+  Why: Raw IDs such as `u-*` and `sa-*` are not enough for operators; mapped names/emails should be shown when available while preserving raw IDs for auditability.
+  Files: src/product/actor_enrichment.py, backend/app/db/models.py, backend/app/schemas/event.py, frontend/components/AuditEventTable.tsx, frontend/components/EventDetailDrawer.tsx, backend/tests/test_api.py, tests/test_event_intelligence.py
+
+- Resource type filtering now accepts mixed Confluent/UI values and returns canonical lowercase resource types.
+  Why: Filtering was exact and case-sensitive, so values like `TOPIC`, `Topic`, and `topic` could produce confusing missing-data behavior.
+  Files: src/product/event_normalization.py, backend/app/services/event_service.py, backend/app/services/filter_options_service.py, backend/app/services/summary_service.py, backend/app/schemas/event.py, backend/tests/test_api.py, tests/test_productization.py
+
+- Destructive derived filtering now prefilters delete actions before bounded derived classification.
+  Why: Older topic delete events could be hidden behind newer routine activity when derived filtering scanned only the latest bounded candidate set.
+  Files: backend/app/services/event_service.py, backend/tests/test_api.py
+
+- Triage state now caches file-backed status in memory instead of reading the triage JSON file per event.
+  Why: Row rendering should not perform repeated file reads for every listed event.
+  Files: src/product/triage_store.py
+
+### Added
+- Deterministic source enrichment fields: `source_display`, `source_reason`, `client_id`, `connection_id`, and `request_id`.
+  Why: The UI needs a trustworthy Source/IP column and the drawer needs structured connection/request context without showing raw JSON by default.
+  Files: src/product/source_enrichment.py, backend/app/db/models.py, backend/app/schemas/event.py, frontend/lib/types.ts, frontend/components/EventDetailDrawer.tsx
+
+- Event-level `decision_reason`.
+  Why: Operators need to understand why an event was classified as action-needed, review, info, or noise.
+  Files: src/product/event_intelligence.py, backend/app/db/models.py, backend/app/schemas/event.py, frontend/lib/types.ts, frontend/components/AuditEventTable.tsx, frontend/components/EventDetailDrawer.tsx
+
+- Lightweight triage lifecycle endpoint and UI controls.
+  Why: Action-needed events should not stay visually action-needed forever after an operator acknowledges, approves, investigates, resolves, or marks them false positive.
+  Files: src/product/triage_store.py, backend/app/api/routes/events.py, backend/app/db/models.py, backend/app/schemas/event.py, frontend/lib/api.ts, frontend/app/events/page.tsx, frontend/components/AuditEventTable.tsx, frontend/components/EventDetailDrawer.tsx, frontend/app/globals.css, backend/tests/test_api.py
+
+- `/events?debug=true` diagnostic metadata.
+  Why: Developers/operators need to explain filter behavior and distinguish DB filters from bounded derived filters.
+  Files: backend/app/api/routes/events.py, backend/app/services/event_service.py, backend/app/schemas/response.py, backend/tests/test_api.py
+
+- Audit Decision Engine session handoff.
+  Why: The next session needs a compact continuation point with current state, validations, caveats, and next actions.
+  Files: docs/session-history/CODEX_SESSION_HANDOFF_2026_05_05_AUDIT_DECISION_ENGINE.md
+
+### Removed
+- none.
+  Why: This pass intentionally avoided architecture changes, Streamlit removal, schema migrations, and product refactors.
+  Files: none
+
+### Architecture Decisions
+- Keep triage as an additive file-backed layer rather than modifying event classification or changing the DB schema.
+  Why: Triage is an operator workflow state; it should not mutate the immutable audit event or require a migration during this hardening pass.
+  Impact: Current triage is appropriate for single-instance product mode, not multi-instance HA.
+
+- Canonicalize resource types at API/filter boundaries without migrating historical rows.
+  Why: Historical data may contain mixed labels; compatibility is safer than an immediate data rewrite.
+  Impact: New writes normalize resource types, while API responses and filters canonicalize old values.
+
+- Keep derived signal/impact/change filters bounded unless backed by an indexed prefilter.
+  Why: These fields are computed and not persisted, so scanning the entire DB synchronously would risk performance.
+  Impact: Destructive filters are helped by `action_category=Delete`; other derived filters remain bounded.
+
+### Known Issues / Not Done
+- Full `pytest -q` currently fails during collection because `tests/test_bootstrap_setup.py` imports deleted `scripts/bootstrap_auditlens.py`.
+  Why deferred: This appears tied to prior repo cleanup/deprecation work and should be handled deliberately by either updating the test or restoring a deprecated shim.
+
+- Actor enrichment remains manual/fallback only.
+  Why deferred: No Confluent IAM API lookup was added; avoiding external calls and extra product scope was intentional.
+
+- Triage is file-backed and single-instance oriented.
+  Why deferred: Multi-instance persistence would require a stronger storage contract and likely a DB table/migration, which was outside this pass.
+
+- Existing DB rows may physically retain mixed-case resource types.
+  Why deferred: API and filter layers now canonicalize them without a migration.
