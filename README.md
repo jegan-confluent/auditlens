@@ -50,6 +50,7 @@ Useful checks:
 
 ```bash
 scripts/health_check.sh
+scripts/db_status.sh
 curl -s 'http://127.0.0.1:8080/events?resource_type=Topic&action_category=Create'
 ```
 
@@ -88,6 +89,12 @@ DEST_API_SECRET=
 
 ```bash
 scripts/run_postgres_product.sh
+```
+
+After product mode is running, a safe source-field backfill dry run is:
+
+```bash
+PYTHONPATH=. ./.venv/bin/python scripts/backfill_event_fields.py --source-fields --dry-run
 ```
 
 Open:

@@ -17,9 +17,13 @@ fi
 mkdir -p data
 
 export DATABASE_URL="sqlite:////var/lib/auditlens/auditlens_api.db"
+export FORWARDER_DATABASE_URL="sqlite:////var/lib/auditlens/auditlens_api.db"
 export NEXT_PUBLIC_API_BASE_URL="${NEXT_PUBLIC_API_BASE_URL:-http://127.0.0.1:8080}"
 export FORWARDER_HEALTH_URL="${FORWARDER_HEALTH_URL:-http://127.0.0.1:9/health}"
 
+echo "SQLite demo mode"
+echo "API DB: sqlite:////var/lib/auditlens/auditlens_api.db"
+echo "Forwarder DB: sqlite:////var/lib/auditlens/auditlens_api.db"
 echo "Starting AuditLens SQLite demo mode..."
 docker compose up --build -d api frontend
 

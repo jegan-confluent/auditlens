@@ -92,8 +92,26 @@ export POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-auditlens}"
 export ENABLE_DB_WRITER="${ENABLE_DB_WRITER:-true}"
 export NEXT_PUBLIC_API_BASE_URL="${NEXT_PUBLIC_API_BASE_URL:-http://127.0.0.1:8080}"
 
+echo "Postgres product mode"
+echo "API DB: postgresql+psycopg://auditlens:***@postgres:5432/auditlens"
+echo "Forwarder DB: postgresql+psycopg://auditlens:***@postgres:5432/auditlens"
 echo "Starting AuditLens Postgres product mode..."
 docker compose --profile postgres up --build -d postgres auditlens-forwarder api frontend
+
+echo "Waiting for Postgres..."
+postgres_ready=0
+for _ in {1..60}; do
+  if docker compose exec -T postgres sh -lc "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\"" >/dev/null 2>&1; then
+    postgres_ready=1
+    break
+  fi
+  sleep 2
+done
+
+if [ "$postgres_ready" -ne 1 ]; then
+  echo "FAIL: Postgres did not become reachable" >&2
+  exit 1
+fi
 
 echo "Waiting for API readiness..."
 api_ready=0
@@ -124,3 +142,4 @@ echo "AuditLens Postgres product mode is running"
 echo "API:       http://127.0.0.1:${BACKEND_PORT:-8080}"
 echo "UI:        http://127.0.0.1:${FRONTEND_PORT:-3000}"
 echo "Forwarder: http://127.0.0.1:${METRICS_PORT:-8003}/health"
+echo "Backfill:   PYTHONPATH=. ./.venv/bin/python scripts/backfill_event_fields.py --source-fields --dry-run"
