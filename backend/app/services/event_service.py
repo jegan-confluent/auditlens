@@ -70,6 +70,17 @@ EVENT_LIST_COLUMNS = (
     AuditEvent.environment_id,
     AuditEvent.flink_region,
     AuditEvent.network_id,
+    AuditEvent._signal_type,
+    AuditEvent._signal_reason,
+    AuditEvent._impact_type,
+    AuditEvent._risk_level,
+    AuditEvent._change_type,
+    AuditEvent._resource_family,
+    AuditEvent._event_title,
+    AuditEvent._event_summary,
+    AuditEvent._decision_reason,
+    AuditEvent._decision_label,
+    AuditEvent._recommended_action,
     AuditEvent.summary,
     AuditEvent.is_failure,
     AuditEvent.is_denied,
@@ -240,6 +251,10 @@ def _normalize_mode(mode: str | None) -> str:
 
 def _decision_mode_condition():
     return or_(
+        func.lower(AuditEvent._signal_type).in_({"action_required", "attention"}),
+        func.lower(AuditEvent._impact_type).in_({"destructive", "configuration_change", "access_change", "security_sensitive"}),
+        func.lower(AuditEvent._risk_level).in_({"medium", "high", "critical"}),
+        func.lower(AuditEvent._change_type).in_({"created", "deleted", "updated", "configured", "denied"}),
         func.lower(AuditEvent.action_category).in_(DECISION_ACTION_CATEGORIES),
         AuditEvent.is_failure.is_(True),
         AuditEvent.is_denied.is_(True),

@@ -5,8 +5,8 @@ from sqlalchemy import DateTime, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from src.product.actor_enrichment import enrich_actor
+from src.product.event_intelligence import decision_snapshot_from_model
 from src.product.source_enrichment import extract_source_info
-from src.product.event_intelligence import event_digest_from_model
 from src.product.event_signals import classify_signal
 from src.product.triage_store import get_triage
 
@@ -48,6 +48,17 @@ class AuditEvent(Base):
     environment_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     flink_region: Mapped[str | None] = mapped_column(String(255), nullable=True)
     network_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    _signal_type: Mapped[str | None] = mapped_column("signal_type", String(32), nullable=True)
+    _signal_reason: Mapped[str | None] = mapped_column("signal_reason", String(128), nullable=True)
+    _impact_type: Mapped[str | None] = mapped_column("impact_type", String(64), nullable=True)
+    _risk_level: Mapped[str | None] = mapped_column("risk_level", String(32), nullable=True)
+    _change_type: Mapped[str | None] = mapped_column("change_type", String(32), nullable=True)
+    _resource_family: Mapped[str | None] = mapped_column("resource_family", String(64), nullable=True)
+    _event_title: Mapped[str | None] = mapped_column("event_title", String(255), nullable=True)
+    _event_summary: Mapped[str | None] = mapped_column("event_summary", String(768), nullable=True)
+    _decision_reason: Mapped[str | None] = mapped_column("decision_reason", String(255), nullable=True)
+    _decision_label: Mapped[str | None] = mapped_column("decision_label", String(32), nullable=True)
+    _recommended_action: Mapped[str | None] = mapped_column("recommended_action", String(255), nullable=True)
     summary: Mapped[str] = mapped_column(Text, default="", nullable=False)
     raw_payload_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
     is_failure: Mapped[bool] = mapped_column(default=False, nullable=False)
@@ -57,7 +68,17 @@ class AuditEvent(Base):
     def _intelligence(self) -> dict[str, str]:
         cached = getattr(self, "_event_intelligence_cache", None)
         if cached is None:
-            cached = event_digest_from_model(self)
+            stored = {
+                "impact_type": self._impact_type,
+                "risk_level": self._risk_level,
+                "change_type": self._change_type,
+                "resource_family": self._resource_family,
+                "event_title": self._event_title,
+                "event_summary": self._event_summary,
+                "decision_reason": self._decision_reason,
+            }
+            computed = decision_snapshot_from_model(self)
+            cached = {**computed, **{key: value for key, value in stored.items() if value not in (None, "")}}
             setattr(self, "_event_intelligence_cache", cached)
         return cached
 
@@ -65,25 +86,49 @@ class AuditEvent(Base):
     def impact_type(self) -> str:
         return self._intelligence()["impact_type"]
 
+    @impact_type.setter
+    def impact_type(self, value: str | None) -> None:
+        self._impact_type = value
+
     @property
     def risk_level(self) -> str:
         return self._intelligence()["risk_level"]
+
+    @risk_level.setter
+    def risk_level(self, value: str | None) -> None:
+        self._risk_level = value
 
     @property
     def change_type(self) -> str:
         return self._intelligence()["change_type"]
 
+    @change_type.setter
+    def change_type(self, value: str | None) -> None:
+        self._change_type = value
+
     @property
     def resource_family(self) -> str:
         return self._intelligence()["resource_family"]
+
+    @resource_family.setter
+    def resource_family(self, value: str | None) -> None:
+        self._resource_family = value
 
     @property
     def event_title(self) -> str:
         return self._intelligence()["event_title"]
 
+    @event_title.setter
+    def event_title(self, value: str | None) -> None:
+        self._event_title = value
+
     @property
     def event_summary(self) -> str:
         return self._intelligence()["event_summary"]
+
+    @event_summary.setter
+    def event_summary(self, value: str | None) -> None:
+        self._event_summary = value
 
     @property
     def subject(self) -> str:
@@ -108,6 +153,10 @@ class AuditEvent(Base):
     @property
     def decision_reason(self) -> str:
         return self._intelligence()["decision_reason"]
+
+    @decision_reason.setter
+    def decision_reason(self, value: str | None) -> None:
+        self._decision_reason = value
 
     def _source_enrichment(self) -> dict[str, str | None]:
         cached = getattr(self, "_source_enrichment_cache", None)
@@ -155,7 +204,15 @@ class AuditEvent(Base):
     def _signal(self) -> dict[str, str]:
         cached = getattr(self, "_event_signal_cache", None)
         if cached is None:
-            cached = classify_signal(self)
+            cached = {
+                "signal_type": self._signal_type or self._intelligence()["signal_type"],
+                "signal_reason": self._signal_reason or self._intelligence()["signal_reason"],
+                "decision_label": self._decision_label or self._intelligence()["decision_label"],
+                "recommended_action": self._recommended_action or self._intelligence()["recommended_action"],
+            }
+            if not all(cached.values()):
+                computed = classify_signal(self)
+                cached = {key: cached.get(key) or computed.get(key) for key in ("signal_type", "signal_reason", "decision_label", "recommended_action")}
             setattr(self, "_event_signal_cache", cached)
         return cached
 
@@ -163,17 +220,33 @@ class AuditEvent(Base):
     def signal_type(self) -> str:
         return self._signal()["signal_type"]
 
+    @signal_type.setter
+    def signal_type(self, value: str | None) -> None:
+        self._signal_type = value
+
     @property
     def signal_reason(self) -> str:
         return self._signal()["signal_reason"]
+
+    @signal_reason.setter
+    def signal_reason(self, value: str | None) -> None:
+        self._signal_reason = value
 
     @property
     def decision_label(self) -> str:
         return self._signal()["decision_label"]
 
+    @decision_label.setter
+    def decision_label(self, value: str | None) -> None:
+        self._decision_label = value
+
     @property
     def recommended_action(self) -> str:
         return self._signal()["recommended_action"]
+
+    @recommended_action.setter
+    def recommended_action(self, value: str | None) -> None:
+        self._recommended_action = value
 
     def _actor_enrichment(self) -> dict[str, str | None]:
         cached = getattr(self, "_actor_enrichment_cache", None)
@@ -265,7 +338,15 @@ Index("idx_audit_events_source_ip", AuditEvent.source_ip)
 Index("idx_audit_events_environment_id", AuditEvent.environment_id)
 Index("idx_audit_events_action_category", AuditEvent.action_category)
 Index("idx_audit_events_result", AuditEvent.result)
+Index("idx_audit_events_signal_type", AuditEvent._signal_type)
+Index("idx_audit_events_impact_type", AuditEvent._impact_type)
+Index("idx_audit_events_risk_level", AuditEvent._risk_level)
+Index("idx_audit_events_change_type", AuditEvent._change_type)
+Index("idx_audit_events_resource_family", AuditEvent._resource_family)
 Index("idx_audit_events_timestamp_desc", AuditEvent.timestamp.desc())
+Index("idx_audit_events_timestamp_signal_type", AuditEvent.timestamp.desc(), AuditEvent._signal_type)
+Index("idx_audit_events_timestamp_impact_type", AuditEvent.timestamp.desc(), AuditEvent._impact_type)
+Index("idx_audit_events_timestamp_risk_level", AuditEvent.timestamp.desc(), AuditEvent._risk_level)
 Index("idx_audit_events_resource_lookup", AuditEvent.resource_type, AuditEvent.resource_name, AuditEvent.timestamp.desc())
 Index("idx_audit_events_resource_type_action_category_time", AuditEvent.resource_type, AuditEvent.action_category, AuditEvent.timestamp.desc())
 Index("idx_audit_events_resource_name_time", AuditEvent.resource_name, AuditEvent.timestamp.desc())

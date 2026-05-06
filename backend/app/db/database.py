@@ -67,6 +67,17 @@ def _ensure_audit_event_columns(target: Engine) -> None:
         "environment_id": "VARCHAR(255)",
         "flink_region": "VARCHAR(255)",
         "network_id": "VARCHAR(255)",
+        "signal_type": "VARCHAR(32)",
+        "signal_reason": "VARCHAR(128)",
+        "impact_type": "VARCHAR(64)",
+        "risk_level": "VARCHAR(32)",
+        "change_type": "VARCHAR(32)",
+        "resource_family": "VARCHAR(64)",
+        "event_title": "VARCHAR(255)",
+        "event_summary": "VARCHAR(768)",
+        "decision_reason": "VARCHAR(255)",
+        "decision_label": "VARCHAR(32)",
+        "recommended_action": "VARCHAR(255)",
     }
     dialect = target.dialect.name
     with target.begin() as conn:

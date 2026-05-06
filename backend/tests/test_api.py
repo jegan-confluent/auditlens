@@ -77,6 +77,58 @@ def test_resource_type_filter_accepts_uppercase_and_returns_canonical(client):
     assert all(item["resource_type"] == "topic" for item in body["items"])
 
 
+def test_events_and_summary_use_persisted_decision_fields(client):
+    db_override = next(iter(client.app.dependency_overrides.values()))
+    session_gen = db_override()
+    try:
+        db = next(session_gen)
+        event = create_event(
+            db,
+            {
+                "id": "persisted-decision-fields",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "methodName": "kafka.CreateTopics",
+                "action": "CreateTopics",
+                "user": "u-persisted",
+                "resourceType": "Topic",
+                "resourceName": "topic=persisted-topic",
+                "summary": "u-persisted created topic 'persisted-topic'",
+                "resultStatus": "Success",
+            },
+        )
+        event._signal_type = "attention"
+        event._signal_reason = "config_changed"
+        event._impact_type = "configuration_change"
+        event._risk_level = "medium"
+        event._change_type = "updated"
+        event._resource_family = "topic"
+        event._event_title = "Persisted topic update"
+        event._event_summary = "Persisted topic update summary"
+        event._decision_reason = "Persisted decision reason"
+        event._decision_label = "Review"
+        event._recommended_action = "Review persisted update"
+        db.commit()
+    finally:
+        session_gen.close()
+
+    response = client.get("/events", params={"mode": "decision", "actor": "u-persisted", "limit": 10})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 1
+    item = body["items"][0]
+    assert item["signal_type"] == "attention"
+    assert item["decision_label"] == "Review"
+    assert item["event_title"] == "Persisted topic update"
+    assert item["event_summary"] == "Persisted topic update summary"
+
+    summary = client.get("/summary", params={"mode": "decision", "actor": "u-persisted"})
+    assert summary.status_code == 200
+    summary_body = summary.json()
+    assert summary_body["total_events"] == 1
+    assert summary_body["attention_count"] == 1
+    assert summary_body["top_actions"][0]["value"] == "Persisted topic update"
+
+
 def test_resource_type_filter_finds_derived_rows_before_limit(client):
     db_override = next(iter(client.app.dependency_overrides.values()))
     session_gen = db_override()

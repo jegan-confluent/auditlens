@@ -452,6 +452,19 @@ def event_digest_from_model(event: Any) -> dict[str, str]:
     return event_digest(_payload_from_event(event), event)
 
 
+def decision_snapshot(payload: dict[str, Any], event: Any | None = None) -> dict[str, str]:
+    digest = event_digest(payload, event)
+    signal_input = {**payload, **digest}
+    from src.product.event_signals import classify_signal
+
+    signal = classify_signal(signal_input)
+    return {**digest, **signal}
+
+
+def decision_snapshot_from_model(event: Any) -> dict[str, str]:
+    return decision_snapshot(_payload_from_event(event), event)
+
+
 def flow_group_key(event: Any, window_seconds: int = 60) -> tuple[str, str, str, str, int]:
     digest = event_digest_from_model(event)
     timestamp = getattr(event, "timestamp", None)

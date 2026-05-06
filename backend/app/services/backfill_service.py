@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from backend.app.db.models import AuditEvent
 from src.product.source_enrichment import extract_source_info
+from src.product.event_normalization import normalize_event
 
 logger = logging.getLogger("auditlens.backend.backfill")
 
@@ -18,6 +19,8 @@ logger = logging.getLogger("auditlens.backend.backfill")
 class BackfillResult:
     scanned: int = 0
     updated: int = 0
+    source_updated: int = 0
+    decision_updated: int = 0
     invalid_json: int = 0
     dry_run: bool = True
     force: bool = False
@@ -26,6 +29,8 @@ class BackfillResult:
         return {
             "scanned": self.scanned,
             "updated": self.updated,
+            "source_updated": self.source_updated,
+            "decision_updated": self.decision_updated,
             "invalid_json": self.invalid_json,
             "dry_run": self.dry_run,
             "force": self.force,
@@ -33,6 +38,19 @@ class BackfillResult:
 
 
 SOURCE_FIELDS = ("source_ip", "source_context", "client_id", "connection_id", "request_id", "environment_id", "flink_region", "network_id")
+DECISION_FIELDS = (
+    "signal_type",
+    "signal_reason",
+    "impact_type",
+    "risk_level",
+    "change_type",
+    "resource_family",
+    "event_title",
+    "event_summary",
+    "decision_reason",
+    "decision_label",
+    "recommended_action",
+)
 FIELD_ATTRS = {
     "source_ip": "source_ip",
     "source_context": "_source_context",
@@ -42,6 +60,17 @@ FIELD_ATTRS = {
     "environment_id": "environment_id",
     "flink_region": "flink_region",
     "network_id": "network_id",
+    "signal_type": "_signal_type",
+    "signal_reason": "_signal_reason",
+    "impact_type": "_impact_type",
+    "risk_level": "_risk_level",
+    "change_type": "_change_type",
+    "resource_family": "_resource_family",
+    "event_title": "_event_title",
+    "event_summary": "_event_summary",
+    "decision_reason": "_decision_reason",
+    "decision_label": "_decision_label",
+    "recommended_action": "_recommended_action",
 }
 
 
@@ -116,6 +145,10 @@ def _normalize_dt(value: datetime | None) -> datetime | None:
     return value
 
 
+def _selected_attrs(fields: tuple[str, ...]) -> list[str]:
+    return [FIELD_ATTRS[field] for field in fields if field in FIELD_ATTRS]
+
+
 def _source_ip_from_payload(payload: dict[str, Any], event: AuditEvent | None = None) -> str:
     data_json = _load_json(payload.get("data_json"))
     event_data_json = _load_json(getattr(event, "data_json", None)) if event is not None and _has_column(event, "data_json") else {}
@@ -134,85 +167,98 @@ def _source_ip_from_payload(payload: dict[str, Any], event: AuditEvent | None = 
     )
 
 
-def _backfill_decision(
+def _selected_fields(source_fields: bool, decision_fields: bool) -> tuple[str, ...]:
+    fields: list[str] = []
+    if source_fields:
+        fields.extend(SOURCE_FIELDS)
+    if decision_fields:
+        fields.extend(DECISION_FIELDS)
+    return tuple(fields)
+
+
+def _field_value_map(
+    payload: dict[str, Any],
+    event: AuditEvent,
+    *,
+    source_fields: bool,
+    decision_fields: bool,
+) -> dict[str, Any]:
+    values: dict[str, Any] = {}
+    if source_fields:
+        source_info = extract_source_info(payload, event)
+        source_ip = _source_ip_from_payload(payload, event) or source_info.get("source_ip")
+        for field in SOURCE_FIELDS:
+            values[field] = source_ip if field == "source_ip" else source_info.get(field)
+    if decision_fields:
+        decision = normalize_event(payload)
+        for field in DECISION_FIELDS:
+            values[field] = decision.get(field)
+    return values
+
+
+def _row_plan(
     event: AuditEvent,
     payload: dict[str, Any],
     *,
+    source_fields: bool,
+    decision_fields: bool,
     force: bool,
 ) -> dict[str, Any]:
     has_raw_payload = bool(event.raw_payload_json)
+    has_data_json_column = _has_column(event, "data_json")
+    selected_fields = _selected_fields(source_fields, decision_fields)
     if not _has_column(event, "source_ip"):
         return {
             "id": event.id,
             "has_raw_payload_json": has_raw_payload,
-            "has_data_json_column": _has_column(event, "data_json"),
+            "has_data_json_column": has_data_json_column,
             "raw_payload_top_level_keys": _top_level_keys(payload) if has_raw_payload else [],
             "extracted_source_ip": "",
             "extracted_source_context": "",
+            "extracted_signal_type": "",
+            "extracted_impact_type": "",
             "update_reason": "source_ip_column_missing",
             "would_update": False,
+            "updates": {},
         }
-    source_context_missing = getattr(event, FIELD_ATTRS["source_context"], None) in (None, "")
-    current_source_ip = getattr(event, FIELD_ATTRS["source_ip"], None)
     if not has_raw_payload:
         return {
             "id": event.id,
             "has_raw_payload_json": False,
-            "has_data_json_column": _has_column(event, "data_json"),
+            "has_data_json_column": has_data_json_column,
             "raw_payload_top_level_keys": [],
             "extracted_source_ip": "",
             "extracted_source_context": "",
+            "extracted_signal_type": "",
+            "extracted_impact_type": "",
             "update_reason": "no_raw_payload",
             "would_update": False,
+            "updates": {},
         }
 
-    if current_source_ip not in (None, "") and not force:
-        extracted_source_info = extract_source_info(payload, event)
-        return {
-            "id": event.id,
-            "has_raw_payload_json": True,
-            "has_data_json_column": _has_column(event, "data_json"),
-            "raw_payload_top_level_keys": _top_level_keys(payload),
-            "extracted_source_ip": _source_ip_from_payload(payload, event),
-            "extracted_source_context": extracted_source_info.get("source_context") or "",
-            "update_reason": "already_has_source_ip",
-            "would_update": False,
-        }
-
-    extracted_source_ip = _source_ip_from_payload(payload, event)
-    extracted_source_info = extract_source_info(payload, event)
-    extracted_source_context = extracted_source_info.get("source_context") or ""
-    if not extracted_source_ip:
-        return {
-            "id": event.id,
-            "has_raw_payload_json": True,
-            "has_data_json_column": _has_column(event, "data_json"),
-            "raw_payload_top_level_keys": _top_level_keys(payload),
-            "extracted_source_ip": "",
-            "extracted_source_context": extracted_source_context,
-            "update_reason": "no_source_found",
-            "would_update": False,
-        }
-    if source_context_missing or force:
-        return {
-            "id": event.id,
-            "has_raw_payload_json": True,
-            "has_data_json_column": _has_column(event, "data_json"),
-            "raw_payload_top_level_keys": _top_level_keys(payload),
-            "extracted_source_ip": extracted_source_ip,
-            "extracted_source_context": extracted_source_context,
-            "update_reason": "would_update",
-            "would_update": True,
-        }
+    extracted = _field_value_map(payload, event, source_fields=source_fields, decision_fields=decision_fields)
+    updates: dict[str, Any] = {}
+    for field in selected_fields:
+        current = getattr(event, FIELD_ATTRS[field], None)
+        next_value = extracted.get(field)
+        if next_value in (None, ""):
+            continue
+        if force or current in (None, ""):
+            updates[field] = next_value
+    source_values = {field: extracted.get(field) for field in SOURCE_FIELDS}
+    decision_values = {field: extracted.get(field) for field in DECISION_FIELDS}
     return {
         "id": event.id,
         "has_raw_payload_json": True,
-        "has_data_json_column": _has_column(event, "data_json"),
+        "has_data_json_column": has_data_json_column,
         "raw_payload_top_level_keys": _top_level_keys(payload),
-        "extracted_source_ip": extracted_source_ip,
-        "extracted_source_context": extracted_source_context,
-        "update_reason": "would_update",
-        "would_update": True,
+        "extracted_source_ip": _as_text(source_values.get("source_ip")),
+        "extracted_source_context": _as_text(source_values.get("source_context")),
+        "extracted_signal_type": _as_text(decision_values.get("signal_type")),
+        "extracted_impact_type": _as_text(decision_values.get("impact_type")),
+        "update_reason": "would_update" if updates else "already_has_fields",
+        "would_update": bool(updates),
+        "updates": updates,
     }
 
 
@@ -227,6 +273,8 @@ def _build_batch_query(
     since: datetime | None,
     until: datetime | None,
     force: bool,
+    source_fields: bool,
+    decision_fields: bool,
     target_id: int | None,
     order: str,
     cursor: tuple[datetime, int] | None,
@@ -241,27 +289,47 @@ def _build_batch_query(
         if until is not None:
             query = query.where(AuditEvent.timestamp <= until)
         if not force:
-            query = query.where(
-                or_(
-                    AuditEvent.source_ip.is_(None),
-                    AuditEvent._source_context.is_(None),
-                    AuditEvent._client_id.is_(None),
-                    AuditEvent._connection_id.is_(None),
-                    AuditEvent._request_id.is_(None),
-                    AuditEvent.environment_id.is_(None),
-                    AuditEvent.flink_region.is_(None),
-                    AuditEvent.network_id.is_(None),
+            missing_groups = []
+            if source_fields:
+                missing_groups.append(
+                    or_(
+                        AuditEvent.source_ip.is_(None),
+                        AuditEvent._source_context.is_(None),
+                        AuditEvent._client_id.is_(None),
+                        AuditEvent._connection_id.is_(None),
+                        AuditEvent._request_id.is_(None),
+                        AuditEvent.environment_id.is_(None),
+                        AuditEvent.flink_region.is_(None),
+                        AuditEvent.network_id.is_(None),
+                    )
                 )
-            )
-            query = query.where(
-                or_(
-                    AuditEvent.raw_payload_json.contains('"clientIp"'),
-                    AuditEvent.raw_payload_json.contains('"client_ip"'),
-                    AuditEvent.raw_payload_json.contains('"requestMetadata"'),
-                    AuditEvent.raw_payload_json.contains('"clientAddress"'),
-                    AuditEvent.raw_payload_json.contains('"data_json"'),
+                query = query.where(
+                    or_(
+                        AuditEvent.raw_payload_json.contains('"clientIp"'),
+                        AuditEvent.raw_payload_json.contains('"client_ip"'),
+                        AuditEvent.raw_payload_json.contains('"requestMetadata"'),
+                        AuditEvent.raw_payload_json.contains('"clientAddress"'),
+                        AuditEvent.raw_payload_json.contains('"data_json"'),
+                    )
                 )
-            )
+            if decision_fields:
+                missing_groups.append(
+                    or_(
+                        AuditEvent._signal_type.is_(None),
+                        AuditEvent._signal_reason.is_(None),
+                        AuditEvent._impact_type.is_(None),
+                        AuditEvent._risk_level.is_(None),
+                        AuditEvent._change_type.is_(None),
+                        AuditEvent._resource_family.is_(None),
+                        AuditEvent._event_title.is_(None),
+                        AuditEvent._event_summary.is_(None),
+                        AuditEvent._decision_reason.is_(None),
+                        AuditEvent._decision_label.is_(None),
+                        AuditEvent._recommended_action.is_(None),
+                    )
+                )
+            if missing_groups:
+                query = query.where(or_(*missing_groups))
         if cursor is not None:
             if order == "newest":
                 query = query.where(tuple_(AuditEvent.timestamp, AuditEvent.id) < cursor)
@@ -280,6 +348,8 @@ def backfill_source_fields_from_raw_payload(
     dry_run: bool = True,
     limit: int = 1000,
     force: bool = False,
+    source_fields: bool = True,
+    decision_fields: bool = False,
     hours: int | None = None,
     since: datetime | None = None,
     until: datetime | None = None,
@@ -288,6 +358,8 @@ def backfill_source_fields_from_raw_payload(
     target_id: int | None = None,
     debug_sample: int = 0,
 ) -> dict[str, Any]:
+    if not source_fields and not decision_fields:
+        raise ValueError("choose at least one backfill target: source_fields or decision_fields")
     limit = max(1, min(int(limit), 10000))
     order = order.lower().strip()
     if order not in {"oldest", "newest"}:
@@ -300,11 +372,13 @@ def backfill_source_fields_from_raw_payload(
     batch_size = min(limit, 1000)
     cursor: tuple[datetime, int] | None = None
     while processed < limit:
-        current_limit = min(batch_size, limit - processed)
+        current_limit = 1 if target_id is not None else min(batch_size, limit - processed)
         query = _build_batch_query(
             since=effective_since,
             until=effective_until,
             force=force,
+            source_fields=source_fields,
+            decision_fields=decision_fields,
             target_id=target_id,
             order=order,
             cursor=cursor,
@@ -321,7 +395,7 @@ def backfill_source_fields_from_raw_payload(
             except json.JSONDecodeError:
                 result.invalid_json += 1
                 if debug_sample > 0:
-                    decision = _backfill_decision(event, {}, force=force)
+                    decision = _row_plan(event, {}, source_fields=source_fields, decision_fields=decision_fields, force=force)
                     print(
                         "row "
                         f"id={decision['id']} "
@@ -330,44 +404,55 @@ def backfill_source_fields_from_raw_payload(
                         f"raw_payload_top_level_keys={','.join(decision['raw_payload_top_level_keys']) or '-'} "
                         f"extracted_source_ip={decision['extracted_source_ip'] or '-'} "
                         f"extracted_source_context={decision['extracted_source_context'] or '-'} "
+                        f"extracted_signal_type={decision['extracted_signal_type'] or '-'} "
+                        f"extracted_impact_type={decision['extracted_impact_type'] or '-'} "
                         f"update_reason={decision['update_reason']}"
                     )
                     debug_sample -= 1
                 continue
-            source_info = extract_source_info(payload, event)
-            source_ip = _source_ip_from_payload(payload, event) or source_info.get("source_ip")
-            changed = False
-            for field in SOURCE_FIELDS:
-                attr = FIELD_ATTRS[field]
-                current = getattr(event, attr)
-                next_value = source_ip if field == "source_ip" else source_info.get(field)
-                if next_value in (None, ""):
-                    continue
-                if force or current in (None, ""):
-                    changed = True
-                    if not dry_run:
-                        setattr(event, field, next_value)
-            if changed:
+            plan = _row_plan(event, payload, source_fields=source_fields, decision_fields=decision_fields, force=force)
+            if plan["updates"]:
                 result.updated += 1
+                if source_fields:
+                    result.source_updated += int(any(field in plan["updates"] for field in SOURCE_FIELDS))
+                if decision_fields:
+                    result.decision_updated += int(any(field in plan["updates"] for field in DECISION_FIELDS))
+                if not dry_run:
+                    for field, value in plan["updates"].items():
+                        setattr(event, FIELD_ATTRS[field], value)
             if debug_sample > 0:
-                decision = _backfill_decision(event, payload, force=force)
                 print(
                     "row "
-                    f"id={decision['id']} "
-                    f"has_raw_payload_json={'yes' if decision['has_raw_payload_json'] else 'no'} "
-                    f"has_data_json_column={'yes' if decision['has_data_json_column'] else 'no'} "
-                    f"raw_payload_top_level_keys={','.join(decision['raw_payload_top_level_keys']) or '-'} "
-                    f"extracted_source_ip={decision['extracted_source_ip'] or '-'} "
-                    f"extracted_source_context={decision['extracted_source_context'] or '-'} "
-                    f"update_reason={decision['update_reason']}"
+                    f"id={plan['id']} "
+                    f"has_raw_payload_json={'yes' if plan['has_raw_payload_json'] else 'no'} "
+                    f"has_data_json_column={'yes' if plan['has_data_json_column'] else 'no'} "
+                    f"raw_payload_top_level_keys={','.join(plan['raw_payload_top_level_keys']) or '-'} "
+                    f"extracted_source_ip={plan['extracted_source_ip'] or '-'} "
+                    f"extracted_source_context={plan['extracted_source_context'] or '-'} "
+                    f"extracted_signal_type={plan['extracted_signal_type'] or '-'} "
+                    f"extracted_impact_type={plan['extracted_impact_type'] or '-'} "
+                    f"update_reason={plan['update_reason']}"
                 )
                 debug_sample -= 1
             cursor = (event.timestamp, event.id)
+        if target_id is not None:
+            break
         if len(batch) < current_limit:
             break
         if sleep_ms > 0 and processed < limit:
             sleep(sleep_ms / 1000.0)
     if not dry_run:
         db.commit()
-    logger.info("source field backfill complete scanned=%s updated=%s invalid_json=%s dry_run=%s force=%s", result.scanned, result.updated, result.invalid_json, dry_run, force)
+    logger.info(
+        "field backfill complete scanned=%s updated=%s source_updated=%s decision_updated=%s invalid_json=%s dry_run=%s force=%s source_fields=%s decision_fields=%s",
+        result.scanned,
+        result.updated,
+        result.source_updated,
+        result.decision_updated,
+        result.invalid_json,
+        dry_run,
+        force,
+        source_fields,
+        decision_fields,
+    )
     return result.as_dict()

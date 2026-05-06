@@ -70,6 +70,17 @@ audit_events = Table(
     Column("environment_id", String(255), nullable=True),
     Column("flink_region", String(255), nullable=True),
     Column("network_id", String(255), nullable=True),
+    Column("signal_type", String(32), nullable=True),
+    Column("signal_reason", String(128), nullable=True),
+    Column("impact_type", String(64), nullable=True),
+    Column("risk_level", String(32), nullable=True),
+    Column("change_type", String(32), nullable=True),
+    Column("resource_family", String(64), nullable=True),
+    Column("event_title", String(255), nullable=True),
+    Column("event_summary", String(768), nullable=True),
+    Column("decision_reason", String(255), nullable=True),
+    Column("decision_label", String(32), nullable=True),
+    Column("recommended_action", String(255), nullable=True),
     Column("summary", Text, nullable=False),
     Column("raw_payload_json", Text, nullable=False),
     Column("is_failure", Boolean, nullable=False),
@@ -88,7 +99,15 @@ Index("idx_audit_events_source_ip", audit_events.c.source_ip)
 Index("idx_audit_events_environment_id", audit_events.c.environment_id)
 Index("idx_audit_events_action_category", audit_events.c.action_category)
 Index("idx_audit_events_result", audit_events.c.result)
+Index("idx_audit_events_signal_type", audit_events.c.signal_type)
+Index("idx_audit_events_impact_type", audit_events.c.impact_type)
+Index("idx_audit_events_risk_level", audit_events.c.risk_level)
+Index("idx_audit_events_change_type", audit_events.c.change_type)
+Index("idx_audit_events_resource_family", audit_events.c.resource_family)
 Index("idx_audit_events_timestamp_desc", audit_events.c.timestamp.desc())
+Index("idx_audit_events_timestamp_signal_type", audit_events.c.timestamp.desc(), audit_events.c.signal_type)
+Index("idx_audit_events_timestamp_impact_type", audit_events.c.timestamp.desc(), audit_events.c.impact_type)
+Index("idx_audit_events_timestamp_risk_level", audit_events.c.timestamp.desc(), audit_events.c.risk_level)
 Index("idx_audit_events_resource_lookup", audit_events.c.resource_type, audit_events.c.resource_name, audit_events.c.timestamp.desc())
 Index("idx_audit_events_action_category_time", audit_events.c.action_category, audit_events.c.timestamp.desc())
 Index("idx_audit_events_actor_time", audit_events.c.actor, audit_events.c.timestamp.desc())
@@ -119,6 +138,7 @@ class AuditEventDbWriter:
         self.engine = create_engine(self.database_url, future=True, pool_pre_ping=True, connect_args=connect_args)
         metadata.create_all(self.engine)
         self._ensure_columns()
+        self._ensure_indexes()
 
     @property
     def mode(self) -> str:
@@ -144,6 +164,17 @@ class AuditEventDbWriter:
             "environment_id": "VARCHAR(255)",
             "flink_region": "VARCHAR(255)",
             "network_id": "VARCHAR(255)",
+            "signal_type": "VARCHAR(32)",
+            "signal_reason": "VARCHAR(128)",
+            "impact_type": "VARCHAR(64)",
+            "risk_level": "VARCHAR(32)",
+            "change_type": "VARCHAR(32)",
+            "resource_family": "VARCHAR(64)",
+            "event_title": "VARCHAR(255)",
+            "event_summary": "VARCHAR(768)",
+            "decision_reason": "VARCHAR(255)",
+            "decision_label": "VARCHAR(32)",
+            "recommended_action": "VARCHAR(255)",
         }
         with self.engine.begin() as conn:
             for name, type_sql in additions.items():
@@ -153,6 +184,13 @@ class AuditEventDbWriter:
                     conn.execute(text(f"ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS {name} {type_sql}"))
                 else:
                     conn.execute(text(f"ALTER TABLE audit_events ADD COLUMN {name} {type_sql}"))
+
+    def _ensure_indexes(self) -> None:
+        if "audit_events" not in metadata.tables:
+            return
+        table = metadata.tables["audit_events"]
+        for index in table.indexes:
+            index.create(bind=self.engine, checkfirst=True)
 
     def _row(self, payload: dict[str, Any]) -> dict[str, Any]:
         normalized = normalize_event(payload)

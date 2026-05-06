@@ -312,6 +312,118 @@ def test_source_backfill_does_not_overwrite_without_force():
         tmp.cleanup()
 
 
+def test_decision_backfill_dry_run_counts_rows_that_would_be_updated():
+    tmp, SessionLocal = _session()
+    try:
+        with SessionLocal() as db:
+            event = create_event(
+                db,
+                {
+                    "id": "decision-backfill-dry-run",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "methodName": "kafka.DeleteTopics",
+                    "resourceType": "Topic",
+                    "resourceName": "topic=payments",
+                    "summary": "u-admin deleted topic 'payments'",
+                },
+            )
+            event._signal_type = None
+            event._signal_reason = None
+            event._impact_type = None
+            event._risk_level = None
+            event._change_type = None
+            event._resource_family = None
+            event._event_title = None
+            event._event_summary = None
+            event._decision_reason = None
+            event._decision_label = None
+            event._recommended_action = None
+            db.commit()
+            result = backfill_source_fields_from_raw_payload(db, dry_run=True, source_fields=False, decision_fields=True)
+            db.refresh(event)
+            assert result["updated"] == 1
+            assert result["decision_updated"] == 1
+            assert event._signal_type is None
+    finally:
+        tmp.cleanup()
+
+
+def test_decision_backfill_updates_missing_fields():
+    tmp, SessionLocal = _session()
+    try:
+        with SessionLocal() as db:
+            event = create_event(
+                db,
+                {
+                    "id": "decision-backfill-update",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "methodName": "kafka.DeleteTopics",
+                    "resourceType": "Topic",
+                    "resourceName": "topic=payments",
+                    "summary": "u-admin deleted topic 'payments'",
+                },
+            )
+            event._signal_type = None
+            event._signal_reason = None
+            event._impact_type = None
+            event._risk_level = None
+            event._change_type = None
+            event._resource_family = None
+            event._event_title = None
+            event._event_summary = None
+            event._decision_reason = None
+            event._decision_label = None
+            event._recommended_action = None
+            db.commit()
+            result = backfill_source_fields_from_raw_payload(db, dry_run=False, source_fields=False, decision_fields=True)
+            db.refresh(event)
+            assert result["updated"] == 1
+            assert result["decision_updated"] == 1
+            assert event._signal_type == "action_required"
+            assert event._decision_label == "Action Needed"
+            assert event._impact_type == "destructive"
+    finally:
+        tmp.cleanup()
+
+
+def test_decision_backfill_force_recomputes_existing_fields():
+    tmp, SessionLocal = _session()
+    try:
+        with SessionLocal() as db:
+            event = create_event(
+                db,
+                {
+                    "id": "decision-backfill-force",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "methodName": "kafka.DeleteTopics",
+                    "resourceType": "Topic",
+                    "resourceName": "topic=payments",
+                    "summary": "u-admin deleted topic 'payments'",
+                },
+            )
+            event._signal_type = "informational"
+            event._signal_reason = "noise"
+            event._impact_type = "read_only"
+            event._risk_level = "low"
+            event._change_type = "read/listed"
+            event._resource_family = "topic"
+            event._event_title = "Wrong title"
+            event._event_summary = "Wrong summary"
+            event._decision_reason = "Wrong reason"
+            event._decision_label = "Info"
+            event._recommended_action = "No action needed"
+            db.commit()
+            result = backfill_source_fields_from_raw_payload(db, dry_run=False, source_fields=False, decision_fields=True, force=True)
+            db.refresh(event)
+            assert result["updated"] == 1
+            assert result["decision_updated"] == 1
+            assert event._signal_type == "action_required"
+            assert event._decision_label == "Action Needed"
+            assert event._impact_type == "destructive"
+    finally:
+        tmp.cleanup()
+
+
 def test_source_backfill_invalid_timestamp_errors_cleanly(tmp_path):
     db_url = f"sqlite:///{tmp_path / 'auditlens-invalid-timestamp.db'}"
     env = {"DATABASE_URL": db_url, "FORWARDER_DATABASE_URL": db_url}

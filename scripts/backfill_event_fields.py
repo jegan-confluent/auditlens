@@ -32,9 +32,10 @@ def _parse_timestamp(value: str, flag: str) -> datetime:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Backfill persisted AuditLens event fields from raw payloads.")
     parser.add_argument("--source-fields", action="store_true", help="Backfill source/client/context fields.")
+    parser.add_argument("--decision-fields", action="store_true", help="Backfill persisted decision snapshot fields.")
     parser.add_argument("--dry-run", action="store_true", help="Report counts without updating rows.")
     parser.add_argument("--limit", type=int, default=1000)
-    parser.add_argument("--force", action="store_true", help="Overwrite existing source fields.")
+    parser.add_argument("--force", action="store_true", help="Overwrite existing backfilled fields.")
     parser.add_argument("--allow-empty", action="store_true", help="Allow updates even when the target database is empty.")
     parser.add_argument("--hours", type=int, help="Backfill rows from the last N hours.")
     parser.add_argument("--since", type=str, help="Backfill rows with timestamp >= ISO timestamp.")
@@ -44,8 +45,8 @@ def main() -> int:
     parser.add_argument("--debug-sample", type=int, default=0, help="Print redacted diagnostics for the first N candidate rows.")
     parser.add_argument("--id", type=int, dest="target_id", help="Restrict the backfill to a single AuditEvent id.")
     args = parser.parse_args()
-    if not args.source_fields:
-        parser.error("choose at least one backfill target, for example --source-fields")
+    if not args.source_fields and not args.decision_fields:
+        parser.error("choose at least one backfill target, for example --source-fields or --decision-fields")
 
     status = build_status_payload(
         api_database_url=os.environ.get("DATABASE_URL"),
@@ -73,6 +74,8 @@ def main() -> int:
             dry_run=args.dry_run,
             limit=args.limit,
             force=args.force,
+            source_fields=args.source_fields,
+            decision_fields=args.decision_fields,
             hours=args.hours,
             since=since,
             until=until,

@@ -4,6 +4,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
+from src.product.event_intelligence import decision_snapshot
 from src.product.actor_enrichment import enrich_actor
 from src.product.source_enrichment import extract_source_info
 
@@ -362,6 +363,7 @@ def normalize_event(payload: dict[str, Any]) -> dict[str, Any]:
     actor = _as_text(_first_present(payload, ("user_display", "user", "principal", "actor"), "Unknown actor")) or "Unknown actor"
     actor_info = enrich_actor(actor)
     source_info = extract_source_info(payload)
+    decision = decision_snapshot(payload)
     summary = _as_text(payload.get("summary") or payload.get("message"))
     if not summary:
         summary = f"{actor} {humanize_action(payload)} {resource_info['resource_display']}".strip()
@@ -394,6 +396,17 @@ def normalize_event(payload: dict[str, Any]) -> dict[str, Any]:
         "is_failure": failure,
         "is_denied": denied,
         "is_routine_noise": is_routine_noise(payload, action_category),
+        "signal_type": decision["signal_type"],
+        "signal_reason": decision["signal_reason"],
+        "impact_type": decision["impact_type"],
+        "risk_level": decision["risk_level"],
+        "change_type": decision["change_type"],
+        "resource_family": decision["resource_family"],
+        "event_title": decision["event_title"],
+        "event_summary": decision["event_summary"],
+        "decision_reason": decision["decision_reason"],
+        "decision_label": decision["decision_label"],
+        "recommended_action": decision["recommended_action"],
     }
 
 
