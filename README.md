@@ -214,6 +214,37 @@ For shared environments, set `API_AUTH_ENABLED=true` and provide
 `API_AUTH_TOKENS_JSON` or `API_AUTH_TOKEN_FILE`. Raw audit payloads are available
 only from the event detail endpoint, not from the event list endpoint.
 
+## IAM and Metrics Enrichment
+
+AuditLens enriches principals in a strict source order:
+
+1. Manual mapping from `IAM_MAPPING_FILE` or `ACTOR_IDENTITY_MAP_JSON`
+2. Confluent IAM/Admin lookup when `IAM_ENRICHMENT_ENABLED=true` and credentials are present
+3. Audit-event-derived identity from the payload itself
+4. Metrics correlation when `METRICS_ENRICHMENT_ENABLED=true`
+5. Raw fallback using the principal ID already present in the event
+
+Trust model:
+
+- Manual mapping is authoritative.
+- Confluent IAM/Admin lookup is authoritative when enabled and successful.
+- Audit-event-derived identity is medium confidence.
+- Metrics correlation is advisory only and stays low/medium confidence unless the source labels explicitly prove identity.
+- Raw fallback preserves the principal ID instead of hiding it behind a generic unknown label.
+
+UI behavior:
+
+- The events table prefers enriched display name and email, then falls back to the raw principal ID.
+- The drawer shows actor source and confidence.
+- `Unknown principal` is only used when there is no usable ID to display.
+
+Limits:
+
+- Metrics correlation is not identity truth.
+- IAM lookup depends on tenant credentials and API availability.
+- Resource enrichment remains a follow-up.
+- This pass did not add a sync daemon or a persistent resource catalog.
+
 The scan ignores `.git`, `node_modules`, `.next`, `data`, backup directories, and `.env.example` placeholders.
 
 ## Troubleshooting

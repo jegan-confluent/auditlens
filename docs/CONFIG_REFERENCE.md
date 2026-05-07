@@ -72,6 +72,38 @@ Forwarder API:
 - `API_BUFFER_ENRICHED` default `5000`
 - `API_BUFFER_SIGNALS` default `1000`
 
+## IAM and Metrics Enrichment
+
+Principal enrichment order:
+
+1. `IAM_MAPPING_FILE` or `ACTOR_IDENTITY_MAP_JSON`
+2. `IAM_ENRICHMENT_ENABLED=true` with Confluent Cloud IAM/Admin credentials
+3. audit-event-derived identity
+4. `METRICS_ENRICHMENT_ENABLED=true` correlation
+5. raw fallback principal ID
+
+Configuration:
+
+- `IAM_ENRICHMENT_ENABLED` default `false`
+- `IAM_ENRICHMENT_SOURCE` default `manual,confluent_api,metrics`
+- `IAM_ENRICHMENT_CACHE_TTL_SECONDS` default `3600`
+- `IAM_MAPPING_FILE` default `data/iam_mapping.json`
+- `ACTOR_IDENTITY_MAP_JSON` optional inline mapping for local/dev
+- `CONFLUENT_CLOUD_API_KEY` optional Cloud IAM/Admin API key
+- `CONFLUENT_CLOUD_API_SECRET` optional Cloud IAM/Admin API secret
+- `CONFLUENT_API_BASE_URL` default `https://api.confluent.cloud`
+- `METRICS_ENRICHMENT_ENABLED` default `false`
+- `METRICS_ENRICHMENT_SOURCE` default `correlation`
+- `METRICS_ENRICHMENT_CACHE_TTL_SECONDS` default `3600`
+
+Trust model:
+
+- Manual mapping is authoritative.
+- Confluent IAM/Admin lookup is authoritative when enabled and successful.
+- Audit-event-derived identity is medium confidence.
+- Metrics correlation is advisory and must stay low/medium confidence unless labels directly prove identity.
+- Raw fallback should preserve the original principal ID and only use a generic unknown label when no usable ID exists.
+
 ## Persistence
 
 Required for durable product search/export in the foundation release:
