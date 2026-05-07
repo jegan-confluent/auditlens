@@ -14,7 +14,9 @@ Rules can be loaded from config/classification_rules.yaml for easy updates
 without code changes. Falls back to hardcoded values if YAML not found.
 """
 
+import json
 import logging
+import os
 import re
 from pathlib import Path
 from typing import FrozenSet, Tuple, Set
@@ -41,13 +43,68 @@ def _load_rules_from_yaml() -> dict:
         logger.warning(f"Failed to load classification rules from YAML: {e}")
     return {}
 
+
+def _load_extras_from_data_file() -> dict[str, Set[str]]:
+    """Load schema-watcher additions from a read-only JSON data file.
+
+    Phase 3 hardening: the schema-watcher container no longer rewrites
+    ``methods.py`` at runtime. Instead it appends to a JSON data file under
+    its writeable volume (``/app/data/schema_methods.json`` by default), and
+    we *read* that file here at startup. If the file is missing or malformed
+    we fall back to the YAML/hardcoded defaults silently — never failing
+    open by re-running source code from disk.
+    """
+    candidates: list[Path] = []
+    env_path = os.getenv("SCHEMA_METHODS_DATA_FILE")
+    if env_path:
+        candidates.append(Path(env_path))
+    candidates.append(Path("/app/data/schema_methods.json"))
+    candidates.append(Path(__file__).parent.parent.parent / "schema-watcher" / "data" / "schema_methods.json")
+
+    for path in candidates:
+        try:
+            if not path.exists():
+                continue
+            with open(path, "rb") as f:
+                payload = json.loads(f.read() or b"{}")
+        except Exception as exc:
+            logger.warning("schema-watcher data file %s could not be read: %s", path, exc)
+            continue
+        buckets = payload.get("methods_by_level", {}) or {}
+        return {
+            level: set(values or []) for level, values in buckets.items()
+            if isinstance(values, list)
+        }
+    return {}
+
+
 _YAML_RULES = _load_rules_from_yaml()
+_SCHEMA_WATCHER_EXTRAS = _load_extras_from_data_file()
+
+
+_SCHEMA_WATCHER_KEY_BY_LEVEL = {
+    "critical_methods": "CRITICAL",
+    "high_methods": "HIGH",
+    "medium_methods": "MEDIUM",
+    "read_only_methods": "LOW",
+}
+
 
 def _get_methods(key: str, default: Set[str]) -> FrozenSet[str]:
-    """Get methods from YAML or fall back to default."""
+    """Return the resolved method set for ``key``.
+
+    Resolution order:
+      1. ``classification_rules.yaml`` if it defines ``key`` (full override).
+      2. The hardcoded ``default`` baked into this module.
+    Either is then *unioned* with any schema-watcher-detected additions for
+    the same criticality level (read-only JSON data file).
+    """
     if _YAML_RULES and key in _YAML_RULES:
-        return frozenset(_YAML_RULES[key])
-    return frozenset(default)
+        base = set(_YAML_RULES[key])
+    else:
+        base = set(default)
+    extras = _SCHEMA_WATCHER_EXTRAS.get(_SCHEMA_WATCHER_KEY_BY_LEVEL.get(key, ""), set())
+    return frozenset(base | extras)
 
 # =============================================================================
 # CRITICAL METHODS - Require immediate attention

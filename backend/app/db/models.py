@@ -1,4 +1,5 @@
 import json
+import logging
 from datetime import datetime, timezone
 
 from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, select
@@ -10,6 +11,8 @@ from src.product.resource_intelligence import extract_resource_context
 from src.product.source_enrichment import extract_source_info
 from src.product.event_signals import classify_signal
 from src.product.triage_store import get_triage
+
+logger = logging.getLogger("auditlens.backend.models")
 
 
 class Base(DeclarativeBase):
@@ -158,6 +161,14 @@ class AuditEvent(Base):
                 try:
                     payload = json.loads(self.raw_payload_json) if self.raw_payload_json else {}
                 except json.JSONDecodeError:
+                    # Corrupt or non-JSON payload. Fall back to empty enrichment
+                    # but record the decode failure at debug level so data
+                    # quality regressions are not silently absorbed.
+                    logger.debug(
+                        "resource enrichment: raw_payload_json failed to decode for event_fingerprint=%s",
+                        getattr(self, "event_fingerprint", "<unknown>"),
+                        exc_info=True,
+                    )
                     payload = {}
                 cached = extract_resource_context(payload, self).to_event_fields()
             else:
@@ -266,6 +277,14 @@ class AuditEvent(Base):
             try:
                 payload = json.loads(self.raw_payload_json) if self.raw_payload_json else {}
             except json.JSONDecodeError:
+                # Same handling as _resource_enrichment: a bad payload should
+                # not break enrichment but it must not be silent — it indicates
+                # an upstream data quality regression.
+                logger.debug(
+                    "source enrichment: raw_payload_json failed to decode for event_fingerprint=%s",
+                    getattr(self, "event_fingerprint", "<unknown>"),
+                    exc_info=True,
+                )
                 payload = {}
             cached = extract_source_info(payload, self)
             setattr(self, "_source_enrichment_cache", cached)

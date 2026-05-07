@@ -86,21 +86,107 @@ def extract_from_crn(crn, field):
     return match.group(1) if match else None
 
 # ──────────── secrets masking for safe logging ────────────
+# Single source of truth for "is this field name sensitive?". Lower-case tokens
+# that we expect after normalising - and . to _. New tokens: every commonly-used
+# OAuth / IAM / API field that previously slipped past the redactor.
+_SENSITIVE_KEY_TOKENS: tuple[str, ...] = (
+    "password",
+    "passphrase",
+    "passwd",
+    "secret",            # covers client_secret, api_secret, etc.
+    "api_key",
+    "apikey",
+    "x_api_key",
+    "token",             # covers access_token / refresh_token / id_token / bearer token
+    "bearer",
+    "credential",
+    "authorization",
+    "cookie",
+    "private_key",
+    "client_id",         # principal-style identifier; treat as sensitive in logs
+)
+
+
+def _key_is_sensitive(name: str) -> bool:
+    normalized = name.lower().replace("-", "_").replace(".", "_")
+    return any(token in normalized for token in _SENSITIVE_KEY_TOKENS)
+
+
+# Build a separator-tolerant regex alternation for the sensitive tokens above.
+# The `_` placeholders inside multi-word tokens become ``[_.\-]?`` so we match
+# ``api_key``, ``api.key``, ``api-key``, and ``apikey`` against the same token.
+def _token_pattern(token: str) -> str:
+    escaped = re.escape(token)
+    return escaped.replace(r"\_", r"[_.\-]?").replace(r"_", r"[_.\-]?")
+
+
+_TOKEN_ALT = "|".join(_token_pattern(t) for t in _SENSITIVE_KEY_TOKENS)
+
+
 def mask_config_for_logging(config: dict) -> dict:
     """
     Return config dict with secrets masked for safe logging.
 
     Use this when logging any configuration that might contain sensitive values.
-    Masks: passwords, secrets, API keys, tokens, and credentials.
+    Masks: passwords, secrets, API keys, tokens, credentials, OAuth fields,
+    cookies, and authorization headers.
     """
-    sensitive_patterns = {'password', 'secret', 'api_key', 'apikey', 'token', 'credential'}
     masked = {}
     for k, v in config.items():
-        k_lower = k.lower().replace('.', '_').replace('-', '_')
-        if any(pattern in k_lower for pattern in sensitive_patterns):
+        if _key_is_sensitive(str(k)):
             masked[k] = '***MASKED***'
         else:
             masked[k] = v
+    return masked
+
+
+# Pre-compiled regexes for masking secrets out of a free-form *string*
+# (Kafka error messages, exception strings, librdkafka diagnostics, etc.).
+# We scrub two shapes:
+#   1. ``key=value`` / ``key: value`` / ``key:"value"`` where the key matches a
+#      sensitive token. Mask the value.
+#   2. ``Bearer <token>`` / ``Basic <token>`` Authorization-header fragments.
+# Order matters: Bearer/Basic Authorization fragments are scrubbed *before* the
+# generic key=value pass so that ``Authorization: Bearer <token>`` becomes
+# ``Authorization: Bearer ***MASKED***`` rather than the key=value pattern
+# eating ``Bearer`` as the value of the ``Authorization:`` field and leaving
+# the actual token unmasked at the tail.
+_TEXT_MASK_PATTERNS = [
+    re.compile(r"\b(?P<scheme>Bearer|Basic)\s+(?P<value>[A-Za-z0-9_\-\.=+/]{6,})", flags=re.IGNORECASE),
+    re.compile(
+        r"(?P<key>[A-Za-z0-9_.\-]*?(?:" + _TOKEN_ALT + r")[A-Za-z0-9_.\-]*?)"
+        r"(?P<sep>\s*[:=]\s*)"
+        r"(?P<quote>[\"']?)"
+        r"(?P<value>[^\s\"'&,;]+)"
+        r"(?P=quote)",
+        flags=re.IGNORECASE,
+    ),
+]
+
+
+def mask_sensitive_text(text: str | None) -> str | None:
+    """
+    Scrub secret-shaped substrings out of a free-form string.
+
+    ``mask_config_for_logging`` works on dicts where keys carry the metadata
+    needed for redaction. For raw error messages and exception strings we have
+    no key to inspect, so we walk a curated set of regexes that catch the most
+    common ``key=value`` / Authorization-header shapes.
+    """
+    if text is None:
+        return None
+    if not isinstance(text, str):
+        text = str(text)
+    masked = text
+    for pattern in _TEXT_MASK_PATTERNS:
+        masked = pattern.sub(
+            lambda match: (
+                f"{match.group('scheme')} ***MASKED***"
+                if "scheme" in match.groupdict() and match.group("scheme")
+                else f"{match.group('key')}{match.group('sep')}{match.group('quote') or ''}***MASKED***{match.group('quote') or ''}"
+            ),
+            masked,
+        )
     return masked
 
 
@@ -755,8 +841,8 @@ metrics = Metrics()
 def redact_value(name: str, value):
     if value is None:
         return None
-    normalized = name.lower().replace("-", "_")
-    if any(token in normalized for token in ("secret", "password", "token", "api_key", "credential")):
+    normalized = name.lower().replace("-", "_").replace(".", "_")
+    if any(token in normalized for token in _SENSITIVE_KEY_TOKENS):
         return "***MASKED***"
     return value
 
@@ -2084,10 +2170,17 @@ def delivery_callback(err, msg):
     """Track delivery errors."""
     if err:
         delivery_errors["count"] += 1
-        delivery_errors["last_error"] = str(err)
+        # Always store the masked form so anything that subsequently reads
+        # delivery_errors["last_error"] (the heartbeat log, the /health probe,
+        # etc.) cannot inadvertently leak secrets.
+        delivery_errors["last_error"] = mask_sensitive_text(str(err))
         metrics.record_delivery_failure(msg.topic() if msg else "unknown")
         if delivery_errors["count"] <= 10 or delivery_errors["count"] % 1000 == 0:
-            logger.error("Delivery failed (%d total): %s", delivery_errors["count"], err)
+            logger.error(
+                "Delivery failed (%d total): %s",
+                delivery_errors["count"],
+                mask_sensitive_text(str(err)),
+            )
         metrics.record_error()
     else:
         metrics.record_delivery_success(msg.topic())
@@ -2310,11 +2403,12 @@ def flush_db_writer_batch(payloads: list[dict], backoff: RuntimeBackoff, log_sta
         return True
     except Exception as exc:
         delay = backoff.next_delay()
-        metrics.record_db_write_error(str(exc), len(payloads))
+        masked_exc = mask_sensitive_text(str(exc))
+        metrics.record_db_write_error(masked_exc, len(payloads))
         metrics.set_db_writer_state("backoff")
         metrics.set_consumer_state("degraded", delay)
-        if _should_log_repeated_error(log_state, str(exc)):
-            logger.warning("DB writer failed; backing off for %.1fs: %s", delay, exc)
+        if _should_log_repeated_error(log_state, masked_exc):
+            logger.warning("DB writer failed; backing off for %.1fs: %s", delay, masked_exc)
         _sleep_with_shutdown(delay)
         return False
 
@@ -2363,8 +2457,9 @@ def initialize_product_store_or_exit() -> None:
         logger.info("Persistence initialized: backend=%s path=%s",
                     PERSISTENCE_CONFIG.backend, PERSISTENCE_CONFIG.db_path)
     except Exception as exc:
-        metrics.record_persistence_failure(str(exc))
-        logger.error("Persistence initialization failed: %s", exc)
+        masked_exc = mask_sensitive_text(str(exc))
+        metrics.record_persistence_failure(masked_exc)
+        logger.error("Persistence initialization failed: %s", masked_exc)
         sys.exit(1)
 
 
@@ -2667,8 +2762,9 @@ def main():
             initialize_db_writer_if_enabled()
         except Exception as exc:
             db_writer = None
-            metrics.record_db_write_error(str(exc), 0)
-            logger.warning("DB writer enabled but initial connection failed; will retry in processing loop: %s", exc)
+            masked_exc = mask_sensitive_text(str(exc))
+            metrics.record_db_write_error(masked_exc, 0)
+            logger.warning("DB writer enabled but initial connection failed; will retry in processing loop: %s", masked_exc)
     else:
         metrics.set_db_writer_state("disabled")
 
@@ -2856,9 +2952,10 @@ def main():
                 batch = consumer.consume(num_messages=BATCH_SIZE, timeout=CONSUMER_POLL_TIMEOUT_SECONDS)
             except Exception as e:
                 delay = loop_backoff.next_delay()
-                metrics.record_consumer_retry(str(e), delay)
-                if _should_log_repeated_error(loop_log_state, str(e)):
-                    logger.warning("Kafka consume failed; backing off for %.1fs: %s", delay, e)
+                masked = mask_sensitive_text(str(e))
+                metrics.record_consumer_retry(masked, delay)
+                if _should_log_repeated_error(loop_log_state, masked):
+                    logger.warning("Kafka consume failed; backing off for %.1fs: %s", delay, masked)
                 _sleep_with_shutdown(delay)
                 continue
 
@@ -2882,9 +2979,10 @@ def main():
                     if msg is None or msg.error():
                         if msg and msg.error().code() != KafkaError._PARTITION_EOF:
                             delay = loop_backoff.next_delay()
-                            metrics.record_consumer_retry(str(msg.error()), delay)
-                            if _should_log_repeated_error(loop_log_state, str(msg.error())):
-                                logger.error("Consume error; backing off for %.1fs: %s", delay, msg.error())
+                            masked_err = mask_sensitive_text(str(msg.error()))
+                            metrics.record_consumer_retry(masked_err, delay)
+                            if _should_log_repeated_error(loop_log_state, masked_err):
+                                logger.error("Consume error; backing off for %.1fs: %s", delay, masked_err)
                             _sleep_with_shutdown(delay)
                             batch_had_processing_failure = True
                         continue
@@ -3064,7 +3162,13 @@ def main():
                            time.ctime(), metrics.processed_total, metrics.error_count, delivery_errors["count"],
                            dlq_stats["sent"], dlq_stats["failed"])
                 if delivery_errors["last_error"]:
-                    logger.info("Last delivery error: %s", delivery_errors["last_error"])
+                    # delivery_errors["last_error"] is already pre-masked at
+                    # capture time (see delivery_callback) but we re-mask on
+                    # the way out as defence-in-depth.
+                    logger.info(
+                        "Last delivery error: %s",
+                        mask_sensitive_text(delivery_errors["last_error"]),
+                    )
                 # Log routing stats if multi-topic routing is enabled
                 if ENABLE_MULTI_TOPIC_ROUTING and topic_router:
                     stats = topic_router.get_stats()

@@ -976,6 +976,63 @@ def test_live_reports_process_alive(client):
     assert response.json() == {"status": "alive"}
 
 
+def test_corrupt_raw_payload_logs_decode_error(client, monkeypatch):
+    """Phase 3: a corrupt raw_payload_json must emit a debug log instead of
+    being silently swallowed."""
+    from backend.app.db import models as models_module
+
+    captured = []
+
+    class _RecordingLogger:
+        def debug(self, msg, *args, **kwargs):
+            captured.append((msg % args if args else msg, kwargs))
+
+        def warning(self, *_args, **_kwargs):
+            pass
+
+        def error(self, *_args, **_kwargs):
+            pass
+
+        def info(self, *_args, **_kwargs):
+            pass
+
+    monkeypatch.setattr(models_module, "logger", _RecordingLogger())
+
+    db_override = next(iter(client.app.dependency_overrides.values()))
+    session_gen = db_override()
+    db = next(session_gen)
+    try:
+        from backend.app.db.models import AuditEvent
+
+        bad = AuditEvent(
+            event_fingerprint="corrupt-payload-fixture",
+            timestamp=datetime.now(timezone.utc),
+            result="Success",
+            actor="tester",
+            action="kafka.Authentication",
+            normalized_action="Authentication",
+            action_category="Other",
+            resource_type="cluster",
+            resource_name="-",
+            resource_display="Unknown",
+            summary="",
+            raw_payload_json="not-a-json",
+        )
+        db.add(bad)
+        db.commit()
+        db.refresh(bad)
+
+        # Trigger both enrichment paths.
+        _ = bad.source_display
+        _ = bad.resource_display_name
+    finally:
+        session_gen.close()
+
+    decode_messages = [msg for msg, _ in captured if "raw_payload_json" in msg or "failed to decode" in msg]
+    assert decode_messages, f"expected a decode-failure debug log, got {captured}"
+    assert any(kwargs.get("exc_info") for _, kwargs in captured), "expected exc_info=True on the debug log"
+
+
 def test_rate_limit_triggers_on_events_and_exempts_live(client):
     """/events list is capped at 20/minute per IP; /live must never be limited."""
     from backend.app.core.limiter import limiter

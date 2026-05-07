@@ -7,6 +7,102 @@ Session memory note:
 - Historical versioned release notes below are preserved as-is.
 - New Codex session entries should be appended only.
 - New session entries must use the structured `Session [N]` format described in `AGENTS.md`.
+- `VERSION` is the single source of truth; bump it and add a `[X.Y.Z]` entry
+  here in the same commit. See `docs/VERSIONING.md`.
+
+## [3.1.0] - 2026-05-07
+
+Three-phase security and stability hardening pass following the codebase
+audit captured in `AUDIT_REPORT.md`. Frontend behaviour and `audit_forwarder.py`
+structure are unchanged; this is API-side, infrastructure, and data-integrity
+work only.
+
+### Phase 1 — Security hardening (commit bebb70e)
+
+#### Added
+- API token authentication: `API_AUTH_ENABLED=true` is the default in
+  `.env.example`; constant-time `hmac.compare_digest` token matching
+  (`src/product/auth.py`).
+- Security response headers (`X-Content-Type-Options`, `X-Frame-Options`,
+  `Referrer-Policy`) on every API response (`backend/app/main.py`).
+- Bounded producer retries with `MAX_PRODUCE_RETRIES=10` and DLQ fallback
+  on retry exhaustion (`audit_forwarder.py`).
+- CI test gate: `.github/workflows/tests.yml` runs `compileall`, `pytest`,
+  and the frontend build on every push/PR.
+
+#### Changed
+- `raw_payload_json` is redacted by default on `GET /events/{id}`; only
+  authenticated admin tokens see the full payload.
+- CORS allow-headers narrowed from `*` to `Content-Type, Authorization,
+  X-Actor`.
+- Slow-query log lines no longer include query strings.
+- Generic 500 responses no longer echo `request.url.path`.
+
+#### Security
+- `.gitignore` extended to cover `**/*.backup*` and `**/*.bak`.
+- DB write buffers stay intact until `write_batch()` succeeds, preserving
+  at-least-once semantics on the offset-commit boundary.
+
+### Phase 2 — Stability + data integrity (commit 8327e32)
+
+#### Added
+- **Alembic migrations**: three baseline revisions under `backend/alembic/`.
+  `make migrate` is the production schema-change path; `_ensure_columns`
+  remains the SQLite demo path.
+- **DB pool tuning + `statement_timeout=30s`** on Postgres engines; SQLite
+  gets `PRAGMA foreign_keys=ON` so the cascade FK is honoured in tests.
+- **`ON DELETE CASCADE` FK** between `audit_event_triage.event_fingerprint`
+  and `audit_events.event_fingerprint`. Retention cleanup also pre-deletes
+  matching triage rows as a SQLite safety net.
+- **Filter-options cap + cache**: `LIMIT 500` per column, 60-second
+  `cachetools.TTLCache` keyed by engine identity.
+- **Cached forwarder health snapshot** (5 s TTL, 0.5 s tight HTTP timeout)
+  so `/ready` and `/pipeline/ready` are sub-millisecond on a cache hit.
+- **slowapi rate limiting**: 200/min default per IP, 20/min on `GET /events`
+  and `GET /events/{id}`. Probes (`/live`, `/ready`, `/pipeline/ready`,
+  `/ingestion/ready`, `/health`) are exempt.
+- **Keyset pagination** on `GET /events`: opaque `cursor` query param
+  encoding `(timestamp, id)`, `next_cursor` field on the response envelope,
+  backwards-compatible with the existing offset path.
+
+### Phase 3 — Remaining security gaps (this release)
+
+#### Added
+- **`mask_sensitive_text()` in `audit_forwarder.py`**: scrubs free-form
+  Kafka error messages, exception strings, and Authorization-header
+  fragments before they reach the logger or `delivery_errors["last_error"]`.
+- **Expanded redaction allowlist** in `mask_config_for_logging()` and
+  `redact_value()` covering `authorization`, `bearer`, `cookie`,
+  `client_secret`, `client_id`, `access_token`, `refresh_token`, `id_token`,
+  `api_secret`, `private_key`, `passphrase`, and `x-api-key`.
+- **Schema-watcher hardening**: the container now writes detected method
+  changes to `/app/data/schema_methods.json` (writeable volume) and never
+  rewrites Python source. `methods.py` reads the JSON at startup and unions
+  it with the hard-coded defaults. `read_only: true` on the compose service.
+- **K8s NetworkPolicy** (`deploy/kubernetes/networkpolicy.yaml`): default-
+  deny baseline allowing only ingress-controller → 8080, Prometheus → 8003,
+  egress to Confluent Cloud (TCP/9092, 443) and in-cluster Postgres (5432).
+- **K8s deployment README** explaining sealed-secrets / external-secrets-
+  operator policy, with a checklist for production cutover.
+- **AWS Terraform `SECURITY_NOTES.md`** documenting the egress restriction
+  and ALB HTTPS listener changes that are still pending.
+
+#### Changed
+- Silent `except: pass` in
+  `backend/app/db/models.py` (`_resource_enrichment`, `_source_enrichment`)
+  and `src/product/actor_enrichment.py` (`_identity_map`) replaced with
+  `logger.debug(... exc_info=True)`.
+- Kafka delivery errors masked at capture time inside `delivery_callback`
+  *and* on the heartbeat log path.
+- Kafka consume errors and DB-writer connection errors run through
+  `mask_sensitive_text()` before being logged or recorded.
+- `deploy/terraform/aws/vpc.tf` egress rule carries a `TODO(security)`
+  block referencing `SECURITY_NOTES.md`.
+
+#### Security
+- `VERSION` is now the single source of truth. The current release matches
+  the codified Alembic schema, the Phase 1+2 hardened API, and the Phase 3
+  log-masking + supply-chain fixes.
 
 ## [2.2.0] - 2025-12-14
 

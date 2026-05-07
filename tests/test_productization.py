@@ -869,3 +869,109 @@ def test_replay_state_tracks_progress():
     assert snapshot["processed_records"] == 3
     state.finish(True)
     assert state.snapshot()["in_progress"] is False
+
+
+# ──────────── Phase 3 — secret redaction ────────────
+
+
+def test_mask_config_for_logging_redacts_expanded_field_names():
+    """Each newly-added sensitive field name must be masked in dict logs."""
+    sensitive_fields = [
+        "authorization",
+        "Bearer",
+        "cookie",
+        "client_secret",
+        "client_id",
+        "access_token",
+        "refresh_token",
+        "id_token",
+        "api_secret",
+        "private_key",
+        "passphrase",
+        "credential",
+        "x-api-key",
+        "token",
+        # legacy patterns that must continue to mask
+        "password",
+        "API_KEY",
+        "API_SECRET",
+    ]
+    sentinel = "real-secret-value-DO-NOT-LEAK"
+    payload = {field: sentinel for field in sensitive_fields}
+    payload["service_name"] = "leave-me-alone"  # control: a non-sensitive key
+    masked = forwarder.mask_config_for_logging(payload)
+    for field in sensitive_fields:
+        assert masked[field] == "***MASKED***", f"{field} was not masked: {masked[field]}"
+    assert masked["service_name"] == "leave-me-alone"
+    # Sentinel must not appear anywhere in the masked dict's values.
+    assert sentinel not in str(masked)
+
+
+def test_mask_sensitive_text_redacts_authorization_and_kv_pairs():
+    """Free-form error strings get key=value and Bearer tokens scrubbed."""
+    sentinel = "AKIAEXAMPLEKEY1234567890"
+    samples = [
+        "Authorization: Bearer " + sentinel,
+        "api.key=" + sentinel + " host=broker:9092",
+        'client_secret="' + sentinel + '"',
+        "password=" + sentinel,
+        "x-api-key:" + sentinel,
+        "access_token=" + sentinel + ";refresh_token=" + sentinel,
+        "Failed: sasl.username=alice sasl.password=" + sentinel,
+        "kafka error: bootstrap=broker:9092 api.secret=" + sentinel,
+    ]
+    for raw in samples:
+        masked = forwarder.mask_sensitive_text(raw)
+        assert sentinel not in masked, f"sentinel leaked in {masked!r}"
+        assert "***MASKED***" in masked, f"no mask token in {masked!r}"
+
+
+def test_mask_sensitive_text_handles_none_and_safe_input():
+    assert forwarder.mask_sensitive_text(None) is None
+    assert forwarder.mask_sensitive_text("plain text without secrets") == "plain text without secrets"
+
+
+def test_delivery_callback_masks_kafka_error_before_logging(monkeypatch):
+    """Kafka delivery errors that include API keys must be masked at capture
+    *and* on the heartbeat log path."""
+
+    captured = []
+
+    class _FakeLogger:
+        def error(self, msg, *args, **kwargs):
+            captured.append(msg % args if args else msg)
+
+        def info(self, msg, *args, **kwargs):
+            captured.append(msg % args if args else msg)
+
+        def warning(self, msg, *args, **kwargs):
+            captured.append(msg % args if args else msg)
+
+        def exception(self, msg, *args, **kwargs):
+            captured.append(msg % args if args else msg)
+
+        def debug(self, *args, **kwargs):  # ignored
+            pass
+
+    monkeypatch.setattr(forwarder, "logger", _FakeLogger())
+    forwarder.delivery_errors["count"] = 0
+    forwarder.delivery_errors["last_error"] = None
+
+    sentinel = "AKIA-LEAKED-KEY-9999"
+    fake_err = (
+        "Failed to produce: connection refused; "
+        f"sasl.password={sentinel}; api.key={sentinel}"
+    )
+
+    class _Msg:
+        def topic(self):
+            return "audit-events"
+
+    forwarder.delivery_callback(fake_err, _Msg())
+
+    last_error = forwarder.delivery_errors["last_error"]
+    assert last_error is not None
+    assert sentinel not in last_error, f"sentinel leaked into last_error: {last_error}"
+    assert "***MASKED***" in last_error
+    for message in captured:
+        assert sentinel not in message, f"sentinel leaked into log: {message}"

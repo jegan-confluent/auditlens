@@ -47,7 +47,7 @@ class ConfluentSchemaWatcher:
 
     def __init__(
         self,
-        methods_file: Path,
+        data_file: Path,
         versions_file: Path,
         slack_webhook_url: Optional[str] = None,
         dry_run: bool = False
@@ -56,12 +56,22 @@ class ConfluentSchemaWatcher:
         Initialize the schema watcher.
 
         Args:
-            methods_file: Path to src/classification/methods.py
+            data_file: Path to schema_methods.json (the data file methods.py
+                reads at startup). The watcher MUST NOT write to any .py
+                source file at runtime — that is a code-injection vector if
+                the upstream Schema Registry / docs page is ever compromised.
             versions_file: Path to schema_versions.json
             slack_webhook_url: Slack webhook URL for alerts
             dry_run: If True, don't update files or send alerts
         """
-        self.methods_file = methods_file
+        # Defence-in-depth: refuse to operate on a .py path even if the
+        # caller wires one up by mistake.
+        if data_file.suffix == ".py":
+            raise ValueError(
+                f"schema-watcher data_file must not be a Python source file: {data_file}. "
+                "Use schema_methods.json instead."
+            )
+        self.data_file = data_file
         self.versions_file = versions_file
         self.slack_webhook_url = slack_webhook_url
         self.dry_run = dry_run
@@ -413,61 +423,79 @@ class ConfluentSchemaWatcher:
 
         return classification
 
-    def update_methods_file(self, new_methods: Dict[str, List[str]]) -> bool:
+    def update_methods_data_file(self, new_methods: Dict[str, List[str]]) -> bool:
         """
-        Update src/classification/methods.py with new methods.
+        Merge newly-detected methods into the schema_methods.json data file.
+
+        ``methods.py`` reads this JSON at startup and unions the entries with
+        the hard-coded defaults. Writing data — never source — keeps the
+        schema-watcher off the supply-chain compromise path.
 
         Args:
-            new_methods: Dict mapping criticality level to list of methods
+            new_methods: Dict mapping criticality level to list of methods.
 
         Returns:
-            True if file was updated, False otherwise
+            True if the data file was updated, False otherwise.
         """
         if self.dry_run:
-            logger.info("[DRY RUN] Would update methods.py with new methods")
+            logger.info("[DRY RUN] Would update schema_methods.json with new methods")
             return False
 
         if not any(new_methods.values()):
             logger.info("No new methods to add")
             return False
 
-        try:
-            # Read current file
-            with open(self.methods_file, 'r') as f:
-                content = f.read()
+        # Belt-and-braces: re-check the destination is not a .py file.
+        if self.data_file.suffix == ".py":
+            raise ValueError(
+                f"refusing to write methods to a .py file: {self.data_file}"
+            )
 
-            # Prepare updates
-            updates = []
-            timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
+        try:
+            existing: Dict = {}
+            if self.data_file.exists():
+                with open(self.data_file, 'rb') as f:
+                    raw = f.read()
+                if raw.strip():
+                    existing = orjson.loads(raw)
+
+            timestamp = datetime.now(timezone.utc).isoformat()
+            buckets = existing.setdefault("methods_by_level", {})
+            audit_trail = existing.setdefault("change_log", [])
+            additions_summary: Dict[str, List[str]] = {}
 
             for level in ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW']:
                 methods = new_methods.get(level, [])
                 if not methods:
                     continue
+                bucket = set(buckets.get(level, []))
+                added_this_run = sorted(set(methods) - bucket)
+                bucket.update(methods)
+                buckets[level] = sorted(bucket)
+                if added_this_run:
+                    additions_summary[level] = added_this_run
 
-                # Format methods as Python set items
-                method_lines = [f"    '{method}',  # Auto-added {timestamp}" for method in sorted(methods)]
+            existing["last_updated"] = timestamp
+            if additions_summary:
+                audit_trail.append({"timestamp": timestamp, "added": additions_summary})
+                # Keep only the last 100 entries to bound the file size.
+                existing["change_log"] = audit_trail[-100:]
 
-                # Find insertion point (end of _*_METHODS_DEFAULT set)
-                if level == 'LOW':
-                    # For LOW, insert into READ_ONLY_METHODS_DEFAULT
-                    pattern = r'(_READ_ONLY_METHODS_DEFAULT = \{[^}]*)(})'
-                    replacement = r'\1    \n    # Auto-added by schema-watcher\n' + '\n'.join(method_lines) + '\n\2'
-                else:
-                    pattern = rf'(_{level}_METHODS_DEFAULT = \{{[^}}]*)(}})'
-                    replacement = r'\1    \n    # Auto-added by schema-watcher\n' + '\n'.join(method_lines) + '\n\2'
+            self.data_file.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = self.data_file.with_suffix(self.data_file.suffix + ".tmp")
+            with open(tmp_path, 'wb') as f:
+                f.write(orjson.dumps(existing, option=orjson.OPT_INDENT_2))
+            os.replace(tmp_path, self.data_file)
 
-                content = re.sub(pattern, replacement, content, flags=re.DOTALL)
-
-            # Write updated file
-            with open(self.methods_file, 'w') as f:
-                f.write(content)
-
-            logger.info(f"Updated {self.methods_file} with {sum(len(m) for m in new_methods.values())} new methods")
+            logger.info(
+                "Updated %s with %d new methods",
+                self.data_file,
+                sum(len(m) for m in additions_summary.values()),
+            )
             return True
 
         except Exception as e:
-            logger.error(f"Error updating methods file: {e}")
+            logger.error(f"Error updating methods data file: {e}")
             raise
 
     async def send_slack_alert(self, changes: Dict, new_methods_classified: Dict[str, List[str]]) -> None:
@@ -646,9 +674,9 @@ class ConfluentSchemaWatcher:
                 # Classify new methods
                 new_methods_classified = self.classify_new_methods(changes['methods']['added'])
 
-                # Update methods file
+                # Update methods data file (JSON, NOT a .py source file).
                 if changes['methods']['added']:
-                    self.update_methods_file(new_methods_classified)
+                    self.update_methods_data_file(new_methods_classified)
 
                 # Send Slack alert
                 await self.send_slack_alert(changes, new_methods_classified)
@@ -674,24 +702,27 @@ class ConfluentSchemaWatcher:
 
 async def main():
     """Main entry point."""
-    # Configuration from environment variables
-    methods_file = Path(os.getenv('METHODS_FILE', '/app/src/classification/methods.py'))
-    versions_file = Path(os.getenv('VERSIONS_FILE', '/app/schema-watcher/schema_versions.json'))
+    # Configuration from environment variables. The data_file MUST be a JSON
+    # file under the writeable schema_watcher_data volume — never a path under
+    # the read-only application source tree.
+    data_file = Path(os.getenv('SCHEMA_METHODS_DATA_FILE', '/app/data/schema_methods.json'))
+    versions_file = Path(os.getenv('VERSIONS_FILE', '/app/data/schema_versions.json'))
     slack_webhook_url = os.getenv('SLACK_WEBHOOK_URL')
     check_interval_hours = int(os.getenv('CHECK_INTERVAL_HOURS', '24'))
     dry_run = os.getenv('DRY_RUN', 'false').lower() == 'true'
 
     logger.info(f"Starting Confluent Schema Watcher")
-    logger.info(f"Methods file: {methods_file}")
+    logger.info(f"Data file: {data_file}")
     logger.info(f"Versions file: {versions_file}")
     logger.info(f"Check interval: {check_interval_hours} hours")
     logger.info(f"Dry run: {dry_run}")
 
     # Ensure versions file directory exists
     versions_file.parent.mkdir(parents=True, exist_ok=True)
+    data_file.parent.mkdir(parents=True, exist_ok=True)
 
     async with ConfluentSchemaWatcher(
-        methods_file=methods_file,
+        data_file=data_file,
         versions_file=versions_file,
         slack_webhook_url=slack_webhook_url,
         dry_run=dry_run

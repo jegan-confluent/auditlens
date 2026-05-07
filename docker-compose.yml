@@ -553,17 +553,18 @@ services:
     container_name: schema-watcher
     restart: unless-stopped
     environment:
-      # Schema watcher configuration
-      - METHODS_FILE=/app/src/classification/methods.py
+      # Phase 3: schema-watcher writes only to a JSON data file under its
+      # writeable volume. methods.py reads that data file at startup. The
+      # container no longer mutates Python source code at runtime.
+      - SCHEMA_METHODS_DATA_FILE=/app/data/schema_methods.json
       - VERSIONS_FILE=/app/data/schema_versions.json
       - CHECK_INTERVAL_HOURS=${SCHEMA_CHECK_INTERVAL_HOURS:-24}
       - DRY_RUN=${SCHEMA_WATCHER_DRY_RUN:-false}
       - SLACK_WEBHOOK=${SLACK_WEBHOOK:-}
       - PYTHONUNBUFFERED=1
     volumes:
-      # Mount src/classification for read/write (to update methods.py)
-      - ./src/classification:/app/src/classification:rw
-      # Mount data directory for version tracking
+      # Only the writeable schema_watcher_data volume is bind-mounted. The
+      # application source tree is read-only inside this container.
       - schema_watcher_data:/app/data
     networks:
       - monitoring  # For metrics and alerts
@@ -579,7 +580,7 @@ services:
     # Security options
     security_opt:
       - no-new-privileges:true
-    read_only: false  # Needs write access to update methods.py
+    read_only: true  # Phase 3: schema-watcher writes only to /app/data
     tmpfs:
       - /tmp:mode=1777,size=50M
     cap_drop:

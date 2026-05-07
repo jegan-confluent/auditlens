@@ -172,6 +172,13 @@ resource "aws_security_group" "ecs_tasks" {
   }
 
   # All outbound traffic (for Kafka access)
+  # TODO(security): Restrict egress to:
+  #   - Confluent Cloud CIDR ranges (see https://docs.confluent.io/cloud/current/networking)
+  #   - AWS Secrets Manager VPC endpoint (no public IP needed)
+  #   - ECR VPC endpoint
+  #   - Postgres RDS security group
+  # Current 0.0.0.0/0 allows compromised tasks to call any external host.
+  # See deploy/terraform/aws/SECURITY_NOTES.md for the recommended replacement.
   egress {
     from_port   = 0
     to_port     = 0

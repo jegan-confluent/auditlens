@@ -1,0 +1,92 @@
+# NetworkPolicy: deny-all baseline + explicit allowances for AuditLens.
+#
+# Phase 3 hardening: until this is applied, any compromised pod in the
+# audit-forwarder namespace can connect to anything inside the cluster
+# and reach the public internet. After applying:
+#
+# Ingress
+#   * Inbound HTTP traffic to port 8080 (API/frontend) is allowed only from
+#     pods in the ingress-controller namespace.
+#   * Inbound metrics scrapes on port 8003 are allowed only from pods labelled
+#     ``app.kubernetes.io/name=prometheus`` (adjust to match your scrape target).
+#   * All other ingress is denied by default.
+#
+# Egress
+#   * Egress to Confluent Cloud bootstrap brokers (TCP/9092) is allowed.
+#   * Egress to Confluent / Schema Registry / IAM (TCP/443) is allowed for
+#     enrichment.
+#   * Egress to Postgres (TCP/5432) is allowed when the DB lives in the same
+#     cluster — adjust the namespace selector below to match your setup.
+#   * Egress to Kubernetes DNS (UDP/53) is allowed.
+#   * All other egress is denied by default.
+#
+# Apply with: kubectl apply -f networkpolicy.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: audit-forwarder-default-deny
+  namespace: audit-forwarder
+  labels:
+    app.kubernetes.io/name: audit-forwarder
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: audit-forwarder
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Application traffic from the ingress controller.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 8080
+    # Metrics scrape from Prometheus.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+      ports:
+        - protocol: TCP
+          port: 8003
+  egress:
+    # Confluent Cloud: Kafka bootstrap brokers.
+    - to:
+        - ipBlock:
+            # Replace 0.0.0.0/0 with the Confluent Cloud CIDR for your region:
+            # https://docs.confluent.io/cloud/current/networking/network-overview.html
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 9092
+    # Confluent Cloud: Schema Registry / IAM / Admin APIs.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443
+    # In-cluster Postgres. Adjust the selector to match your DB pod labels.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: postgresql
+      ports:
+        - protocol: TCP
+          port: 5432
+    # CoreDNS / kube-dns.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

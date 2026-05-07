@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import re
 import time
@@ -9,6 +10,8 @@ from pathlib import Path
 from typing import Any
 
 from src.identity.enricher import IdentityEnricher as ConfluentIdentityEnricher
+
+logger = logging.getLogger("auditlens.product.actor_enrichment")
 
 ACTOR_TYPES = {"user", "service_account", "api_key", "unknown"}
 ACTOR_SOURCES = {"manual", "confluent_api", "metrics", "audit_event", "fallback"}
@@ -136,7 +139,14 @@ def _identity_map() -> dict[str, dict[str, str]]:
         try:
             output.update(_parse_identity_map(file_path.read_text(encoding="utf-8"), source="manual"))
         except OSError:
-            pass
+            # Identity-mapping file present but unreadable. Fall back to env-var
+            # mapping, but record the failure so a misconfigured mount does not
+            # silently strip enrichment.
+            logger.debug(
+                "identity mapping file %s could not be read; falling back to env",
+                file_path,
+                exc_info=True,
+            )
     raw = os.getenv("ACTOR_IDENTITY_MAP_JSON", "").strip()
     if raw:
         output.update(_parse_identity_map(raw, source="manual"))
