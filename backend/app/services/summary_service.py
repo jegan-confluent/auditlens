@@ -6,16 +6,6 @@ from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session, defer, load_only
 
 from backend.app.db.models import AuditEvent
-
-# Per-route statement timeout for /summary on Postgres. Phase 4 adds this as a
-# stopgap because /summary issues seven sequential aggregations against the
-# same WHERE clause and at production volume (10M rows, 24h window over 1M+
-# matching events) the cumulative cost exceeds the 30s default set in Phase 2.
-# Targeted indexes (revision 0004) reduced per-query cost but did not bring
-# total wall time under 10s for 24h windows. Bumping the timeout to 120s
-# locally keeps the route from 500-ing while a real single-pass refactor or
-# rollup-table approach is designed. See docs/PHASE4_SUMMARY_PERF.md.
-SUMMARY_ROUTE_STATEMENT_TIMEOUT_MS = 120_000
 from backend.app.services.event_service import (
     EVENT_LIST_COLUMNS,
     SIGNAL_FILTER_MAX_SCAN,
@@ -31,7 +21,28 @@ from backend.app.services.event_service import (
 from src.product.event_intelligence import flow_group_key
 from src.product.event_normalization import canonical_resource_type
 
+
+# Per-route statement timeout for /summary on Postgres. Phase 4 added this as
+# a stopgap when /summary still issued seven sequential aggregations. After the
+# Phase-4-followup single-pass refactor (this file) the route normally finishes
+# well under 30s, but we keep the relaxed local timeout as defence in depth so
+# a transient cost spike (concurrent forwarder write, autovacuum) cannot 500
+# the route.
+SUMMARY_ROUTE_STATEMENT_TIMEOUT_MS = 120_000
+
 SUMMARY_SCAN_LIMIT = 5000
+
+# GROUPING() bitmask values that the single-pass query produces. The argument
+# order is (action_category, resource_type, result); a 1-bit means "this column
+# is NOT part of this row's grouping set". So:
+#   ()                  → all three rolled up → 0b111 = 7  (totals row)
+#   (action_category)   → action_category grouped, others rolled up → 0b011 = 3
+#   (resource_type)     → 0b101 = 5
+#   (result)            → 0b110 = 6
+_GID_TOTAL = 7
+_GID_ACTION_CATEGORY = 3
+_GID_RESOURCE_TYPE = 5
+_GID_RESULT = 6
 
 
 def _group_counts(db: Session, column, conditions: list[Any] | None = None) -> dict[str, int]:
@@ -52,6 +63,75 @@ def _canonical_resource_counts(raw: dict[str, int]) -> dict[str, int]:
         canonical = canonical_resource_type(key)
         output[canonical] = output.get(canonical, 0) + value
     return output
+
+
+def _aggregate_with_grouping_sets(
+    db: Session, conditions: list[Any]
+) -> tuple[int, int, int, dict[str, int], dict[str, int], dict[str, int]]:
+    """Single Postgres scan that replaces six separate aggregations.
+
+    Returns ``(base_total, base_failures, base_denials, by_action_category,
+    by_resource_type, by_result)``. The ``by_resource_type`` dict here is the
+    raw column values; the caller folds them through ``canonical_resource_type``.
+
+    The query uses ``GROUP BY GROUPING SETS`` so Postgres scans the windowed
+    rowset once and emits four buckets:
+
+    * the empty grouping → row with ``GROUPING() = 7`` carrying the overall
+      ``count(*)`` plus the ``count(*) FILTER (WHERE is_failure)`` /
+      ``count(*) FILTER (WHERE is_denied)`` aggregates.
+    * a row per ``action_category`` value (gid = 3).
+    * a row per ``resource_type`` value (gid = 5).
+    * a row per ``result`` value (gid = 6).
+    """
+    aggregation = (
+        select(
+            func.grouping(
+                AuditEvent.action_category,
+                AuditEvent.resource_type,
+                AuditEvent.result,
+            ).label("gid"),
+            AuditEvent.action_category.label("action_category"),
+            AuditEvent.resource_type.label("resource_type"),
+            AuditEvent.result.label("result"),
+            func.count().label("row_count"),
+            func.count().filter(AuditEvent.is_failure.is_(True)).label("failure_count"),
+            func.count().filter(AuditEvent.is_denied.is_(True)).label("denied_count"),
+        )
+        .group_by(
+            text(
+                "GROUPING SETS ("
+                "(), "
+                "(audit_events.action_category), "
+                "(audit_events.resource_type), "
+                "(audit_events.result)"
+                ")"
+            )
+        )
+    )
+    if conditions:
+        aggregation = aggregation.where(*conditions)
+
+    base_total = base_failures = base_denials = 0
+    by_action: dict[str, int] = {}
+    by_resource: dict[str, int] = {}
+    by_result: dict[str, int] = {}
+
+    for row in db.execute(aggregation).all():
+        gid = int(row.gid)
+        count_val = int(row.row_count or 0)
+        if gid == _GID_TOTAL:
+            base_total = count_val
+            base_failures = int(row.failure_count or 0)
+            base_denials = int(row.denied_count or 0)
+        elif gid == _GID_ACTION_CATEGORY and row.action_category is not None:
+            by_action[str(row.action_category)] = count_val
+        elif gid == _GID_RESOURCE_TYPE and row.resource_type is not None:
+            by_resource[str(row.resource_type)] = count_val
+        elif gid == _GID_RESULT and row.result is not None:
+            by_result[str(row.result)] = count_val
+
+    return base_total, base_failures, base_denials, by_action, by_resource, by_result
 
 
 def _headline(action_required: int, attention: int) -> tuple[str, str]:
@@ -137,12 +217,14 @@ def get_summary(
     change_type: str | None = None,
     **filters: Any,
 ) -> dict:
-    # Stopgap: relax the per-statement timeout for this transaction so the
-    # cumulative cost of /summary's seven aggregations does not 500 under
-    # load. SET LOCAL is scoped to the active transaction and reverts on
-    # commit/rollback automatically. SQLite has no statement_timeout, so we
-    # gate the call by dialect.
-    if db.get_bind().dialect.name == "postgresql":
+    is_postgres = db.get_bind().dialect.name == "postgresql"
+
+    # Defence in depth: relax the per-statement timeout for this transaction
+    # so transient cost spikes do not 500 the route. Single-pass aggregation
+    # below normally finishes well inside Phase 2's 30s budget; this raises
+    # the ceiling for outliers (concurrent forwarder writes, autovacuum). SET
+    # LOCAL is scoped to the active transaction and reverts on commit.
+    if is_postgres:
         db.execute(text(f"SET LOCAL statement_timeout = {SUMMARY_ROUTE_STATEMENT_TIMEOUT_MS}"))
 
     mode = _normalize_mode(mode)
@@ -154,9 +236,7 @@ def get_summary(
     conditions = _event_filter_conditions(**filters)
     if mode == "decision":
         conditions.append(_decision_mode_condition())
-    count_query = select(func.count(AuditEvent.id))
-    failures_query = select(func.count(AuditEvent.id)).where(AuditEvent.is_failure.is_(True))
-    denials_query = select(func.count(AuditEvent.id)).where(AuditEvent.is_denied.is_(True))
+
     scan_limit = SIGNAL_FILTER_MAX_SCAN if derived_filter_applied else SUMMARY_SCAN_LIMIT
     scan_query = (
         select(AuditEvent)
@@ -165,19 +245,64 @@ def get_summary(
         .limit(scan_limit)
     )
     if conditions:
-        count_query = count_query.where(*conditions)
-        failures_query = failures_query.where(*conditions)
-        denials_query = denials_query.where(*conditions)
         scan_query = scan_query.where(*conditions)
-    base_total = int(db.scalar(count_query) or 0)
-    base_failures = int(db.scalar(failures_query) or 0)
-    base_denials = int(db.scalar(denials_query) or 0)
+
+    # Aggregations.
+    #
+    # Postgres + derived_filter_applied=False (the heavy production path):
+    #   ONE GROUPING SETS query covers total/failures/denials and the three
+    #   GROUP BYs in a single scan of the windowed rowset.
+    # Postgres + derived_filter_applied=True:
+    #   ONE count(*) query for ``base_total`` (used by summary_scope /
+    #   sample_warning). The other counts come from the in-memory ``events``
+    #   list because the derived predicate is evaluated in Python.
+    # SQLite:
+    #   Original three count queries — preserves existing test behaviour and
+    #   avoids depending on Postgres-only GROUPING SETS in the demo path.
+    base_total = base_failures = base_denials = 0
+    db_by_action: dict[str, int] | None = None
+    db_by_resource: dict[str, int] | None = None
+    db_by_result: dict[str, int] | None = None
+
+    if is_postgres and not derived_filter_applied:
+        (
+            base_total,
+            base_failures,
+            base_denials,
+            db_by_action,
+            db_by_resource_raw,
+            db_by_result,
+        ) = _aggregate_with_grouping_sets(db, conditions)
+        db_by_resource = _canonical_resource_counts(db_by_resource_raw)
+    elif is_postgres and derived_filter_applied:
+        count_query = select(func.count(AuditEvent.id))
+        if conditions:
+            count_query = count_query.where(*conditions)
+        base_total = int(db.scalar(count_query) or 0)
+    else:
+        # SQLite path — preserves the original per-aggregation queries.
+        count_query = select(func.count(AuditEvent.id))
+        failures_query = select(func.count(AuditEvent.id)).where(AuditEvent.is_failure.is_(True))
+        denials_query = select(func.count(AuditEvent.id)).where(AuditEvent.is_denied.is_(True))
+        if conditions:
+            count_query = count_query.where(*conditions)
+            failures_query = failures_query.where(*conditions)
+            denials_query = denials_query.where(*conditions)
+        base_total = int(db.scalar(count_query) or 0)
+        base_failures = int(db.scalar(failures_query) or 0)
+        base_denials = int(db.scalar(denials_query) or 0)
+
     scanned_events = list(db.scalars(scan_query).all())
-    events = [
-        event
-        for event in scanned_events
-        if _matches_derived_filters(event, signal_types, hide_noise, impact_types, change_types)
-    ] if derived_filter_applied else scanned_events
+    events = (
+        [
+            event
+            for event in scanned_events
+            if _matches_derived_filters(event, signal_types, hide_noise, impact_types, change_types)
+        ]
+        if derived_filter_applied
+        else scanned_events
+    )
+
     total = len(events) if derived_filter_applied else base_total
     failures = sum(1 for event in events if event.is_failure) if derived_filter_applied else base_failures
     denials = sum(1 for event in events if event.is_denied) if derived_filter_applied else base_denials
@@ -199,9 +324,26 @@ def get_summary(
     sample_warning = None
     if summary_scope == "sampled":
         sample_warning = f"Summary based on latest {len(scanned_events):,} of {base_total:,} matching events."
-    by_action_category = Counter(event.action_category for event in events if event.action_category)
-    by_resource_type = Counter(canonical_resource_type(event.resource_type) for event in events if event.resource_type)
-    by_result = Counter(event.result for event in events if event.result)
+
+    # by_X output: in-memory counters when derived; otherwise the DB-derived
+    # values (one query on Postgres, three queries on SQLite).
+    if derived_filter_applied:
+        out_by_action_category: dict[str, int] = dict(
+            Counter(event.action_category for event in events if event.action_category)
+        )
+        out_by_resource_type: dict[str, int] = dict(
+            Counter(canonical_resource_type(event.resource_type) for event in events if event.resource_type)
+        )
+        out_by_result: dict[str, int] = dict(Counter(event.result for event in events if event.result))
+    elif is_postgres:
+        out_by_action_category = db_by_action or {}
+        out_by_resource_type = db_by_resource or {}
+        out_by_result = db_by_result or {}
+    else:
+        out_by_action_category = _group_counts(db, AuditEvent.action_category, conditions)
+        out_by_resource_type = _canonical_resource_counts(_group_counts(db, AuditEvent.resource_type, conditions))
+        out_by_result = _group_counts(db, AuditEvent.result, conditions)
+
     return {
         "total_events": total,
         "scanned_events": len(scanned_events),
@@ -226,8 +368,14 @@ def get_summary(
         "sample_warning": sample_warning,
         "overall_status": overall_status,
         "headline": headline,
-        "short_digest": _short_digest(len(events), signal_counts["noise"], signal_counts["attention"], signal_counts["action_required"], destructive),
-        "by_action_category": dict(by_action_category) if derived_filter_applied else _group_counts(db, AuditEvent.action_category, conditions),
-        "by_resource_type": dict(by_resource_type) if derived_filter_applied else _canonical_resource_counts(_group_counts(db, AuditEvent.resource_type, conditions)),
-        "by_result": dict(by_result) if derived_filter_applied else _group_counts(db, AuditEvent.result, conditions),
+        "short_digest": _short_digest(
+            len(events),
+            signal_counts["noise"],
+            signal_counts["attention"],
+            signal_counts["action_required"],
+            destructive,
+        ),
+        "by_action_category": out_by_action_category,
+        "by_resource_type": out_by_resource_type,
+        "by_result": out_by_result,
     }

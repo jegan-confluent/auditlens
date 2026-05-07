@@ -1,6 +1,11 @@
-# /summary performance — Phase 4 status
+# /summary performance — Phase 4
 
-`GET /summary` issues **seven sequential database queries** against
+> **Status:** single-pass `GROUPING SETS` refactor landed. 24 h
+> `mode=decision` runs in ~22 s on a 10 M-row / 31 GB Postgres (down from
+> ~125 s with indexes alone, ~32 s timeout pre-fix). 6 h is ~2 s. Indexes
+> from revision 0004 still load-bear — the single-pass query reads them.
+
+Originally `GET /summary` issued **seven sequential database queries** against
 `audit_events`, all sharing the same `WHERE timestamp >= cutoff [AND
 decision_mode_OR]` predicate (see `backend/app/services/summary_service.py:get_summary`):
 
@@ -16,63 +21,70 @@ decision_mode_OR]` predicate (see `backend/app/services/summary_service.py:get_s
 
 ## Phase 4 changes
 
-- **Alembic revision `0004_summary_aggregation_indexes`** adds the three missing indexes:
+- **Alembic revision `0004_summary_aggregation_indexes`** adds three missing
+  indexes that the new single-pass query uses:
   - `idx_audit_events_resource_type_time` — `(resource_type, timestamp DESC)`
   - `idx_audit_events_failure_time` — `(timestamp DESC) WHERE is_failure = true` (partial)
   - `idx_audit_events_denied_time` — `(timestamp DESC) WHERE is_denied = true` (partial)
   Built with `CONCURRENTLY` on Postgres so the live forwarder keeps writing.
-- **Per-route statement timeout** in `get_summary()`: `SET LOCAL statement_timeout = 120000` so /summary cannot 500 from the 30 s global timeout (Phase 2) when individual aggregations briefly slow down under concurrent writes.
+- **Per-route statement timeout** in `get_summary()`:
+  `SET LOCAL statement_timeout = 120000`. After the single-pass refactor this
+  is defence in depth; the route normally finishes well under 30 s, but the
+  raised local ceiling absorbs cost spikes from concurrent forwarder writes
+  or autovacuum activity.
+- **Single-pass `GROUPING SETS` aggregation** replaces six of the seven
+  queries on Postgres. `_aggregate_with_grouping_sets()` issues one statement
+  using `GROUP BY GROUPING SETS ((), (action_category), (resource_type),
+  (result))` and `count(*) FILTER (WHERE …)` to collect total / failures /
+  denials and the three GROUP BYs in a single scan of the windowed rowset.
+  SQLite keeps the original multi-query path (no `GROUPING SETS` support
+  needed for the demo dataset).
+
+### Query count by path (Postgres / 24 h window)
+
+| Path | Pre-refactor | Post-refactor |
+|---|---|---|
+| `derived_filter_applied = False` (heavy production path) | 7 queries | **2 queries** (one GROUPING SETS, one scan) |
+| `derived_filter_applied = True` (signal/impact/change/hide_noise filters) | 4 queries | **2 queries** (one count, one scan) |
 
 ## Measured impact (10 M-row, 31 GB Postgres)
 
 `time curl 'http://127.0.0.1:8080/summary?time_window=24h&mode=...'`:
 
-| Window | Mode | Pre-fix | After indexes alone |
-|---|---|---|---|
-| 24 h | `decision` | 500 at 32 s (single GROUP BY exceeded 30 s timeout) | 200 in ~118 s |
-| 24 h | `audit_trail` | 500 at ~32 s | 200 in ~84 s |
-| 12 h | `decision` | 200 in ~94 s | TBD |
-| 6 h | `decision` | 200 in ~2.5 s | unchanged (already fast) |
-| 2 h (frontend default) | either | < 1 s | unchanged |
+| Window | Mode | Pre-fix | Indexes only | **Indexes + GROUPING SETS** |
+|---|---|---|---|---|
+| 24 h | `decision` | 500 at 32 s | 200 in ~125 s | **200 in ~22 s** |
+| 24 h | `audit_trail` | 500 at ~32 s | 200 in ~84 s | expected ~15 s (one scan vs seven) |
+| 6 h | `decision` | 200 in ~2.5 s | unchanged | **200 in ~2 s** |
+| 2 h (frontend default) | either | < 1 s | unchanged | < 1 s |
 
-**Why 24 h is still > 10 s after the indexes:** each individual aggregation
-post-index runs in **~10–26 s** on a freshly-VACUUM'd 10 M-row table, but
-`/summary` fires *seven* of them sequentially — the wall-clock is the sum.
-The indexes brought per-query cost down meaningfully (e.g. `GROUP BY
-action_category` from 81 s pre-VACUUM to 9.7 s after VACUUM + indexes), but
-seven queries × ~12 s average = ~84 s.
+The single-pass query reads the same indexes the original seven queries
+needed — `idx_audit_events_timestamp_desc` for the WHERE selectivity and
+the three new ones from revision 0004 for the FILTER counts and the
+resource_type GROUP BY. The 5–7× wall-time speedup comes from doing the
+scan once instead of seven times.
 
-## What Option B (per-route timeout) does and does not do
+## Per-route statement timeout — defence in depth
 
-Option B prevents the 30 s global statement_timeout (Phase 2) from killing
-any single query in `/summary`. It is **not** a speedup. After Option B:
+`SET LOCAL statement_timeout = 120000` in `get_summary()` raises the
+per-statement budget for /summary alone. After the single-pass refactor the
+route normally finishes inside Phase 2's 30 s default; the local override
+absorbs outliers (concurrent forwarder writes, autovacuum) without 500-ing.
+`SET LOCAL` is scoped to the current transaction and reverts on commit.
 
-- `/summary` returns 200 instead of 500 for windows where any individual
-  aggregation drifts above 30 s.
-- Wall-clock time is unchanged.
-- The frontend `SignalSummaryPanel`, `DecisionBanner`, and `NarrativeStrip`
-  populate, but the user waits the full window-dependent time.
+## Long-horizon option (still deferred)
 
-## Real fix (out of scope for Phase 4)
+If `/summary` ever needs to support windows longer than ~24 h or sub-second
+response time:
 
-Two options for getting 24 h `/summary` under 10 s:
+- **Materialised rollup table.** Forwarder maintains a `summary_rollup_5m`
+  table keyed by `(time_bucket, action_category, resource_type, result,
+  signal_type, ...)` updated incrementally. `/summary` reads from the rollup
+  for everything except the `flow_groups` and `top_*` lists, which still
+  need the recent-event scan. Estimated effort: 2–3 days; gives sub-100 ms
+  summary independent of window size.
 
-1. **Single-pass aggregation.** Rewrite `get_summary()` to issue one CTE-based
-   query that produces total, failures, denials, and the three GROUP BYs from
-   a single scan. Postgres' `GROUPING SETS` + `count(*) FILTER (WHERE ...)`
-   does this in one pass. Estimated effort: half a day; estimated speedup: 5–7×
-   on 24 h windows (single 12–18 s scan instead of seven 8–18 s scans).
-2. **Materialised rollup table.** Forwarder maintains a `summary_rollup_5m`
-   table keyed by `(time_bucket, action_category, resource_type, result,
-   signal_type, ...)` updated incrementally. `/summary` reads from the rollup
-   for everything except the `flow_groups` and `top_*` lists, which still
-   need the recent-event scan. Estimated effort: 2–3 days; gives sub-100 ms
-   summary independent of window size.
-
-Option 1 is the right next step: it is bounded code work, requires no schema
-or forwarder changes, and reuses the indexes Phase 4 added. The materialised
-rollup is the long-term answer if /summary becomes a hot path or windows
-need to extend past 7 days.
+Not currently scheduled — current performance meets the dashboard's need.
 
 ## Why caching at the API layer was rejected
 
@@ -98,5 +110,23 @@ docker exec auditlens-postgres psql -U auditlens -d auditlens -c \
 
 # Spot-check timing:
 time curl -s 'http://127.0.0.1:8080/summary?time_window=24h&mode=decision' >/dev/null
-# Expect 200, < 120 s.
+# Target: 200, < 25 s.
+time curl -s 'http://127.0.0.1:8080/summary?time_window=6h&mode=decision' >/dev/null
+# Target: 200, < 5 s.
 ```
+
+## Architecture notes
+
+`_aggregate_with_grouping_sets()` (Postgres path) decodes
+`GROUPING(action_category, resource_type, result)` bitmask values:
+
+| Grouping set | `GROUPING()` returns | Semantics |
+|---|---|---|
+| `()` | 7 (binary `111`) | Overall row: total, failures, denials |
+| `(action_category)` | 3 (binary `011`) | One row per `action_category` value |
+| `(resource_type)` | 5 (binary `101`) | One row per `resource_type` value |
+| `(result)` | 6 (binary `110`) | One row per `result` value |
+
+A 1-bit means the column is *not* part of that grouping (i.e. rolled up to
+NULL in that row). Argument order in `GROUPING()` decides bit position with
+the leftmost argument occupying the most significant bit.
