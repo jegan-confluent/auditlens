@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.orm import sessionmaker
 
 from backend.app.db.database import build_engine, get_db, init_db
-from backend.app.db.models import AuditEventTriage
+from backend.app.db.models import AuditEventTriage, ResourceCatalog
 from backend.app.main import create_app
 from backend.scripts.seed_data import SEED_EVENTS
 from backend.app.services.event_service import cleanup_retention, create_event, upsert_events
@@ -480,6 +480,54 @@ def test_events_list_uses_persisted_source_ip_for_request_metadata(client):
     detail = detail_response.json()
     assert detail["source_ip"] == "165.1.202.190"
     assert detail["source_display"] == "165.1.202.190"
+
+
+def test_events_include_resource_intelligence_fields_and_catalog_entry(client):
+    db_override = next(iter(client.app.dependency_overrides.values()))
+    session_gen = db_override()
+    try:
+        db = next(session_gen)
+        created = create_event(
+            db,
+            {
+                "id": "resource-intelligence-regression",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "methodName": "GetStatement",
+                "principal": "u-0jwz56",
+                "cloudResources": {
+                    "scope": {
+                        "resources": [
+                            {"resourceType": "ORGANIZATION", "resourceId": "org-1"},
+                            {"resourceType": "ENVIRONMENT", "resourceId": "env-mkr6ww"},
+                            {"resourceType": "FLINK_REGION", "resourceId": "aws.us-east-1"},
+                        ]
+                    },
+                    "resource": {"resourceType": "STATEMENT", "resourceId": "c360-loyalty-revenue-job"},
+                },
+                "requestMetadata": {"clientAddress": [{"ip": "165.1.202.190"}]},
+            },
+        )
+        event_id = created.id
+        catalog_rows = db.query(ResourceCatalog).filter(ResourceCatalog.resource_name == "c360-loyalty-revenue-job").all()
+    finally:
+        session_gen.close()
+
+    assert catalog_rows
+
+    response = client.get("/events", params={"mode": "audit_trail", "resource": "c360-loyalty-revenue-job", "limit": 1})
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["resource_display_name"] == "Statement: c360-loyalty-revenue-job"
+    assert item["resource_scope"].startswith("environment:env-mkr6ww")
+    assert item["resource_criticality"] == "medium"
+    assert item["blast_radius_hint"] == "environment-scoped"
+
+    detail_response = client.get(f"/events/{event_id}")
+    assert detail_response.status_code == 200
+    detail = detail_response.json()
+    assert detail["resource_display_name"] == "Statement: c360-loyalty-revenue-job"
+    assert detail["parent_resource"] == "environment:env-mkr6ww"
+    assert detail["resource_scope"].startswith("environment:env-mkr6ww")
 
 
 def test_event_triage_lifecycle_basic(client, monkeypatch, tmp_path):

@@ -19,7 +19,9 @@ class AuditEventListOut(BaseModel):
     resource_type: str
     resource_name: str
     resource_display: str
+    resource_display_name: str
     cluster_id: str | None = None
+    cluster_name: str | None = None
     source_ip: str | None = None
     summary: str
     is_failure: bool
@@ -44,6 +46,12 @@ class AuditEventListOut(BaseModel):
     resource_display_short: str
     source_context: str
     environment_id: str | None = None
+    environment_name: str | None = None
+    parent_resource: str | None = None
+    resource_scope: str
+    resource_criticality: str
+    blast_radius_hint: str
+    production_hint: str
     flink_region: str | None = None
     network_id: str | None = None
     signal_type: str

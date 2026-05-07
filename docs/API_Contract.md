@@ -34,8 +34,12 @@ Raw payload contract:
 - `/events` list responses do not include `raw_payload_json`.
 - `/events/{event_id}` detail responses include `raw_payload_json`.
 
+Resource contract:
+
+- Event responses include persisted resource snapshot fields such as `resource_display_name`, `resource_scope`, `parent_resource`, `cluster_name`, `environment_name`, `resource_criticality`, `blast_radius_hint`, and `production_hint`.
+- The API does not join the resource catalog in list queries; those fields are persisted on the event row.
+
 ## Aggregates
 
 - `GET /summary`: totals, failures, denials, and grouped counts.
 - `GET /filters/options`: distinct resource types, action categories, results, and actors.
-

@@ -4,8 +4,9 @@ AuditLens keeps the existing Kafka-native Streamlit path and adds a product path
 
 1. `audit_forwarder.py` consumes Confluent audit events from the configured source topic.
 2. The forwarder normalizes/classifies events once, emits canonical Kafka topics, and optionally writes normalized rows to the product database when `ENABLE_DB_WRITER=true`.
-3. FastAPI reads the product database and exposes event, summary, filter, readiness, and system status endpoints.
-4. The Next.js frontend reads FastAPI and becomes the gradual replacement UI.
+3. The forwarder also persists a deterministic resource snapshot and updates a lightweight, best-effort resource catalog during ingestion.
+4. FastAPI reads the product database and exposes event, summary, filter, readiness, and system status endpoints.
+5. The Next.js frontend reads FastAPI and becomes the gradual replacement UI.
 
 The legacy Streamlit dashboard remains available and is not removed by this migration.
 
@@ -22,5 +23,6 @@ The legacy Streamlit dashboard remains available and is not removed by this migr
 - Normalization and classification stay centralized in `src/product/event_normalization.py`.
 - The product database is a read/query surface for the API and UI.
 - Raw audit payloads are retained in the database but are returned only from event detail endpoints, not list endpoints.
+- Resource display names, hierarchy hints, and blast-radius hints are stored on the event row so the list view stays join-free.
 - Event deduplication uses `event_fingerprint`, with database uniqueness enforcing replay safety.
-
+- The resource catalog is append/update only, event-derived, and best-effort. It exists to preserve durable resource identity without making hot-path queries depend on joins or an authoritative inventory sync.

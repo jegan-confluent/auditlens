@@ -167,7 +167,11 @@ def get_summary(
     signal_counts: Counter[str] = Counter(event.signal_type for event in events)
     reason_counts: Counter[str] = Counter(event.signal_reason for event in events)
     subject_counts: Counter[str] = Counter(event.subject for event in events if event.subject)
-    resource_counts: Counter[str] = Counter(event.resource_display_short for event in events if event.resource_display_short)
+    resource_counts: Counter[str] = Counter(
+        event.resource_display_name or event.resource_display_short
+        for event in events
+        if (event.resource_display_name or event.resource_display_short)
+    )
     action_counts: Counter[str] = Counter(event.event_title for event in events if event.event_title)
     destructive = sum(1 for event in events if event.impact_type == "destructive")
     config_changes = sum(1 for event in events if event.impact_type == "configuration_change")

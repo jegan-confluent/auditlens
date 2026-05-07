@@ -58,10 +58,15 @@ for (const text of ["Resource Type", "Environment", "Region"]) {
     throw new Error(`Drawer missing context field: ${text}`);
   }
 }
+for (const text of ["Resource Scope", "Parent Resource", "Resource Criticality", "Blast Radius", "Production Hint"]) {
+  if (!drawerSource.includes(text)) {
+    throw new Error(`Drawer missing resource intelligence field: ${text}`);
+  }
+}
 
 const tableSource = fs.readFileSync(new URL("../components/AuditEventTable.tsx", import.meta.url), "utf8");
-if (!tableSource.includes("resource_display_short")) {
-  throw new Error("Table must prefer resource_display_short");
+if (!tableSource.includes("resource_display_name")) {
+  throw new Error("Table must prefer resource_display_name");
 }
 if (!tableSource.includes("event.resource_name && event.resource_name !==")) {
   throw new Error("Table must prefer primary resource_name when available");

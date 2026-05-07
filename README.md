@@ -242,8 +242,27 @@ Limits:
 
 - Metrics correlation is not identity truth.
 - IAM lookup depends on tenant credentials and API availability.
-- Resource enrichment remains a follow-up.
-- This pass did not add a sync daemon or a persistent resource catalog.
+- Resource intelligence is deterministic and persisted, but cluster/environment display names are only populated when they are resolvable from the payload or catalog.
+- This pass did not add a sync daemon.
+
+## Resource Intelligence
+
+AuditLens persists a resource snapshot alongside each event and maintains a lightweight resource catalog for investigation context.
+
+Resource context includes:
+
+- `resource_type`
+- `resource_name`
+- `resource_display_name`
+- `resource_scope`
+- `parent_resource`
+- `cluster_id` and `cluster_name` when resolvable
+- `environment_id` and `environment_name` when resolvable
+- `resource_criticality`
+- `blast_radius_hint`
+- `production_hint`
+
+The resource catalog is best-effort and event-derived. It is upserted during ingestion when resource parsing succeeds, and it stores durable resource identity, display name, hierarchy context, and raw metadata used to derive the snapshot. Hot list queries stay column-only and do not join the catalog. AuditLens does not run a sync daemon or claim an authoritative resource inventory.
 
 The scan ignores `.git`, `node_modules`, `.next`, `data`, backup directories, and `.env.example` placeholders.
 

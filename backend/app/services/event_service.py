@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session, defer, load_only
 
 from backend.app.db.models import AuditEvent
 from backend.app.services.filter_service import event_fingerprint, normalize_event, parse_event_timestamp
+from backend.app.services.resource_service import upsert_resource_catalog
 from backend.app.services.triage_service import attach_triage_snapshots, get_triage_snapshot
 from src.product.event_normalization import canonical_resource_type
 
@@ -63,12 +64,20 @@ EVENT_LIST_COLUMNS = (
     AuditEvent.resource_name,
     AuditEvent.resource_display,
     AuditEvent.cluster_id,
+    AuditEvent._cluster_name,
     AuditEvent.source_ip,
     AuditEvent._source_context,
     AuditEvent._client_id,
     AuditEvent._connection_id,
     AuditEvent._request_id,
     AuditEvent.environment_id,
+    AuditEvent._environment_name,
+    AuditEvent._parent_resource,
+    AuditEvent._resource_scope,
+    AuditEvent._resource_display_name,
+    AuditEvent._resource_criticality,
+    AuditEvent._blast_radius_hint,
+    AuditEvent._production_hint,
     AuditEvent.flink_region,
     AuditEvent.network_id,
     AuditEvent._signal_type,
@@ -134,6 +143,8 @@ def create_event(db: Session, payload: dict[str, Any]) -> AuditEvent:
         if existing is None:
             raise
         event = existing
+    upsert_resource_catalog(db, event, payload, seen_at=timestamp)
+    db.refresh(event)
     attach_triage_snapshots(db, [event])
     return event
 
@@ -181,6 +192,7 @@ def _event_filter_conditions(
             or_(
                 func.lower(AuditEvent.resource_name).like(pattern),
                 func.lower(AuditEvent.resource_display).like(pattern),
+                func.lower(AuditEvent._resource_display_name).like(pattern),
                 func.lower(AuditEvent.summary).like(pattern),
             )
         )

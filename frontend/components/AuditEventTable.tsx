@@ -26,7 +26,9 @@ function impactLabel(event: AuditEvent) {
 }
 
 function displayResource(event: AuditEvent) {
-  return event.resource_name && event.resource_name !== "-" ? event.resource_name : event.resource_display_short || event.resource_display || event.resource_type || "Unknown";
+  if (event.resource_display_name && event.resource_display_name !== "-") return event.resource_display_name;
+  if (event.resource_name && event.resource_name !== "-") return event.resource_name;
+  return event.resource_display_short || event.resource_display || event.resource_type || "Unknown";
 }
 
 function displayActor(event: AuditEvent) {
@@ -87,7 +89,7 @@ export default function AuditEventTable({ events, onSelect }: { events: AuditEve
                 {actorSecondary(event) ? <span>{actorSecondary(event)}</span> : null}
               </td>
               <td className="summary-cell"><strong>{event.event_title || event.normalized_action}</strong><span>{displaySummary(event)}</span></td>
-              <td className="resource-cell" title={displayResource(event)}>{displayResource(event)}</td>
+              <td className="resource-cell" title={event.resource_scope ? `${displayResource(event)}\n${event.resource_scope}` : displayResource(event)}>{displayResource(event)}</td>
               <td className="truncate-cell" title={displaySourceIp(event)}>{displaySourceIp(event)}</td>
             </tr>
           ))}

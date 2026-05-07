@@ -9,7 +9,9 @@ function displayAction(event: AuditEvent) {
 }
 
 function displayResource(event: AuditEvent) {
-  return event.resource_name && event.resource_name !== "-" ? event.resource_name : event.resource_display_short || event.resource_display || event.resource_type || "Unknown";
+  if (event.resource_display_name && event.resource_display_name !== "-") return event.resource_display_name;
+  if (event.resource_name && event.resource_name !== "-") return event.resource_name;
+  return event.resource_display_short || event.resource_display || event.resource_type || "Unknown";
 }
 
 function displayActor(event: AuditEvent) {
@@ -41,6 +43,11 @@ function displaySource(event: AuditEvent) {
   if (event.source_ip) return event.source_ip;
   if (event.source_context) return `No source IP / context: ${event.source_context}`;
   return "No source IP in audit event";
+}
+
+function displayContext(value?: string | null) {
+  if (!value || value === "-") return "Not provided by audit event";
+  return value;
 }
 
 function copyText(value: string) {
@@ -88,10 +95,15 @@ export default function EventDetailDrawer({ event, onClose, onTriage }: {
         <div><div className="detail-label">Result</div><strong>{event.result || "Unknown"}</strong></div>
         <div><div className="detail-label">Resource</div><strong>{displayResource(event)}</strong></div>
         <div><div className="detail-label">Resource Type</div><strong>{event.resource_type || "unknown"}</strong></div>
-        <div><div className="detail-label">Environment</div><strong>{event.environment_id || "Not provided by audit event"}</strong></div>
+        <div><div className="detail-label">Resource Scope</div><strong>{displayContext(event.resource_scope)}</strong></div>
+        <div><div className="detail-label">Parent Resource</div><strong>{displayContext(event.parent_resource)}</strong></div>
+        <div><div className="detail-label">Resource Criticality</div><strong>{displayContext(event.resource_criticality)}</strong></div>
+        <div><div className="detail-label">Blast Radius</div><strong>{displayContext(event.blast_radius_hint)}</strong></div>
+        <div><div className="detail-label">Production Hint</div><strong>{displayContext(event.production_hint)}</strong></div>
+        <div><div className="detail-label">Environment</div><strong>{displayContext(event.environment_name || event.environment_id)}</strong></div>
+        <div><div className="detail-label">Cluster</div><strong>{displayContext(event.cluster_name || event.cluster_id)}</strong></div>
         <div><div className="detail-label">Region</div><strong>{event.flink_region || "Not provided by audit event"}</strong></div>
         <div><div className="detail-label">Source IP</div><strong>{displaySource(event)}</strong></div>
-        <div><div className="detail-label">Cluster</div><strong>{event.cluster_id || "Not provided by audit event"}</strong></div>
         <div><div className="detail-label">Client ID</div><strong>{event.client_id || "Not provided by audit event"}</strong></div>
         <div><div className="detail-label">Connection ID</div><strong>{event.connection_id || "Not provided by audit event"}</strong></div>
         <div><div className="detail-label">Request ID</div><strong>{event.request_id || "Not provided by audit event"}</strong></div>

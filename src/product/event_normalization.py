@@ -6,67 +6,21 @@ from typing import Any
 
 from src.product.event_intelligence import decision_snapshot
 from src.product.actor_enrichment import enrich_actor
+from src.product.resource_intelligence import (
+    canonical_resource_type as _canonical_resource_type,
+    extract_resource_context,
+    resource_type_label as _resource_type_label,
+    summarize_resource as _summarize_resource,
+)
 from src.product.source_enrichment import extract_source_info
-
-RESOURCE_TYPE_ALIASES = {
-    "topic": "topic",
-    "topics": "topic",
-    "subject": "subject",
-    "schema": "subject",
-    "schema_subject": "subject",
-    "schema registry": "schema_registry",
-    "schema_registry": "schema_registry",
-    "schemaregistry": "schema_registry",
-    "connector": "connector",
-    "connect": "connector",
-    "role_binding": "role_binding",
-    "role binding": "role_binding",
-    "rolebinding": "role_binding",
-    "acl / rbac": "role_binding",
-    "acl": "role_binding",
-    "rbac": "role_binding",
-    "environment": "environment",
-    "env": "environment",
-    "cluster": "cluster",
-    "kafka_cluster": "cluster",
-    "cloud_cluster": "cluster",
-    "api key": "api_key",
-    "api_key": "api_key",
-    "apikey": "api_key",
-    "compute pool": "compute_pool",
-    "compute_pool": "compute_pool",
-    "flink": "compute_pool",
-    "statement": "statement",
-    "flink_statement": "statement",
-    "tableflow": "tableflow",
-    "unknown": "unknown",
-}
-
-RESOURCE_TYPE_LABELS = {
-    "topic": "Topic",
-    "subject": "Subject",
-    "schema_registry": "Schema Registry",
-    "connector": "Connector",
-    "role_binding": "Role Binding",
-    "environment": "Environment",
-    "cluster": "Cluster",
-    "api_key": "API Key",
-    "compute_pool": "Compute Pool",
-    "statement": "Statement",
-    "tableflow": "Tableflow",
-    "unknown": "Unknown",
-}
 
 
 def canonical_resource_type(value: Any) -> str:
-    text = _as_text(value).replace("-", "_").strip().lower()
-    text = re.sub(r"[_\s]+", " ", text)
-    return RESOURCE_TYPE_ALIASES.get(text, RESOURCE_TYPE_ALIASES.get(text.replace(" ", "_"), text.replace(" ", "_") or "unknown"))
+    return _canonical_resource_type(value)
 
 
 def resource_type_label(value: Any) -> str:
-    canonical = canonical_resource_type(value)
-    return RESOURCE_TYPE_LABELS.get(canonical, canonical.replace("_", " ").title())
+    return _resource_type_label(value)
 
 
 def _as_text(value: Any) -> str:
@@ -141,18 +95,7 @@ def _cloud_primary_resource(payload: dict[str, Any]) -> dict[str, str] | None:
 
 
 def summarize_resource(value: Any) -> str:
-    text = _as_text(value).strip()
-    if not text:
-        return "-"
-    if "/topic=" in text:
-        return f"Topic: {_extract_crn_value(text, '/topic=')}"
-    if text.lower().startswith("topic="):
-        return f"Topic: {text.split('=', 1)[1].strip()}"
-    if "/cloud-cluster=" in text:
-        return f"Cluster: {_extract_crn_value(text, '/cloud-cluster=')}"
-    if "/apikey=" in text:
-        return f"API Key: {_extract_crn_value(text, '/apikey=')}"
-    return text
+    return _summarize_resource(value)
 
 
 def derive_action_category(method_name: str | None, action: str | None) -> str:
@@ -216,111 +159,12 @@ def humanize_action(payload: dict[str, Any]) -> str:
 
 
 def derive_resource_info(payload: dict[str, Any]) -> dict[str, str]:
-    primary = _cloud_primary_resource(payload)
-    if primary:
-        resource_type = canonical_resource_type(primary["resource_type"])
-        resource_name = primary["resource_name"]
-        label = resource_type_label(resource_type)
-        return {
-            "resource_type": resource_type,
-            "resource_name": resource_name,
-            "resource_display": f"{label}: {resource_name}",
-            "raw_resource": resource_name,
-        }
-    fields = (
-        "resourceName",
-        "authzResourceName",
-        "resource_name",
-        "resource_display",
-        "summary",
-        "message",
-        "request",
-        "requestData",
-        "request_data",
-        "topic_name",
-        "cluster_id",
-    )
-    raw_resource = _as_text(_first_present(payload, fields, ""))
-    search_text = " ".join(
-        _as_text(payload.get(field))
-        for field in (
-            *fields,
-            "methodName",
-            "method_name",
-            "resourceType",
-            "resource_type",
-            "action",
-        )
-    )
-    lowered = search_text.lower()
-    resource_type_hint = _as_text(payload.get("resourceType") or payload.get("resource_type"))
-
-    marker_types = (
-        ("/topic=", "Topic"),
-        ("/cloud-cluster=", "Cluster"),
-        ("/schema-registry=", "Schema Registry"),
-        ("/ksql=", "KSQL"),
-        ("/compute-pool=", "Compute Pool"),
-        ("/apikey=", "API Key"),
-    )
-    resource_type = "Unknown"
-    resource_name = "-"
-
-    for marker, label in marker_types:
-        source = next((_as_text(payload.get(field)) for field in fields if marker in _as_text(payload.get(field))), "")
-        if source:
-            resource_type = canonical_resource_type(label)
-            resource_name = _extract_crn_value(source, marker)
-            break
-
-    if resource_type == "Unknown":
-        if payload.get("topic_name"):
-            resource_type = "topic"
-            resource_name = _as_text(payload.get("topic_name"))
-        elif "topic" in lowered:
-            resource_type = "topic"
-            quoted_topic = _extract_quoted_topic(search_text)
-            if quoted_topic:
-                resource_name = quoted_topic
-        elif resource_type_hint:
-            resource_type = canonical_resource_type(resource_type_hint)
-        elif any(marker in lowered for marker in ("subject=", "/subject=", "schema subject")):
-            resource_type = "subject"
-        elif "connector" in lowered:
-            resource_type = "connector"
-        elif "apikey" in lowered or "api key" in lowered:
-            resource_type = "api_key"
-        elif any(marker in lowered for marker in ("createacl", "deleteacl", "acl:", "/acl=", " rbac", "rolebinding", "role binding")):
-            resource_type = "role_binding"
-        elif "environment" in lowered or "/environment=" in lowered:
-            resource_type = "environment"
-        elif "tableflow" in lowered:
-            resource_type = "tableflow"
-        elif "cluster" in lowered or resource_type_hint.upper() in {"CLUSTER", "KAFKA_CLUSTER"}:
-            resource_type = "cluster"
-
-    if resource_name == "-":
-        quoted_topic = _extract_quoted_topic(search_text)
-        if resource_type == "topic" and quoted_topic:
-            resource_name = quoted_topic
-        elif raw_resource:
-            resource_name = summarize_resource(raw_resource)
-            if ":" in resource_name:
-                resource_name = resource_name.split(":", 1)[1].strip()
-        elif payload.get("cluster_id"):
-            resource_name = _as_text(payload.get("cluster_id"))
-
-    if resource_type in {"connector", "api_key", "role_binding"} and resource_name == "-":
-        resource_name = summarize_resource(raw_resource) if raw_resource else resource_type_label(resource_type)
-
-    resource_type = canonical_resource_type(resource_type)
-    label = resource_type_label(resource_type)
-    resource_display = f"{label}: {resource_name}" if resource_type != "unknown" and resource_name != "-" else summarize_resource(raw_resource)
+    context = extract_resource_context(payload)
     return {
-        "resource_type": resource_type,
-        "resource_name": resource_name or "-",
-        "resource_display": resource_display or "Unknown",
-        "raw_resource": raw_resource or "-",
+        "resource_type": context.resource_type,
+        "resource_name": context.resource_name,
+        "resource_display": context.resource_display_name,
+        "raw_resource": context.raw_resource,
     }
 
 
@@ -356,7 +200,13 @@ def normalize_event(payload: dict[str, Any]) -> dict[str, Any]:
     method = _as_text(payload.get("methodName") or payload.get("method_name"))
     action = _as_text(payload.get("action"))
     action_category = derive_action_category(method, action)
-    resource_info = derive_resource_info(payload)
+    resource_context = extract_resource_context(payload)
+    resource_info = {
+        "resource_type": resource_context.resource_type,
+        "resource_name": resource_context.resource_name,
+        "resource_display": resource_context.resource_display_name,
+        "raw_resource": resource_context.raw_resource,
+    }
     failure = is_failure(payload)
     denied = is_denied(payload)
     result = "Failure" if failure else "Success"
@@ -383,13 +233,21 @@ def normalize_event(payload: dict[str, Any]) -> dict[str, Any]:
         "resource_type": resource_info["resource_type"],
         "resource_name": resource_info["resource_name"],
         "resource_display": resource_info["resource_display"],
+        "resource_display_name": resource_context.resource_display_name,
         "cluster_id": _as_text(payload.get("cluster_id") or payload.get("clusterId")) or None,
+        "cluster_name": resource_context.cluster_name,
         "source_ip": source_info["source_ip"],
         "source_context": source_info["source_context"],
         "client_id": source_info["client_id"],
         "connection_id": source_info["connection_id"],
         "request_id": source_info["request_id"],
         "environment_id": source_info["environment_id"],
+        "environment_name": resource_context.environment_name,
+        "parent_resource": resource_context.parent_resource,
+        "resource_scope": resource_context.resource_scope,
+        "resource_criticality": resource_context.resource_criticality,
+        "blast_radius_hint": resource_context.blast_radius_hint,
+        "production_hint": resource_context.production_hint,
         "flink_region": source_info["flink_region"],
         "network_id": source_info["network_id"],
         "summary": summary,

@@ -7,6 +7,7 @@ from pathlib import Path
 
 import orjson
 import audit_forwarder as forwarder
+import src.product.db_writer as db_writer_module
 from src.product.auth import AccessToken, AuthConfig, Authenticator, Role
 from src.product.db_writer import AuditEventDbWriter, DbWriteResult
 from src.product.event_normalization import event_fingerprint
@@ -103,6 +104,34 @@ def test_forwarder_db_writer_batch_insert_deduplicates_and_normalizes(tmp_path):
     assert row["resource_name"] == "jegan-testing"
     assert row["is_failure"] in (False, 0)
     assert row["is_denied"] in (False, 0)
+
+
+def test_forwarder_db_writer_resource_catalog_failure_is_best_effort(tmp_path, monkeypatch):
+    writer = AuditEventDbWriter(f"sqlite:///{tmp_path / 'auditlens_api.db'}")
+    event = {
+        "id": "evt-db-best-effort",
+        "time": "2026-04-19T10:00:00Z",
+        "methodName": "kafka.CreateTopics",
+        "action": "CreateTopics",
+        "user": "u-75rw9o",
+        "resourceName": "crn://confluent.cloud/organization=o/environment=e/cloud-cluster=lkc-demo/topic=jegan-testing",
+        "summary": "u-75rw9o created topic 'jegan-testing'",
+        "resultStatus": "Success",
+    }
+
+    def failing_build(*args, **kwargs):
+        raise RuntimeError("catalog down")
+
+    monkeypatch.setattr(db_writer_module, "build_resource_catalog_entry", failing_build)
+    result = writer.write_batch([event])
+
+    assert result.attempted == 1
+    assert result.inserted == 1
+    with writer.engine.connect() as conn:
+        count = conn.exec_driver_sql("select count(*) from audit_events").scalar_one()
+        catalog_count = conn.exec_driver_sql("select count(*) from resource_catalog").scalar_one()
+    assert count == 1
+    assert catalog_count == 0
 
 
 def test_fingerprint_for_timestamp_missing_event_is_stable():

@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from src.product.source_enrichment import extract_source_info
+from src.product.resource_intelligence import resource_display_short as resource_display_short_from_context
 
 
 IMPACT_TYPES = {
@@ -324,25 +325,7 @@ def _extract_crn_tail(value: str) -> str:
 
 
 def resource_display_short(payload: dict[str, Any], event: Any | None = None) -> str:
-    data = _data(payload)
-    cloud_resources = data.get("cloudResources") if isinstance(data.get("cloudResources"), dict) else _load_json(data.get("cloudResources"))
-    if not cloud_resources:
-        cloud_resources = payload.get("cloudResources") if isinstance(payload.get("cloudResources"), dict) else _load_json(payload.get("cloudResources"))
-    resource = cloud_resources.get("resource") if isinstance(cloud_resources, dict) else None
-    if isinstance(resource, dict):
-        resource_id = _first(resource.get("resourceId"), resource.get("id"), resource.get("name"))
-        if resource_id:
-            return resource_id
-    value = _first(
-        payload.get("topic_name"),
-        payload.get("resource_display"),
-        getattr(event, "resource_display", ""),
-        payload.get("resourceName"),
-        payload.get("authzResourceName"),
-        getattr(event, "resource_name", ""),
-        data.get("resourceName"),
-    )
-    return _extract_crn_tail(value)
+    return resource_display_short_from_context(payload, event)
 
 
 def source_context(payload: dict[str, Any], event: Any | None = None) -> str:

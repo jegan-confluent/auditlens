@@ -27,6 +27,7 @@ from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from src.product.event_normalization import event_fingerprint, normalize_event, parse_event_timestamp
+from src.product.resource_intelligence import build_resource_catalog_entry
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +69,14 @@ audit_events = Table(
     Column("connection_id", String(255), nullable=True),
     Column("request_id", String(255), nullable=True),
     Column("environment_id", String(255), nullable=True),
+    Column("cluster_name", String(255), nullable=True),
+    Column("environment_name", String(255), nullable=True),
+    Column("parent_resource", String(255), nullable=True),
+    Column("resource_scope", String(512), nullable=True),
+    Column("resource_display_name", String(768), nullable=True),
+    Column("resource_criticality", String(32), nullable=True),
+    Column("blast_radius_hint", String(64), nullable=True),
+    Column("production_hint", String(64), nullable=True),
     Column("flink_region", String(255), nullable=True),
     Column("network_id", String(255), nullable=True),
     Column("signal_type", String(32), nullable=True),
@@ -89,6 +98,30 @@ audit_events = Table(
     UniqueConstraint("event_fingerprint", name="uq_audit_events_event_fingerprint"),
 )
 
+resource_catalog = Table(
+    "resource_catalog",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("resource_id", String(512), nullable=False),
+    Column("resource_type", String(128), nullable=False),
+    Column("resource_name", String(512), nullable=False),
+    Column("display_name", String(768), nullable=True),
+    Column("cluster_id", String(255), nullable=True),
+    Column("cluster_name", String(255), nullable=True),
+    Column("environment_id", String(255), nullable=True),
+    Column("environment_name", String(255), nullable=True),
+    Column("parent_resource", String(255), nullable=True),
+    Column("resource_scope", Text, nullable=True),
+    Column("resource_criticality", String(32), nullable=True),
+    Column("blast_radius_hint", String(64), nullable=True),
+    Column("production_hint", String(64), nullable=True),
+    Column("source", String(64), nullable=True),
+    Column("metadata_json", Text, nullable=True),
+    Column("first_seen_at", DateTime(timezone=True), nullable=False),
+    Column("last_seen_at", DateTime(timezone=True), nullable=False),
+    UniqueConstraint("resource_id", name="uq_resource_catalog_resource_id"),
+)
+
 Index("idx_audit_events_timestamp", audit_events.c.timestamp)
 Index("idx_audit_events_event_fingerprint", audit_events.c.event_fingerprint)
 Index("idx_audit_events_actor", audit_events.c.actor)
@@ -97,6 +130,12 @@ Index("idx_audit_events_resource_type", audit_events.c.resource_type)
 Index("idx_audit_events_resource_name", audit_events.c.resource_name)
 Index("idx_audit_events_source_ip", audit_events.c.source_ip)
 Index("idx_audit_events_environment_id", audit_events.c.environment_id)
+Index("idx_audit_events_cluster_name", audit_events.c.cluster_name)
+Index("idx_audit_events_environment_name", audit_events.c.environment_name)
+Index("idx_audit_events_parent_resource", audit_events.c.parent_resource)
+Index("idx_audit_events_resource_scope", audit_events.c.resource_scope)
+Index("idx_audit_events_resource_display_name", audit_events.c.resource_display_name)
+Index("idx_audit_events_resource_criticality", audit_events.c.resource_criticality)
 Index("idx_audit_events_action_category", audit_events.c.action_category)
 Index("idx_audit_events_result", audit_events.c.result)
 Index("idx_audit_events_signal_type", audit_events.c.signal_type)
@@ -112,6 +151,11 @@ Index("idx_audit_events_resource_lookup", audit_events.c.resource_type, audit_ev
 Index("idx_audit_events_action_category_time", audit_events.c.action_category, audit_events.c.timestamp.desc())
 Index("idx_audit_events_actor_time", audit_events.c.actor, audit_events.c.timestamp.desc())
 Index("idx_audit_events_result_time", audit_events.c.result, audit_events.c.timestamp.desc())
+Index("idx_resource_catalog_resource_type", resource_catalog.c.resource_type)
+Index("idx_resource_catalog_resource_name", resource_catalog.c.resource_name)
+Index("idx_resource_catalog_cluster_id", resource_catalog.c.cluster_id)
+Index("idx_resource_catalog_environment_id", resource_catalog.c.environment_id)
+Index("idx_resource_catalog_last_seen_at", resource_catalog.c.last_seen_at)
 
 
 def normalize_database_url(database_url: str) -> str:
@@ -162,6 +206,14 @@ class AuditEventDbWriter:
             "connection_id": "VARCHAR(255)",
             "request_id": "VARCHAR(255)",
             "environment_id": "VARCHAR(255)",
+            "cluster_name": "VARCHAR(255)",
+            "environment_name": "VARCHAR(255)",
+            "parent_resource": "VARCHAR(255)",
+            "resource_scope": "VARCHAR(512)",
+            "resource_display_name": "VARCHAR(768)",
+            "resource_criticality": "VARCHAR(32)",
+            "blast_radius_hint": "VARCHAR(64)",
+            "production_hint": "VARCHAR(64)",
             "flink_region": "VARCHAR(255)",
             "network_id": "VARCHAR(255)",
             "signal_type": "VARCHAR(32)",
@@ -203,6 +255,16 @@ class AuditEventDbWriter:
 
     def write_batch(self, payloads: list[dict[str, Any]]) -> DbWriteResult:
         rows = [self._row(payload) for payload in payloads]
+        resource_rows = []
+        for payload, row in zip(payloads, rows):
+            try:
+                record = build_resource_catalog_entry(payload, seen_at=row["timestamp"])
+            except Exception as exc:  # pragma: no cover - best-effort enrichment
+                logger.debug("resource catalog row build failed: %s", exc)
+                continue
+            if record["resource_type"] == "unknown" and record["resource_name"] in {"", "-"}:
+                continue
+            resource_rows.append(record)
         if not rows:
             return DbWriteResult(attempted=0, inserted=0, elapsed_ms=0.0)
         started = time.perf_counter()
@@ -218,6 +280,64 @@ class AuditEventDbWriter:
         with self.engine.begin() as conn:
             result = conn.execute(statement)
             inserted = len(result.fetchall()) if self.mode == "postgres" else int(result.rowcount or 0)
+        if resource_rows:
+            try:
+                with self.engine.begin() as conn:
+                    if self.mode == "postgres":
+                        stmt = postgres_insert(resource_catalog).values(resource_rows)
+                        excluded = stmt.excluded
+                        resource_statement = (
+                            stmt
+                            .on_conflict_do_update(
+                                index_elements=["resource_id"],
+                                set_={
+                                    "resource_type": func.coalesce(func.nullif(excluded.resource_type, "unknown"), resource_catalog.c.resource_type),
+                                    "resource_name": func.coalesce(func.nullif(excluded.resource_name, "-"), resource_catalog.c.resource_name),
+                                    "display_name": func.coalesce(func.nullif(excluded.display_name, "Unknown"), resource_catalog.c.display_name),
+                                    "cluster_id": func.coalesce(excluded.cluster_id, resource_catalog.c.cluster_id),
+                                    "cluster_name": func.coalesce(func.nullif(excluded.cluster_name, "Unknown"), resource_catalog.c.cluster_name),
+                                    "environment_id": func.coalesce(excluded.environment_id, resource_catalog.c.environment_id),
+                                    "environment_name": func.coalesce(func.nullif(excluded.environment_name, "Unknown"), resource_catalog.c.environment_name),
+                                    "parent_resource": func.coalesce(func.nullif(excluded.parent_resource, "unknown"), resource_catalog.c.parent_resource),
+                                    "resource_scope": func.coalesce(func.nullif(excluded.resource_scope, "unknown"), resource_catalog.c.resource_scope),
+                                    "resource_criticality": func.coalesce(func.nullif(excluded.resource_criticality, "unknown"), resource_catalog.c.resource_criticality),
+                                    "blast_radius_hint": func.coalesce(func.nullif(excluded.blast_radius_hint, "unknown"), resource_catalog.c.blast_radius_hint),
+                                    "production_hint": func.coalesce(func.nullif(excluded.production_hint, "unknown"), resource_catalog.c.production_hint),
+                                    "source": func.coalesce(func.nullif(excluded.source, "fallback"), resource_catalog.c.source),
+                                    "metadata_json": excluded.metadata_json,
+                                    "last_seen_at": excluded.last_seen_at,
+                                },
+                            )
+                        )
+                    else:
+                        stmt = sqlite_insert(resource_catalog).values(resource_rows)
+                        excluded = stmt.excluded
+                        resource_statement = (
+                            stmt
+                            .on_conflict_do_update(
+                                index_elements=["resource_id"],
+                                set_={
+                                    "resource_type": func.coalesce(func.nullif(excluded.resource_type, "unknown"), resource_catalog.c.resource_type),
+                                    "resource_name": func.coalesce(func.nullif(excluded.resource_name, "-"), resource_catalog.c.resource_name),
+                                    "display_name": func.coalesce(func.nullif(excluded.display_name, "Unknown"), resource_catalog.c.display_name),
+                                    "cluster_id": func.coalesce(excluded.cluster_id, resource_catalog.c.cluster_id),
+                                    "cluster_name": func.coalesce(func.nullif(excluded.cluster_name, "Unknown"), resource_catalog.c.cluster_name),
+                                    "environment_id": func.coalesce(excluded.environment_id, resource_catalog.c.environment_id),
+                                    "environment_name": func.coalesce(func.nullif(excluded.environment_name, "Unknown"), resource_catalog.c.environment_name),
+                                    "parent_resource": func.coalesce(func.nullif(excluded.parent_resource, "unknown"), resource_catalog.c.parent_resource),
+                                    "resource_scope": func.coalesce(func.nullif(excluded.resource_scope, "unknown"), resource_catalog.c.resource_scope),
+                                    "resource_criticality": func.coalesce(func.nullif(excluded.resource_criticality, "unknown"), resource_catalog.c.resource_criticality),
+                                    "blast_radius_hint": func.coalesce(func.nullif(excluded.blast_radius_hint, "unknown"), resource_catalog.c.blast_radius_hint),
+                                    "production_hint": func.coalesce(func.nullif(excluded.production_hint, "unknown"), resource_catalog.c.production_hint),
+                                    "source": func.coalesce(func.nullif(excluded.source, "fallback"), resource_catalog.c.source),
+                                    "metadata_json": excluded.metadata_json,
+                                    "last_seen_at": excluded.last_seen_at,
+                                },
+                            )
+                        )
+                    conn.execute(resource_statement)
+            except Exception as exc:  # pragma: no cover - best-effort enrichment
+                logger.debug("resource catalog write failed: %s", exc)
         return DbWriteResult(attempted=len(rows), inserted=inserted, elapsed_ms=(time.perf_counter() - started) * 1000)
 
     def cleanup_retention(self, *, dry_run: bool = False, retention_days: int | None = None) -> dict[str, Any]:

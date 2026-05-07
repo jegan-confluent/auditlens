@@ -6,6 +6,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, object_sessio
 
 from src.product.actor_enrichment import enrich_actor
 from src.product.event_intelligence import decision_snapshot_from_model
+from src.product.resource_intelligence import extract_resource_context
 from src.product.source_enrichment import extract_source_info
 from src.product.event_signals import classify_signal
 from src.product.triage_store import get_triage
@@ -40,12 +41,20 @@ class AuditEvent(Base):
     resource_name: Mapped[str] = mapped_column(String(512), default="-", nullable=False)
     resource_display: Mapped[str] = mapped_column(String(768), default="Unknown", nullable=False)
     cluster_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    _cluster_name: Mapped[str | None] = mapped_column("cluster_name", String(255), nullable=True)
     source_ip: Mapped[str | None] = mapped_column(String(128), nullable=True)
     _source_context: Mapped[str | None] = mapped_column("source_context", String(255), nullable=True)
     _client_id: Mapped[str | None] = mapped_column("client_id", String(255), nullable=True)
     _connection_id: Mapped[str | None] = mapped_column("connection_id", String(255), nullable=True)
     _request_id: Mapped[str | None] = mapped_column("request_id", String(255), nullable=True)
     environment_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    _environment_name: Mapped[str | None] = mapped_column("environment_name", String(255), nullable=True)
+    _parent_resource: Mapped[str | None] = mapped_column("parent_resource", String(255), nullable=True)
+    _resource_scope: Mapped[str | None] = mapped_column("resource_scope", String(512), nullable=True)
+    _resource_display_name: Mapped[str | None] = mapped_column("resource_display_name", String(768), nullable=True)
+    _resource_criticality: Mapped[str | None] = mapped_column("resource_criticality", String(32), nullable=True)
+    _blast_radius_hint: Mapped[str | None] = mapped_column("blast_radius_hint", String(64), nullable=True)
+    _production_hint: Mapped[str | None] = mapped_column("production_hint", String(64), nullable=True)
     flink_region: Mapped[str | None] = mapped_column(String(255), nullable=True)
     network_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     _signal_type: Mapped[str | None] = mapped_column("signal_type", String(32), nullable=True)
@@ -142,6 +151,35 @@ class AuditEvent(Base):
     def resource_display_short(self) -> str:
         return self._intelligence()["resource_display_short"]
 
+    def _resource_enrichment(self) -> dict[str, str | None]:
+        cached = getattr(self, "_resource_enrichment_cache", None)
+        if cached is None:
+            if "raw_payload_json" in self.__dict__:
+                try:
+                    payload = json.loads(self.raw_payload_json) if self.raw_payload_json else {}
+                except json.JSONDecodeError:
+                    payload = {}
+                cached = extract_resource_context(payload, self).to_event_fields()
+            else:
+                cached = extract_resource_context({}, self).to_event_fields()
+            setattr(self, "_resource_enrichment_cache", cached)
+        stored = {
+            "resource_type": self.resource_type,
+            "resource_name": self.resource_name,
+            "resource_display_name": self._resource_display_name,
+            "cluster_id": self.cluster_id,
+            "cluster_name": self._cluster_name,
+            "environment_id": self.environment_id,
+            "environment_name": self._environment_name,
+            "parent_resource": self._parent_resource,
+            "resource_scope": self._resource_scope,
+            "resource_criticality": self._resource_criticality,
+            "blast_radius_hint": self._blast_radius_hint,
+            "production_hint": self._production_hint,
+        }
+        placeholders = {None, "", "-", "Unknown", "unknown", "Not provided by audit event"}
+        return {**cached, **{key: value for key, value in stored.items() if value not in placeholders}}
+
     @property
     def source_context(self) -> str:
         return self._source_context or self._intelligence()["source_context"]
@@ -157,6 +195,70 @@ class AuditEvent(Base):
     @decision_reason.setter
     def decision_reason(self, value: str | None) -> None:
         self._decision_reason = value
+
+    @property
+    def resource_display_name(self) -> str:
+        return str(self._resource_enrichment()["resource_display_name"] or self.resource_display or "Unknown")
+
+    @resource_display_name.setter
+    def resource_display_name(self, value: str | None) -> None:
+        self._resource_display_name = value
+
+    @property
+    def parent_resource(self) -> str | None:
+        return self._resource_enrichment()["parent_resource"]
+
+    @parent_resource.setter
+    def parent_resource(self, value: str | None) -> None:
+        self._parent_resource = value
+
+    @property
+    def resource_scope(self) -> str:
+        return str(self._resource_enrichment()["resource_scope"] or "unknown")
+
+    @resource_scope.setter
+    def resource_scope(self, value: str | None) -> None:
+        self._resource_scope = value
+
+    @property
+    def cluster_name(self) -> str | None:
+        return self._resource_enrichment()["cluster_name"]
+
+    @cluster_name.setter
+    def cluster_name(self, value: str | None) -> None:
+        self._cluster_name = value
+
+    @property
+    def environment_name(self) -> str | None:
+        return self._resource_enrichment()["environment_name"]
+
+    @environment_name.setter
+    def environment_name(self, value: str | None) -> None:
+        self._environment_name = value
+
+    @property
+    def resource_criticality(self) -> str:
+        return str(self._resource_enrichment()["resource_criticality"] or "unknown")
+
+    @resource_criticality.setter
+    def resource_criticality(self, value: str | None) -> None:
+        self._resource_criticality = value
+
+    @property
+    def blast_radius_hint(self) -> str:
+        return str(self._resource_enrichment()["blast_radius_hint"] or "unknown")
+
+    @blast_radius_hint.setter
+    def blast_radius_hint(self, value: str | None) -> None:
+        self._blast_radius_hint = value
+
+    @property
+    def production_hint(self) -> str:
+        return str(self._resource_enrichment()["production_hint"] or "unknown")
+
+    @production_hint.setter
+    def production_hint(self, value: str | None) -> None:
+        self._production_hint = value
 
     def _source_enrichment(self) -> dict[str, str | None]:
         cached = getattr(self, "_source_enrichment_cache", None)
@@ -360,8 +462,39 @@ class AuditEventTriage(Base):
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class ResourceCatalog(Base):
+    __tablename__ = "resource_catalog"
+    __table_args__ = (
+        UniqueConstraint("resource_id", name="uq_resource_catalog_resource_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    resource_id: Mapped[str] = mapped_column(String(512), nullable=False)
+    resource_type: Mapped[str] = mapped_column(String(128), nullable=False)
+    resource_name: Mapped[str] = mapped_column(String(512), nullable=False)
+    display_name: Mapped[str | None] = mapped_column(String(768), nullable=True)
+    cluster_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    cluster_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    environment_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    environment_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    parent_resource: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    resource_scope: Mapped[str | None] = mapped_column(Text, nullable=True)
+    resource_criticality: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    blast_radius_hint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    production_hint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    source: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    metadata_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 Index("idx_audit_event_triage_event_fingerprint", AuditEventTriage.event_fingerprint)
 Index("idx_audit_event_triage_status", AuditEventTriage.triage_status)
+Index("idx_resource_catalog_resource_type", ResourceCatalog.resource_type)
+Index("idx_resource_catalog_resource_name", ResourceCatalog.resource_name)
+Index("idx_resource_catalog_cluster_id", ResourceCatalog.cluster_id)
+Index("idx_resource_catalog_environment_id", ResourceCatalog.environment_id)
+Index("idx_resource_catalog_last_seen_at", ResourceCatalog.last_seen_at)
 
 
 Index("idx_audit_events_timestamp", AuditEvent.timestamp)
