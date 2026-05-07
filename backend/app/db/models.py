@@ -1,8 +1,8 @@
 import json
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, Index, Integer, String, Text, UniqueConstraint
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy import DateTime, Index, Integer, String, Text, UniqueConstraint, select
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, object_session
 
 from src.product.actor_enrichment import enrich_actor
 from src.product.event_intelligence import decision_snapshot_from_model
@@ -304,12 +304,21 @@ class AuditEvent(Base):
         self._actor_confidence = value
 
     def _triage(self) -> dict[str, str | None]:
-        triage = get_triage(self.event_fingerprint)
-        if triage.get("triage_status") == "open":
-            legacy = get_triage(self.id)
-            if legacy.get("triage_status") != "open":
-                return legacy
-        return triage
+        cached = getattr(self, "_triage_cache", None)
+        if cached is not None:
+            return {**get_triage(self.event_fingerprint), **cached}
+        session = object_session(self)
+        if session is not None:
+            record = session.scalar(select(AuditEventTriage).where(AuditEventTriage.event_fingerprint == self.event_fingerprint))
+            if record is not None:
+                timestamp = record.reviewed_at or record.resolved_at or record.updated_at or record.created_at
+                return {
+                    "triage_status": record.triage_status or "open",
+                    "triage_actor": record.triage_actor,
+                    "triage_timestamp": timestamp.isoformat() if timestamp is not None else None,
+                    "triage_note": record.triage_note,
+                }
+        return get_triage(self.event_fingerprint)
 
     @property
     def triage_status(self) -> str:
@@ -326,6 +335,33 @@ class AuditEvent(Base):
     @property
     def triage_note(self) -> str | None:
         return self._triage()["triage_note"]
+
+
+class AuditEventTriage(Base):
+    __tablename__ = "audit_event_triage"
+    __table_args__ = (
+        UniqueConstraint("event_fingerprint", name="uq_audit_event_triage_event_fingerprint"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    event_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    triage_status: Mapped[str] = mapped_column(String(32), default="open", nullable=False)
+    triage_actor: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    triage_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    triage_source: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+Index("idx_audit_event_triage_event_fingerprint", AuditEventTriage.event_fingerprint)
+Index("idx_audit_event_triage_status", AuditEventTriage.triage_status)
 
 
 Index("idx_audit_events_timestamp", AuditEvent.timestamp)

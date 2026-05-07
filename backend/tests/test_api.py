@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.orm import sessionmaker
 
 from backend.app.db.database import build_engine, get_db, init_db
+from backend.app.db.models import AuditEventTriage
 from backend.app.main import create_app
 from backend.scripts.seed_data import SEED_EVENTS
 from backend.app.services.event_service import cleanup_retention, create_event, upsert_events
@@ -482,7 +483,6 @@ def test_events_list_uses_persisted_source_ip_for_request_metadata(client):
 
 
 def test_event_triage_lifecycle_basic(client, monkeypatch, tmp_path):
-    monkeypatch.setenv("TRIAGE_STATE_FILE", str(tmp_path / "triage.json"))
     event_id = client.get("/events", params={"limit": 1}).json()["items"][0]["id"]
     before = client.get(f"/events/{event_id}").json()
     assert before["triage_status"] == "open"
@@ -495,10 +495,26 @@ def test_event_triage_lifecycle_basic(client, monkeypatch, tmp_path):
     body = updated.json()
     assert body["triage_status"] == "approved"
     assert body["triage_note"] == "change ticket approved"
+    db_override = next(iter(client.app.dependency_overrides.values()))
+    session_gen = db_override()
+    try:
+        db = next(session_gen)
+        stored = db.query(AuditEventTriage).filter(AuditEventTriage.event_fingerprint == before["event_fingerprint"]).one()
+        assert stored.triage_status == "approved"
+        assert stored.triage_note == "change ticket approved"
+        assert stored.triage_source == "api"
+    finally:
+        session_gen.close()
+
+
+def test_event_triage_does_not_follow_old_numeric_ids(client, monkeypatch, tmp_path):
+    monkeypatch.setenv("TRIAGE_STATE_FILE", str(tmp_path / "triage.json"))
     triage_file = tmp_path / "triage.json"
-    stored = json.loads(triage_file.read_text())
-    assert before["event_fingerprint"] in stored
-    assert str(event_id) not in stored
+    triage_file.write_text(json.dumps({"1": {"triage_status": "approved", "triage_actor": "legacy", "triage_note": "legacy id"}}))
+    response = client.get("/events", params={"limit": 1})
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["triage_status"] == "open"
 
 
 def test_event_detail_includes_raw_payload_json(client):

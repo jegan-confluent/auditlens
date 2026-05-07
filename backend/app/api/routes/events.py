@@ -6,7 +6,7 @@ from backend.app.db.database import get_db
 from backend.app.schemas.event import AuditEventDetailOut
 from backend.app.schemas.response import EventListResponse
 from backend.app.services.event_service import get_event, list_deletions, list_events_result, list_failures
-from src.product.triage_store import set_triage
+from backend.app.services.triage_service import upsert_triage
 
 router = APIRouter(tags=["events"])
 
@@ -87,9 +87,16 @@ def update_event_triage(
     if event is None:
         raise HTTPException(status_code=404, detail="Event not found")
     try:
-        set_triage(event.event_fingerprint, payload.triage_status, actor=payload.triage_actor or x_actor, note=payload.triage_note)
+        triage = upsert_triage(
+            db,
+            event.event_fingerprint,
+            payload.triage_status,
+            actor=payload.triage_actor or x_actor,
+            note=payload.triage_note,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    setattr(event, "_triage_cache", triage)
     return event
 
 

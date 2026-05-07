@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session, defer, load_only
 
 from backend.app.db.models import AuditEvent
 from backend.app.services.filter_service import event_fingerprint, normalize_event, parse_event_timestamp
+from backend.app.services.triage_service import attach_triage_snapshots, get_triage_snapshot
 from src.product.event_normalization import canonical_resource_type
 
 MAX_EVENT_LIMIT = 500
@@ -133,6 +134,7 @@ def create_event(db: Session, payload: dict[str, Any]) -> AuditEvent:
         if existing is None:
             raise
         event = existing
+    attach_triage_snapshots(db, [event])
     return event
 
 
@@ -141,7 +143,10 @@ def upsert_event(db: Session, payload: dict[str, Any]) -> AuditEvent:
 
 
 def get_event(db: Session, event_id: int) -> AuditEvent | None:
-    return db.get(AuditEvent, event_id)
+    event = db.get(AuditEvent, event_id)
+    if event is not None:
+        setattr(event, "_triage_cache", get_triage_snapshot(db, event.event_fingerprint))
+    return event
 
 
 def _event_filter_conditions(
@@ -330,6 +335,7 @@ def list_events_result(
     total = pre_filter_total
     if not derived_filter_applied:
         items = db.scalars(item_query.order_by(AuditEvent.timestamp.desc(), AuditEvent.id.desc()).limit(limit).offset(offset)).all()
+        attach_triage_snapshots(db, items)
         return EventListResult(
             items=list(items),
             total=total,
@@ -353,6 +359,7 @@ def list_events_result(
         if len(batch) < batch_size:
             break
     page = collected[offset : offset + limit]
+    attach_triage_snapshots(db, page)
     result_limit_reached = scanned >= SIGNAL_FILTER_MAX_SCAN and len(collected) >= offset + limit
     return EventListResult(
         items=page,

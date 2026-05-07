@@ -23,7 +23,7 @@ def _store_path() -> Path:
 
 
 def triage_storage_note() -> str:
-    return "File-backed triage is local and single-instance only."
+    return "Legacy file-backed triage is migration-only; database triage is the source of truth."
 
 
 def _read_store() -> dict[str, dict[str, Any]]:
