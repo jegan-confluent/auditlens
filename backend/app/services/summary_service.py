@@ -2,10 +2,20 @@ from collections import Counter
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session, defer, load_only
 
 from backend.app.db.models import AuditEvent
+
+# Per-route statement timeout for /summary on Postgres. Phase 4 adds this as a
+# stopgap because /summary issues seven sequential aggregations against the
+# same WHERE clause and at production volume (10M rows, 24h window over 1M+
+# matching events) the cumulative cost exceeds the 30s default set in Phase 2.
+# Targeted indexes (revision 0004) reduced per-query cost but did not bring
+# total wall time under 10s for 24h windows. Bumping the timeout to 120s
+# locally keeps the route from 500-ing while a real single-pass refactor or
+# rollup-table approach is designed. See docs/PHASE4_SUMMARY_PERF.md.
+SUMMARY_ROUTE_STATEMENT_TIMEOUT_MS = 120_000
 from backend.app.services.event_service import (
     EVENT_LIST_COLUMNS,
     SIGNAL_FILTER_MAX_SCAN,
@@ -127,6 +137,14 @@ def get_summary(
     change_type: str | None = None,
     **filters: Any,
 ) -> dict:
+    # Stopgap: relax the per-statement timeout for this transaction so the
+    # cumulative cost of /summary's seven aggregations does not 500 under
+    # load. SET LOCAL is scoped to the active transaction and reverts on
+    # commit/rollback automatically. SQLite has no statement_timeout, so we
+    # gate the call by dialect.
+    if db.get_bind().dialect.name == "postgresql":
+        db.execute(text(f"SET LOCAL statement_timeout = {SUMMARY_ROUTE_STATEMENT_TIMEOUT_MS}"))
+
     mode = _normalize_mode(mode)
     signal_types = _parse_signal_types(signal_type)
     impact_types = _parse_impact_types(impact_type)

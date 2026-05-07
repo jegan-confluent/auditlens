@@ -550,3 +550,24 @@ Index("idx_audit_events_resource_name_time", AuditEvent.resource_name, AuditEven
 Index("idx_audit_events_action_category_time", AuditEvent.action_category, AuditEvent.timestamp.desc())
 Index("idx_audit_events_actor_time", AuditEvent.actor, AuditEvent.timestamp.desc())
 Index("idx_audit_events_result_time", AuditEvent.result, AuditEvent.timestamp.desc())
+# Phase 4 summary-aggregation support (mirrors Alembic revision
+# 0004_summary_aggregation_indexes). Composite for GROUP BY resource_type with
+# a time window, plus partial indexes that make the failure/denial counts
+# constant-time relative to the matching subset of rows.
+Index(
+    "idx_audit_events_resource_type_time",
+    AuditEvent.resource_type,
+    AuditEvent.timestamp.desc(),
+)
+Index(
+    "idx_audit_events_failure_time",
+    AuditEvent.timestamp.desc(),
+    postgresql_where=AuditEvent.is_failure.is_(True),
+    sqlite_where=AuditEvent.is_failure.is_(True),
+)
+Index(
+    "idx_audit_events_denied_time",
+    AuditEvent.timestamp.desc(),
+    postgresql_where=AuditEvent.is_denied.is_(True),
+    sqlite_where=AuditEvent.is_denied.is_(True),
+)
