@@ -1,7 +1,7 @@
 # Makefile for Audit Forwarder
 # Production-ready build, test, and deployment tasks
 
-.PHONY: help build build-alpine build-distroless test scan clean deploy
+.PHONY: help build build-alpine build-distroless test scan clean deploy migrate
 
 # Default target
 .DEFAULT_GOAL := help
@@ -57,6 +57,11 @@ test: ## Run unit tests
 	@echo "$(GREEN)Running tests...$(NC)"
 	python -m pytest tests/ -v
 	@echo "$(GREEN)✓ Tests passed$(NC)"
+
+migrate: ## Apply Alembic migrations to the configured DATABASE_URL (Postgres production path)
+	@echo "$(GREEN)Applying Alembic migrations...$(NC)"
+	cd backend && alembic upgrade head
+	@echo "$(GREEN)✓ Migrations applied$(NC)"
 
 lint: ## Run code linting
 	@echo "$(GREEN)Running linters...$(NC)"
@@ -240,4 +245,4 @@ version: ## Show version information
 	@echo "Docker: $$(docker --version)"
 	@echo "Trivy: $$(trivy --version | head -1)"
 
-.PHONY: help build build-alpine build-distroless test scan clean deploy
+.PHONY: help build build-alpine build-distroless test scan clean deploy migrate

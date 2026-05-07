@@ -23,6 +23,18 @@ def client(monkeypatch):
         monkeypatch.setenv("FORWARDER_HEALTH_URL", "http://127.0.0.1:9/health")
         monkeypatch.setattr("backend.app.main.init_db", lambda: None)
         get_settings.cache_clear()
+        # Wipe the cross-test in-process caches so each test starts fresh.
+        from backend.app.services.system_service import reset_forwarder_health_cache
+        from backend.app.services.filter_options_service import clear_filter_options_cache
+        from backend.app.core.limiter import limiter
+
+        reset_forwarder_health_cache()
+        clear_filter_options_cache()
+        # Disable rate limiting for the general fixture; the dedicated rate-limit
+        # test re-enables it explicitly. Keeps existing tests free to make many
+        # GET /events calls without hitting 429.
+        limiter.enabled = False
+        limiter.reset()
         engine = build_engine(f"sqlite:///{db_path}")
         TestingSessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
         init_db(engine)
@@ -301,6 +313,9 @@ def test_failures_endpoint_returns_failed_events(client):
 
 
 def test_filters_options_returns_categories(client):
+    from backend.app.services.filter_options_service import clear_filter_options_cache
+
+    clear_filter_options_cache()
     response = client.get("/filters/options")
     assert response.status_code == 200
     body = response.json()
@@ -312,6 +327,63 @@ def test_filters_options_returns_categories(client):
     assert "Create" in body["action_categories"]
     assert "Delete" in body["action_categories"]
     assert "Security" in body["action_categories"]
+
+
+def test_filters_options_caps_and_caches(client):
+    """Filter dropdowns must cap at 500 items and skip the DB on a hit within TTL."""
+    from backend.app.services import filter_options_service
+    from backend.app.services.filter_options_service import (
+        FILTER_OPTIONS_LIMIT,
+        clear_filter_options_cache,
+        reset_db_call_counter,
+    )
+
+    clear_filter_options_cache()
+
+    db_override = next(iter(client.app.dependency_overrides.values()))
+    session_gen = db_override()
+    db = next(session_gen)
+    try:
+        # Seed 600 distinct actor strings to exercise the cap.
+        for idx in range(600):
+            create_event(
+                db,
+                {
+                    "id": f"actor-cap-{idx}",
+                    "timestamp": (datetime.now(timezone.utc) - timedelta(seconds=idx)).isoformat(),
+                    "actor": f"sa-cap-{idx}",
+                    "methodName": "kafka.Authentication",
+                    "principal": f"sa-cap-{idx}",
+                },
+            )
+    finally:
+        session_gen.close()
+
+    clear_filter_options_cache()
+    reset_db_call_counter()
+
+    first = client.get("/filters/options")
+    assert first.status_code == 200
+    body = first.json()
+    assert len(body["actors"]) <= FILTER_OPTIONS_LIMIT
+    assert len(body["actors"]) >= 1
+
+    first_call_count = sum(filter_options_service._db_call_counter.values())
+    assert first_call_count > 0  # actually queried the DB
+
+    second = client.get("/filters/options")
+    assert second.status_code == 200
+    second_call_count = sum(filter_options_service._db_call_counter.values())
+    assert second_call_count == first_call_count, (
+        "second /filters/options call within TTL should be served from cache without hitting the DB"
+    )
+
+    # Mutating the cache TTL or clearing makes the next call hit the DB again.
+    clear_filter_options_cache()
+    third = client.get("/filters/options")
+    assert third.status_code == 200
+    third_call_count = sum(filter_options_service._db_call_counter.values())
+    assert third_call_count > second_call_count
 
 
 def test_events_debug_mode_reports_filter_counts_and_distribution(client):
@@ -338,6 +410,58 @@ def test_pagination_works(client):
     assert first["offset"] == 0
     assert second["offset"] == 2
     assert first["items"][0]["id"] != second["items"][0]["id"]
+
+
+def test_keyset_pagination_first_page_returns_next_cursor(client):
+    """When the first page is full, the response carries a non-null next_cursor."""
+    response = client.get("/events", params={"mode": "audit_trail", "limit": 2})
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["items"]) == 2
+    assert body["next_cursor"], "expected non-null next_cursor on a full page"
+
+
+def test_keyset_pagination_walks_pages_without_overlap(client):
+    """Walking pages via next_cursor returns disjoint results that cover the entire set."""
+    seen: list[int] = []
+    cursor: str | None = None
+    page_size = 3
+    for _ in range(20):  # safety cap
+        params = {"mode": "audit_trail", "limit": page_size}
+        if cursor:
+            params["cursor"] = cursor
+        response = client.get("/events", params=params)
+        assert response.status_code == 200
+        body = response.json()
+        page_ids = [item["id"] for item in body["items"]]
+        # No overlap between consecutive pages.
+        assert not (set(page_ids) & set(seen)), f"overlap detected: {page_ids} vs {seen}"
+        seen.extend(page_ids)
+        cursor = body["next_cursor"]
+        if cursor is None:
+            break
+
+    # We should have iterated through every audit_trail event exactly once.
+    full = client.get("/events", params={"mode": "audit_trail", "limit": 500}).json()
+    expected_ids = [item["id"] for item in full["items"]]
+    assert sorted(seen) == sorted(expected_ids)
+
+
+def test_keyset_pagination_last_page_returns_null_cursor(client):
+    """The final partial page must carry next_cursor = null."""
+    full = client.get("/events", params={"mode": "audit_trail", "limit": 500}).json()
+    total = len(full["items"])
+    assert total >= 1
+    # Use a page_size larger than the total set so the response is the last page.
+    response = client.get("/events", params={"mode": "audit_trail", "limit": total + 5})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["next_cursor"] is None
+
+
+def test_keyset_pagination_rejects_malformed_cursor(client):
+    response = client.get("/events", params={"mode": "audit_trail", "cursor": "not-a-real-cursor"})
+    assert response.status_code == 400
 
 
 def test_pagination_rejects_limit_above_max(client):
@@ -797,10 +921,85 @@ def test_pipeline_ready_reports_degraded_when_forwarder_unavailable(client):
     assert body["components"]["forwarder"] == "degraded"
 
 
+def test_pipeline_ready_uses_cached_forwarder_health_when_upstream_is_slow(client, monkeypatch):
+    """Readiness probe must return fast even when the upstream forwarder is slow.
+
+    We seed the cache with a healthy snapshot, then patch httpx.get to sleep
+    2 seconds. Because the cache is hit before any HTTP call is made, the
+    request should still return well under 100 ms.
+    """
+    import time as _time
+
+    from backend.app.services import system_service
+
+    # Pre-warm the cache with a healthy snapshot so the route never reaches
+    # the (mocked-slow) httpx path.
+    system_service._forwarder_health_cache.prime(
+        {
+            "consumer_state": "connected",
+            "last_successful_poll": "2026-05-07T00:00:00Z",
+            "retry_count": 0,
+            "consecutive_error_count": 0,
+            "last_error": None,
+            "consumer_lag": 0,
+            "records_consumed_total": 100,
+            "db_writer_enabled": True,
+            "db_writer_state": "connected",
+            "db_write_success_total": 100,
+            "db_write_error_total": 0,
+            "db_write_batch_size": 50,
+            "db_last_successful_write": "2026-05-07T00:00:00Z",
+            "db_last_error": None,
+            "db_last_cleanup_at": None,
+            "db_last_cleanup_deleted_count": 0,
+        }
+    )
+
+    def slow_get(*args, **kwargs):  # pragma: no cover - safety net assertion
+        _time.sleep(2)
+        raise AssertionError("httpx.get should not be called when cache is warm")
+
+    monkeypatch.setattr("backend.app.services.system_service.httpx.get", slow_get)
+
+    started = _time.perf_counter()
+    response = client.get("/pipeline/ready")
+    elapsed_ms = (_time.perf_counter() - started) * 1000
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ready"
+    assert elapsed_ms < 100, f"readiness probe took {elapsed_ms:.1f}ms, expected <100ms"
+
+
 def test_live_reports_process_alive(client):
     response = client.get("/live")
     assert response.status_code == 200
     assert response.json() == {"status": "alive"}
+
+
+def test_rate_limit_triggers_on_events_and_exempts_live(client):
+    """/events list is capped at 20/minute per IP; /live must never be limited."""
+    from backend.app.core.limiter import limiter
+
+    limiter.reset()
+    limiter.enabled = True
+    try:
+        # Burn through the per-IP /events budget.
+        statuses = []
+        for _ in range(25):
+            statuses.append(client.get("/events", params={"limit": 1}).status_code)
+
+        # Within the first 20 we should see only 200s; after 20 we should get 429s.
+        ok = sum(1 for status in statuses if status == 200)
+        too_many = sum(1 for status in statuses if status == 429)
+        assert ok <= 20, f"unexpected 200 count {ok} (statuses={statuses})"
+        assert too_many >= 1, f"expected at least one 429, got statuses={statuses}"
+
+        # /live is exempt — even after exhausting the events bucket it returns 200.
+        for _ in range(5):
+            assert client.get("/live").status_code == 200
+    finally:
+        limiter.enabled = False
+        limiter.reset()
 
 
 def test_system_status_includes_db_health_for_overridden_database(client):
@@ -848,6 +1047,52 @@ def test_retention_cleanup_dry_run_and_delete(client):
     assert dry_run["deleted_count"] >= 1
     assert deleted["dry_run"] is False
     assert deleted["deleted_count"] == dry_run["deleted_count"]
+
+
+def test_retention_cleanup_removes_triage_rows(client):
+    """Retention cleanup must not leave orphan rows in audit_event_triage."""
+    db_override = next(iter(client.app.dependency_overrides.values()))
+    session_gen = db_override()
+    db = next(session_gen)
+    try:
+        from backend.app.services.triage_service import upsert_triage
+
+        old_event = create_event(
+            db,
+            {
+                "id": "old-with-triage",
+                "timestamp": (datetime.now(timezone.utc) - timedelta(days=10)).isoformat(),
+                "actor": "retention-triage",
+                "methodName": "io.confluent.kafka.server/CreateTopics",
+                "resourceName": "crn://confluent.cloud/topic=old-with-triage",
+            },
+        )
+        # Capture the fingerprint up front because the ORM instance becomes
+        # detached/expired after the cleanup deletes the row.
+        old_fingerprint = old_event.event_fingerprint
+        upsert_triage(db, old_fingerprint, "approved", actor="tester", note="approved-old")
+
+        triage_count_before = db.query(AuditEventTriage).filter(
+            AuditEventTriage.event_fingerprint == old_fingerprint
+        ).count()
+        assert triage_count_before == 1
+
+        result = cleanup_retention(db, retention_days=1, dry_run=False)
+        assert result["deleted_count"] >= 1
+
+        # Both the event and its triage row must be gone.
+        from backend.app.db.models import AuditEvent
+
+        remaining_events = db.query(AuditEvent).filter(
+            AuditEvent.event_fingerprint == old_fingerprint
+        ).count()
+        remaining_triage = db.query(AuditEventTriage).filter(
+            AuditEventTriage.event_fingerprint == old_fingerprint
+        ).count()
+        assert remaining_events == 0
+        assert remaining_triage == 0, "audit_event_triage row was orphaned by retention cleanup"
+    finally:
+        session_gen.close()
 
 
 def test_admin_retention_cleanup_allows_dev_mode(client, monkeypatch):

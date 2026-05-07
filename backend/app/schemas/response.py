@@ -20,6 +20,7 @@ class EventListResponse(BaseModel):
     signal_filter_applied: bool = False
     hide_noise_applied: bool = False
     result_limit_reached: bool = False
+    next_cursor: str | None = None
     debug: dict[str, Any] | None = None
 
 

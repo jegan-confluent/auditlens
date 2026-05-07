@@ -1,7 +1,7 @@
 from collections.abc import Generator
 from pathlib import Path
 
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -28,10 +28,57 @@ def _ensure_sqlite_parent(database_url: str) -> None:
 
 
 def build_engine(database_url: str | None = None) -> Engine:
+    """Build the SQLAlchemy engine for the configured database URL.
+
+    The engine is tuned per dialect:
+
+    * **Postgres**: an explicit pool (size 5, overflow 10, recycle 30 min) and
+      ``statement_timeout=30s`` so a single slow query cannot hold a connection
+      indefinitely or exhaust the pool.
+    * **SQLite**: ``check_same_thread=False`` for FastAPI's threaded session
+      handling, plus a ``foreign_keys=ON`` PRAGMA so the
+      ``audit_event_triage`` -> ``audit_events`` cascade is honoured in demo /
+      test mode.
+    """
     url = normalize_database_url(database_url or get_settings().database_url)
     _ensure_sqlite_parent(url)
-    connect_args = {"check_same_thread": False} if url.startswith("sqlite") else {}
-    return create_engine(url, future=True, pool_pre_ping=True, connect_args=connect_args)
+
+    if url.startswith("sqlite"):
+        # SQLite (demo + tests). Pool tuning is not meaningful here; SQLAlchemy
+        # uses StaticPool/NullPool semantics depending on the URL.
+        connect_args = {"check_same_thread": False}
+        engine = create_engine(url, future=True, pool_pre_ping=True, connect_args=connect_args)
+
+        @event.listens_for(engine, "connect")
+        def _enable_sqlite_foreign_keys(dbapi_connection, connection_record):  # noqa: D401
+            cursor = dbapi_connection.cursor()
+            try:
+                cursor.execute("PRAGMA foreign_keys=ON")
+            finally:
+                cursor.close()
+
+        return engine
+
+    # Postgres production path. Pool sizing and statement_timeout are tuned for
+    # a single API replica handling typical dashboard traffic; bump pool_size /
+    # max_overflow when running multiple replicas behind the ALB.
+    pg_connect_args: dict = {}
+    if url.startswith("postgresql"):
+        # 30s statement timeout — protects the pool from one slow query blocking
+        # all other requests. Tune via the PG server if a longer query is
+        # legitimately needed for an admin operation.
+        pg_connect_args["options"] = "-c statement_timeout=30000"
+
+    return create_engine(
+        url,
+        future=True,
+        pool_pre_ping=True,
+        pool_size=5,            # baseline concurrent connections
+        max_overflow=10,        # burst capacity above pool_size
+        pool_timeout=30,        # seconds to wait for a free connection before raising
+        pool_recycle=1800,      # recycle connections every 30 min to dodge idle TCP RST
+        connect_args=pg_connect_args,
+    )
 
 
 engine = build_engine()
@@ -48,6 +95,14 @@ def init_db(db_engine: Engine | None = None) -> None:
 
 
 def _ensure_audit_event_columns(target: Engine) -> None:
+    """SQLite-friendly additive column patch.
+
+    Postgres deployments should manage schema via Alembic
+    (``cd backend && alembic upgrade head``). This function still runs for
+    SQLite demo databases that pre-date an additive column. The Alembic
+    revision ``0002_ensure_decision_columns`` applies the same patch on
+    Postgres.
+    """
     inspector = inspect(target)
     if "audit_events" not in inspector.get_table_names():
         return

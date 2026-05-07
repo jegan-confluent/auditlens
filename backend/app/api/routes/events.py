@@ -11,6 +11,11 @@ from backend.app.services.event_service import get_event, list_deletions, list_e
 from backend.app.services.triage_service import upsert_triage
 from src.product.auth import AuthConfig, Authenticator, Role
 
+# /events list + detail are the most expensive routes; cap them tighter than
+# the global default. The limiter instance is shared across routes via
+# ``backend.app.core.limiter``.
+from backend.app.core.limiter import limiter
+
 router = APIRouter(tags=["events"])
 
 
@@ -44,7 +49,9 @@ class TriageUpdate(BaseModel):
 
 
 @router.get("/events", response_model=EventListResponse)
+@limiter.limit("20/minute")
 def events(
+    request: Request,
     time_window: str | None = Query(default=None, pattern=r"^[1-9][0-9]*[mh]$"),
     mode: str = Query(default="decision"),
     resource_type: str | None = None,
@@ -59,6 +66,7 @@ def events(
     debug: bool = False,
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
+    cursor: str | None = Query(default=None, description="Opaque keyset cursor; pass back the next_cursor from the previous response"),
     db: Session = Depends(get_db),
 ) -> EventListResponse:
     try:
@@ -78,6 +86,7 @@ def events(
             debug=debug,
             limit=limit,
             offset=offset,
+            cursor=cursor,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -90,11 +99,13 @@ def events(
         signal_filter_applied=result_set.signal_filter_applied,
         hide_noise_applied=result_set.hide_noise_applied,
         result_limit_reached=result_set.result_limit_reached,
+        next_cursor=result_set.next_cursor,
         debug=result_set.debug,
     )
 
 
 @router.get("/events/{event_id}", response_model=AuditEventDetailOut)
+@limiter.limit("20/minute")
 def event_detail(event_id: int, request: Request, db: Session = Depends(get_db)):
     event = get_event(db, event_id)
     if event is None:

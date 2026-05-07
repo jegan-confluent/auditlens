@@ -1,7 +1,7 @@
 import json
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, Index, Integer, String, Text, UniqueConstraint, select
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, object_session
 
 from src.product.actor_enrichment import enrich_actor
@@ -446,7 +446,16 @@ class AuditEventTriage(Base):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    event_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    # FK to audit_events.event_fingerprint with ON DELETE CASCADE so retention
+    # cleanup automatically removes triage rows when their parent event is
+    # purged. On Postgres the FK is enforced by the database; on SQLite the FK
+    # is honoured when foreign_keys PRAGMA is on, with an application-level
+    # cleanup safety net inside event_service.cleanup_retention.
+    event_fingerprint: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("audit_events.event_fingerprint", ondelete="CASCADE", name="fk_audit_event_triage_event_fingerprint"),
+        nullable=False,
+    )
     triage_status: Mapped[str] = mapped_column(String(32), default="open", nullable=False)
     triage_actor: Mapped[str | None] = mapped_column(String(255), nullable=True)
     triage_note: Mapped[str | None] = mapped_column(Text, nullable=True)

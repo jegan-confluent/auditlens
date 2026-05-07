@@ -1,3 +1,5 @@
+import base64
+import binascii
 import json
 import logging
 import re
@@ -5,12 +7,12 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import delete, func, or_, select, text
+from sqlalchemy import and_, delete, func, or_, select, text
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session, defer, load_only
 
-from backend.app.db.models import AuditEvent
+from backend.app.db.models import AuditEvent, AuditEventTriage
 from backend.app.services.filter_service import event_fingerprint, normalize_event, parse_event_timestamp
 from backend.app.services.resource_service import upsert_resource_catalog
 from backend.app.services.triage_service import attach_triage_snapshots, get_triage_snapshot
@@ -106,7 +108,39 @@ class EventListResult:
     signal_filter_applied: bool = False
     hide_noise_applied: bool = False
     result_limit_reached: bool = False
+    next_cursor: str | None = None
     debug: dict[str, Any] | None = None
+
+
+def _encode_cursor(timestamp: datetime, event_id: int) -> str:
+    """Encode the (timestamp, id) keyset cursor as a URL-safe base64 string.
+
+    The cursor is a stable opaque token; clients should not rely on its
+    structure. We base64-encode a tiny JSON document so the same cursor
+    survives round-trips through URL query strings.
+    """
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    payload = json.dumps({"ts": timestamp.isoformat(), "id": int(event_id)}, sort_keys=True).encode("utf-8")
+    return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+
+def _decode_cursor(cursor: str) -> tuple[datetime, int]:
+    if not cursor:
+        raise ValueError("cursor must not be empty")
+    try:
+        # Re-pad — urlsafe_b64encode strips padding above for cleaner URLs.
+        padding = "=" * (-len(cursor) % 4)
+        decoded = base64.urlsafe_b64decode(cursor + padding)
+        payload = json.loads(decoded)
+        ts_value = payload["ts"]
+        id_value = int(payload["id"])
+        ts = datetime.fromisoformat(ts_value.replace("Z", "+00:00"))
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+    except (binascii.Error, ValueError, KeyError, TypeError) as exc:
+        raise ValueError("cursor is not a valid keyset cursor") from exc
+    return ts, id_value
 
 
 def parse_time_window(value: str | None) -> datetime | None:
@@ -322,6 +356,7 @@ def list_events_result(
     hide_noise: bool = False,
     impact_type: str | None = None,
     change_type: str | None = None,
+    cursor: str | None = None,
     debug: bool = False,
     **filters: Any,
 ) -> EventListResult:
@@ -345,15 +380,44 @@ def list_events_result(
     estimated_total = _estimate_unfiltered_total(db) if not active_filters else None
     pre_filter_total = int(estimated_total if estimated_total is not None else db.scalar(count_query) or 0)
     total = pre_filter_total
+
+    cursor_pair: tuple[datetime, int] | None = None
+    if cursor:
+        cursor_pair = _decode_cursor(cursor)
+
     if not derived_filter_applied:
-        items = db.scalars(item_query.order_by(AuditEvent.timestamp.desc(), AuditEvent.id.desc()).limit(limit).offset(offset)).all()
+        keyset_query = item_query
+        if cursor_pair is not None:
+            ts, last_id = cursor_pair
+            # (timestamp, id) < (cursor_ts, cursor_id) — strictly older row in
+            # newest-first ordering. We cannot rely on row tuple comparison on
+            # SQLite, so spell it out as ts<cursor_ts OR (ts=cursor_ts AND id<cursor_id).
+            keyset_query = keyset_query.where(
+                or_(
+                    AuditEvent.timestamp < ts,
+                    and_(AuditEvent.timestamp == ts, AuditEvent.id < last_id),
+                )
+            )
+            # Cursor mode is mutually exclusive with offset — using both is a
+            # client bug, but we honour cursor and ignore offset.
+            offset_for_query = 0
+        else:
+            offset_for_query = offset
+        items = db.scalars(
+            keyset_query.order_by(AuditEvent.timestamp.desc(), AuditEvent.id.desc()).limit(limit).offset(offset_for_query)
+        ).all()
         attach_triage_snapshots(db, items)
+        next_cursor = None
+        if items and len(items) == limit:
+            tail = items[-1]
+            next_cursor = _encode_cursor(tail.timestamp, tail.id)
         return EventListResult(
             items=list(items),
             total=total,
             scanned_events=len(items),
             signal_filter_applied=False,
             hide_noise_applied=False,
+            next_cursor=next_cursor,
             debug=_debug_info(db, filters, mode, pre_filter_total, len(items), len(items), False) if debug else None,
         )
 
@@ -373,6 +437,9 @@ def list_events_result(
     page = collected[offset : offset + limit]
     attach_triage_snapshots(db, page)
     result_limit_reached = scanned >= SIGNAL_FILTER_MAX_SCAN and len(collected) >= offset + limit
+    # Derived filtering keeps offset semantics — keyset cursors are emitted
+    # only on the SQL-only path because the derived prefilter loop scans a
+    # bounded window in Python and the next-page boundary is offset-shaped.
     return EventListResult(
         items=page,
         total=len(collected),
@@ -380,6 +447,7 @@ def list_events_result(
         signal_filter_applied=bool(signal_types),
         hide_noise_applied=hide_noise,
         result_limit_reached=result_limit_reached,
+        next_cursor=None,
         debug=_debug_info(db, filters, mode, pre_filter_total, scanned, len(collected), True) if debug else None,
     )
 
@@ -430,7 +498,25 @@ def cleanup_retention(db: Session, retention_days: int, *, dry_run: bool = False
     count_query = select(func.count(AuditEvent.id)).where(AuditEvent.timestamp < cutoff)
     deleted_count = int(db.scalar(count_query) or 0)
     if not dry_run and deleted_count:
-        db.execute(delete(AuditEvent).where(AuditEvent.timestamp < cutoff))
+        # Belt-and-braces: explicitly clear triage rows first so legacy SQLite
+        # installs (whose audit_event_triage table was created before the
+        # ON DELETE CASCADE FK landed) do not leak orphans. On a fresh DB or on
+        # Postgres the FK cascade would handle this automatically — running
+        # the DELETE again is a cheap no-op there.
+        fingerprints = list(
+            db.scalars(select(AuditEvent.event_fingerprint).where(AuditEvent.timestamp < cutoff)).all()
+        )
+        if fingerprints:
+            db.execute(
+                delete(AuditEventTriage)
+                .where(AuditEventTriage.event_fingerprint.in_(fingerprints))
+                .execution_options(synchronize_session=False)
+            )
+        db.execute(
+            delete(AuditEvent)
+            .where(AuditEvent.timestamp < cutoff)
+            .execution_options(synchronize_session=False)
+        )
         db.commit()
     logger.info(
         "retention cleanup complete dry_run=%s retention_days=%s cutoff=%s deleted_count=%s",

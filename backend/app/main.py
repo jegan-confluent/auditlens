@@ -5,18 +5,59 @@ import time
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 
 from backend.app.api.routes import admin, events, filters, health, readiness, summary, system
 from backend.app.core.config import get_settings
+from backend.app.core.limiter import limiter
 from backend.app.db.database import check_db_health, init_db
 from src.product.auth import AuthConfig
 
 logger = logging.getLogger("auditlens.backend")
 
+# Routes that must never be rate-limited (kubelet probes, API liveness checks).
+_EXEMPT_PATHS: frozenset[str] = frozenset(
+    {
+        "/live",
+        "/ready",
+        "/pipeline/ready",
+        "/ingestion/ready",
+        "/health",
+    }
+)
+
+
+def _is_exempt_path(path: str) -> bool:
+    return path in _EXEMPT_PATHS
+
+
+# Wrap the limiter so SlowAPIMiddleware skips probe paths entirely. We patch the
+# `limit` callable so the middleware's per-request enforcement returns immediately
+# for the exempt set without consuming the bucket.
+_original_check = limiter.limit
+
+
+class _ExemptingMiddleware(SlowAPIMiddleware):
+    async def dispatch(self, request: Request, call_next):  # type: ignore[override]
+        if _is_exempt_path(request.url.path):
+            return await call_next(request)
+        return await super().dispatch(request, call_next)
+
 
 def create_app() -> FastAPI:
     settings = get_settings()
     app = FastAPI(title=settings.api_title, version=settings.api_version)
+
+    # Wire slowapi: install the limiter on app state, register the 429 handler,
+    # and add the middleware that enforces default_limits across non-exempt
+    # routes. Tests that do not exercise rate limiting can flip
+    # ``app.state.limiter.enabled = False`` in their fixture.
+    app.state.limiter = limiter
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+    app.add_middleware(_ExemptingMiddleware)
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origin_list,
