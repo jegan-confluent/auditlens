@@ -47,6 +47,12 @@ const drawerSource = fs.readFileSync(new URL("../components/EventDetailDrawer.ts
 if (!drawerSource.includes("<details className=\"raw-payload\">")) {
   throw new Error("Raw payload must remain collapsed behind details");
 }
+if (!drawerSource.includes("Unknown principal")) {
+  throw new Error("Drawer must use Unknown principal as the final fallback label");
+}
+if (!drawerSource.includes("Actor Source") || !drawerSource.includes("confidence")) {
+  throw new Error("Drawer must expose actor source and confidence");
+}
 for (const text of ["Resource Type", "Environment", "Region"]) {
   if (!drawerSource.includes(text)) {
     throw new Error(`Drawer missing context field: ${text}`);
@@ -63,6 +69,9 @@ if (!tableSource.includes("event.resource_name && event.resource_name !==")) {
 if (!tableSource.includes("actor_display_name") || !tableSource.includes("actor_raw_id")) {
   throw new Error("Table must show enriched actor display with raw ID fallback");
 }
+if (!tableSource.includes("Unknown principal")) {
+  throw new Error("Table must use Unknown principal as the final fallback label");
+}
 if (!tableSource.includes("No source IP / context:") || !tableSource.includes("No source IP in audit event")) {
   throw new Error("Source/IP column must clearly label missing IP fallback");
 }
@@ -77,6 +86,9 @@ if (!apiSource.includes("/triage") || !apiSource.includes("updateEventTriage")) 
 
 if (tableSource.includes("Unknown source") || drawerSource.includes("Unknown source")) {
   throw new Error("UI must not use misleading Unknown source label");
+}
+if (tableSource.includes("Unknown user") || drawerSource.includes("Unknown user")) {
+  throw new Error("UI must not surface Unknown user when a raw principal exists");
 }
 
 const decisionSource = fs.readFileSync(new URL("../components/DecisionBanner.tsx", import.meta.url), "utf8");

@@ -1,5 +1,7 @@
 import type { AuditEvent } from "../lib/types";
 
+const UNKNOWN_PRINCIPAL_LABELS = new Set(["unknown actor", "unknown user", "unknown service account", "unknown principal"]);
+
 function statusClass(event: AuditEvent) {
   if (["approved", "resolved", "false_positive"].includes(event.triage_status)) return "success";
   if (["acknowledged", "investigating"].includes(event.triage_status)) return "denied";
@@ -28,14 +30,21 @@ function displayResource(event: AuditEvent) {
 }
 
 function displayActor(event: AuditEvent) {
-  return event.actor_display_name || event.subject || event.actor || "Unknown actor";
+  const display = (event.actor_display_name || event.subject || event.actor || "").trim();
+  const raw = (event.actor_raw_id || event.subject || event.actor || "").trim();
+  if (display && !UNKNOWN_PRINCIPAL_LABELS.has(display.toLowerCase())) return display;
+  if (event.actor_email && event.actor_email !== display) return event.actor_email;
+  if (raw) return raw;
+  return "Unknown principal";
 }
 
 function actorSecondary(event: AuditEvent) {
   const raw = event.actor_raw_id || event.subject || event.actor || "";
   const email = event.actor_email || "";
-  if (email && raw && email !== raw) return `${email} • ${raw}`;
-  return raw && raw !== displayActor(event) ? raw : "";
+  const primary = displayActor(event);
+  if (email && raw && email !== raw && primary !== email && primary !== raw) return `${email} • ${raw}`;
+  if (email && primary !== email) return email;
+  return raw && raw !== primary ? raw : "";
 }
 
 function displaySourceIp(event: AuditEvent) {

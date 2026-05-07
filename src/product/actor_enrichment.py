@@ -2,23 +2,31 @@ import json
 import os
 import re
 import time
-import base64
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
-from urllib.error import URLError
-from urllib.request import Request, urlopen
+
+from src.identity.enricher import IdentityEnricher as ConfluentIdentityEnricher
 
 ACTOR_TYPES = {"user", "service_account", "api_key", "unknown"}
 ACTOR_SOURCES = {"manual", "confluent_api", "metrics", "audit_event", "fallback"}
 CONFIDENCE_LEVELS = {"high", "medium", "low"}
+UNKNOWN_DISPLAY_LABELS = {"unknown actor", "unknown user", "unknown service account", "unknown principal"}
+PRINCIPAL_PREFIXES = ("user:", "u-", "sa-", "api-key-", "apikey", "pool-", "org-", "lkc-", "env-")
 _CACHE: dict[tuple[str, str, str], tuple[float, dict[str, str | None]]] = {}
 
 
 def _as_text(value: Any) -> str:
     return "" if value is None else str(value).strip()
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return max(1, int(os.getenv(name, str(default)) or default))
+    except ValueError:
+        return default
 
 
 def actor_raw_id(value: str) -> str:
@@ -47,6 +55,9 @@ class EnrichmentConfig:
     sources: tuple[str, ...]
     cache_ttl_seconds: int
     mapping_file: str
+    metrics_enabled: bool
+    metrics_source: str
+    metrics_cache_ttl_seconds: int
     confluent_api_configured: bool
     confluent_api_key: str | None = None
     confluent_api_secret: str | None = None
@@ -59,14 +70,16 @@ class EnrichmentConfig:
             for source in os.getenv("IAM_ENRICHMENT_SOURCE", "manual,confluent_api,metrics").split(",")
             if source.strip()
         )
-        ttl = int(os.getenv("IAM_ENRICHMENT_CACHE_TTL_SECONDS", "3600") or "3600")
         api_key = os.getenv("CONFLUENT_CLOUD_API_KEY") or os.getenv("CONFLUENT_API_KEY")
         api_secret = os.getenv("CONFLUENT_CLOUD_API_SECRET") or os.getenv("CONFLUENT_API_SECRET")
         return cls(
             enabled=os.getenv("IAM_ENRICHMENT_ENABLED", "false").lower() == "true",
             sources=sources or ("manual",),
-            cache_ttl_seconds=max(1, ttl),
+            cache_ttl_seconds=_env_int("IAM_ENRICHMENT_CACHE_TTL_SECONDS", 3600),
             mapping_file=os.getenv("IAM_MAPPING_FILE", "data/iam_mapping.json"),
+            metrics_enabled=os.getenv("METRICS_ENRICHMENT_ENABLED", "false").lower() == "true",
+            metrics_source=os.getenv("METRICS_ENRICHMENT_SOURCE", "correlation").strip() or "correlation",
+            metrics_cache_ttl_seconds=_env_int("METRICS_ENRICHMENT_CACHE_TTL_SECONDS", 3600),
             confluent_api_configured=bool(api_key and api_secret),
             confluent_api_key=api_key,
             confluent_api_secret=api_secret,
@@ -74,7 +87,7 @@ class EnrichmentConfig:
         )
 
 
-def _normalize_identity(raw_id: str, value: Any, *, source: str) -> dict[str, str]:
+def _normalize_identity(raw_id: str, value: Any, *, source: str, default_confidence: str = "high") -> dict[str, str]:
     if isinstance(value, str):
         value = {"display_name": value}
     if not isinstance(value, dict):
@@ -89,9 +102,11 @@ def _normalize_identity(raw_id: str, value: Any, *, source: str) -> dict[str, st
         "actor_email": _as_text(value.get("email") or value.get("actor_email")),
         "actor_type": actor_type,
         "actor_source": source,
-        "actor_confidence": _as_text(value.get("actor_confidence") or value.get("confidence") or "high"),
+        "actor_confidence": _as_text(value.get("actor_confidence") or value.get("confidence") or default_confidence),
     }
     if output["actor_confidence"] not in CONFIDENCE_LEVELS:
+        output["actor_confidence"] = "medium"
+    if source == "metrics" and output["actor_confidence"] == "high":
         output["actor_confidence"] = "medium"
     return {key: val for key, val in output.items() if val}
 
@@ -130,76 +145,135 @@ def _identity_map() -> dict[str, dict[str, str]]:
 
 def _metrics_identity_map() -> dict[str, dict[str, str]]:
     raw = os.getenv("IAM_METRICS_IDENTITY_MAP_JSON", "").strip()
+    if not raw:
+        raw = os.getenv("METRICS_CORRELATION_MAP_JSON", "").strip()
     return _parse_identity_map(raw, source="metrics") if raw else {}
 
 
-def _lookup_confluent_principal(raw: str, config: EnrichmentConfig) -> dict[str, str] | None:
+@lru_cache(maxsize=1)
+def _confluent_identity_enricher() -> ConfluentIdentityEnricher | None:
+    config = EnrichmentConfig.from_env()
     if not config.enabled or not config.confluent_api_configured:
         return None
-    if not raw or not config.confluent_api_key or not config.confluent_api_secret:
+    if not config.confluent_api_key or not config.confluent_api_secret:
         return None
-    if raw.startswith("sa-"):
-        paths = (f"/iam/v2/service-accounts/{raw}",)
-    elif raw.startswith("u-"):
-        paths = (f"/iam/v2/users/{raw}",)
+    return ConfluentIdentityEnricher(
+        api_key=config.confluent_api_key,
+        api_secret=config.confluent_api_secret,
+        cache_ttl=config.cache_ttl_seconds,
+    )
+
+
+def _looks_like_raw_principal(value: str) -> bool:
+    text = actor_raw_id(value).strip().lower()
+    if not text or text in UNKNOWN_DISPLAY_LABELS:
+        return False
+    if "@" in text:
+        return False
+    return text.startswith(PRINCIPAL_PREFIXES)
+
+
+def _audit_event_identity(raw: str, subject_type: str = "", display_candidate: str = "") -> dict[str, str | None] | None:
+    candidate = _as_text(display_candidate).strip()
+    if not candidate or candidate.lower() in UNKNOWN_DISPLAY_LABELS:
+        return None
+    if _looks_like_raw_principal(candidate):
+        return None
+    if subject_type in ACTOR_TYPES and subject_type != "unknown":
+        actor_type = subject_type
+    elif "@" in candidate or " " in candidate:
+        actor_type = "user"
     else:
+        actor_type = infer_actor_type(raw or candidate, subject_type)
+    return {
+        "actor_id": raw or None,
+        "actor_display_name": candidate,
+        "actor_email": candidate if "@" in candidate else None,
+        "actor_type": actor_type,
+        "actor_source": "audit_event",
+        "actor_confidence": "medium",
+    }
+
+
+def _lookup_confluent_principal(raw: str, config: EnrichmentConfig) -> dict[str, str] | None:
+    if not raw or not config.enabled or not config.confluent_api_configured:
         return None
-    token = base64.b64encode(f"{config.confluent_api_key}:{config.confluent_api_secret}".encode("utf-8")).decode("ascii")
-    headers = {"Authorization": f"Basic {token}", "Content-Type": "application/json"}
-    for path in paths:
-        request = Request(f"{config.confluent_api_base_url}{path}", headers=headers)
-        try:
-            with urlopen(request, timeout=2.0) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-        except (OSError, URLError, TimeoutError, json.JSONDecodeError):
-            continue
-        if not isinstance(payload, dict):
-            continue
-        display_name = _as_text(payload.get("display_name") or payload.get("displayName") or payload.get("full_name") or payload.get("name"))
-        email = _as_text(payload.get("email"))
-        actor_type = "service_account" if raw.startswith("sa-") else "user"
-        return {
-            "actor_id": raw,
-            "actor_display_name": display_name or email or raw,
-            "actor_email": email,
-            "actor_type": actor_type,
-            "actor_source": "confluent_api",
-            "actor_confidence": "high" if display_name or email else "medium",
-        }
-    return None
+    if "confluent_api" not in config.sources:
+        return None
+    if not raw.startswith(("sa-", "u-")):
+        return None
+    enricher = _confluent_identity_enricher()
+    if enricher is None:
+        return None
+    try:
+        info = enricher.resolve(raw)
+    except Exception:
+        return None
+    display_name = _as_text(getattr(info, "display_name", ""))
+    email = _as_text(getattr(info, "email", ""))
+    identity_id = _as_text(getattr(info, "id", raw)) or raw
+    if not display_name or (display_name == identity_id and not email):
+        return None
+    actor_type = "service_account" if raw.startswith("sa-") else "user"
+    return {
+        "actor_id": raw,
+        "actor_display_name": display_name or email or raw,
+        "actor_email": email,
+        "actor_type": actor_type,
+        "actor_source": "confluent_api",
+        "actor_confidence": "high" if display_name != identity_id or email else "medium",
+    }
 
 
 def _lookup_metrics_identity(raw: str, config: EnrichmentConfig) -> dict[str, str] | None:
-    if "metrics" not in config.sources:
+    if not raw or not config.metrics_enabled:
         return None
-    return _metrics_identity_map().get(raw)
+    if "metrics" not in config.sources and config.metrics_source not in {"correlation", "labels", "manual"}:
+        return None
+    identity = _metrics_identity_map().get(raw)
+    if identity is None:
+        return None
+    if identity.get("actor_source") != "metrics":
+        identity = {**identity, "actor_source": "metrics"}
+    confidence = _as_text(identity.get("actor_confidence") or identity.get("confidence") or "low")
+    if confidence not in {"low", "medium"}:
+        confidence = "medium" if identity.get("actor_display_name") or identity.get("actor_email") else "low"
+    return {
+        **identity,
+        "actor_id": identity.get("actor_id") or raw,
+        "actor_display_name": identity.get("actor_display_name") or identity.get("display_name") or identity.get("name") or identity.get("email") or raw,
+        "actor_email": identity.get("actor_email") or identity.get("email") or None,
+        "actor_type": identity.get("actor_type") or identity.get("type") or infer_actor_type(raw),
+        "actor_source": "metrics",
+        "actor_confidence": confidence if confidence in {"low", "medium"} else "low",
+    }
+
+
+def _normalize_raw_actor(actor: str, subject: str = "") -> str:
+    raw = actor_raw_id(subject or actor)
+    if raw.lower() in UNKNOWN_DISPLAY_LABELS:
+        raw = actor_raw_id(actor)
+    if raw.lower() in UNKNOWN_DISPLAY_LABELS:
+        return ""
+    return raw
 
 
 def _fallback_identity(raw: str, subject_type: str = "") -> dict[str, str | None]:
     actor_type = infer_actor_type(raw, subject_type)
-    if actor_type == "service_account":
-        display_name = "Unknown service account"
-    elif actor_type == "user":
-        display_name = "Unknown user"
-    elif actor_type == "api_key":
-        display_name = "Unknown API key"
-    else:
-        display_name = raw or "Unknown actor"
+    display_name = raw or "Unknown principal"
     return {
         "actor_id": raw or None,
         "actor_display_name": display_name,
         "actor_email": None,
         "actor_type": actor_type,
-        "actor_source": "fallback" if raw else "audit_event",
+        "actor_source": "fallback",
         "actor_confidence": "low" if raw else "medium",
     }
 
 
 def enrich_actor(actor: str, subject: str = "", subject_type: str = "") -> dict[str, str | None]:
     config = EnrichmentConfig.from_env()
-    raw = actor_raw_id(subject or actor)
-    if not raw or raw.lower() == "unknown actor":
-        raw = actor_raw_id(actor)
+    raw = _normalize_raw_actor(actor, subject)
     cache_key = (raw, subject, subject_type)
     now = time.monotonic()
     cached = _CACHE.get(cache_key)
@@ -213,6 +287,8 @@ def enrich_actor(actor: str, subject: str = "", subject_type: str = "") -> dict[
         if identity is None and "confluent_api" in config.sources:
             identity = _lookup_confluent_principal(raw, config)
         if identity is None:
+            identity = _audit_event_identity(raw, subject_type, actor or subject)
+        if identity is None:
             identity = _lookup_metrics_identity(raw, config)
     except Exception:
         identity = None
@@ -220,7 +296,7 @@ def enrich_actor(actor: str, subject: str = "", subject_type: str = "") -> dict[
     if identity:
         result: dict[str, str | None] = {
             "actor_id": identity.get("actor_id") or raw or None,
-            "actor_display_name": identity.get("actor_display_name") or identity.get("display_name") or raw or "Unknown actor",
+            "actor_display_name": identity.get("actor_display_name") or identity.get("display_name") or raw or "Unknown principal",
             "actor_email": identity.get("actor_email") or identity.get("email") or None,
             "actor_type": identity.get("actor_type") or identity.get("type") or infer_actor_type(raw, subject_type),
             "actor_raw_id": raw or None,
@@ -242,6 +318,7 @@ def enrich_actor(actor: str, subject: str = "", subject_type: str = "") -> dict[
 def clear_actor_enrichment_cache() -> None:
     _CACHE.clear()
     _identity_map.cache_clear()
+    _confluent_identity_enricher.cache_clear()
 
 
 def looks_like_ip(value: str | None) -> bool:

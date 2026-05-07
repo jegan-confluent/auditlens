@@ -197,22 +197,84 @@ def test_actor_enrichment_uses_mapping_when_available(monkeypatch):
     assert result["actor_confidence"] == "high"
 
 
-def test_actor_enrichment_unknown_user_and_service_account_fallbacks(monkeypatch):
-    monkeypatch.delenv("ACTOR_IDENTITY_MAP_JSON", raising=False)
+def test_actor_enrichment_manual_mapping_service_account(monkeypatch):
+    monkeypatch.setenv(
+        "ACTOR_IDENTITY_MAP_JSON",
+        '{"sa-domx5qd":{"display_name":"Production Pipeline","email":"pipeline@example.com","type":"service_account"}}',
+    )
+    _identity_map.cache_clear()
     clear_actor_enrichment_cache()
+    result = enrich_actor("sa-domx5qd")
+    assert result["actor_display_name"] == "Production Pipeline"
+    assert result["actor_email"] == "pipeline@example.com"
+    assert result["actor_type"] == "service_account"
+    assert result["actor_raw_id"] == "sa-domx5qd"
+    assert result["actor_source"] == "manual"
+    assert result["actor_confidence"] == "high"
+
+
+def test_actor_enrichment_audit_event_and_raw_fallbacks(monkeypatch):
+    monkeypatch.delenv("ACTOR_IDENTITY_MAP_JSON", raising=False)
+    monkeypatch.setenv("IAM_ENRICHMENT_ENABLED", "false")
+    monkeypatch.setenv("METRICS_ENRICHMENT_ENABLED", "false")
+    clear_actor_enrichment_cache()
+    display = enrich_actor("Jane Admin")
     user = enrich_actor("u-unknown")
     service_account = enrich_actor("sa-domx5qd")
-    assert user["actor_display_name"] == "Unknown user"
+    empty = enrich_actor("")
+    assert display["actor_display_name"] == "Jane Admin"
+    assert display["actor_source"] == "audit_event"
+    assert display["actor_confidence"] == "medium"
+    assert user["actor_display_name"] == "u-unknown"
     assert user["actor_raw_id"] == "u-unknown"
-    assert service_account["actor_display_name"] == "Unknown service account"
+    assert user["actor_source"] == "fallback"
+    assert service_account["actor_display_name"] == "sa-domx5qd"
     assert service_account["actor_raw_id"] == "sa-domx5qd"
     assert service_account["actor_source"] == "fallback"
+    assert empty["actor_display_name"] == "Unknown principal"
+    assert empty["actor_source"] == "fallback"
+
+
+def test_actor_enrichment_uses_confluent_iam_provider(monkeypatch):
+    class FakeInfo:
+        def __init__(self, identity_id, display_name, email=""):
+            self.id = identity_id
+            self.display_name = display_name
+            self.email = email
+
+    class FakeEnricher:
+        def resolve(self, principal):
+            if principal == "u-iam123":
+                return FakeInfo("u-iam123", "Jane Admin", "jane@example.com")
+            if principal == "sa-iam123":
+                return FakeInfo("sa-iam123", "Payments Pipeline")
+            return FakeInfo(principal, principal)
+
+    monkeypatch.setenv("IAM_ENRICHMENT_ENABLED", "true")
+    monkeypatch.setenv("IAM_ENRICHMENT_SOURCE", "confluent_api")
+    monkeypatch.setenv("METRICS_ENRICHMENT_ENABLED", "false")
+    monkeypatch.setenv("CONFLUENT_CLOUD_API_KEY", "configured-key")
+    monkeypatch.setenv("CONFLUENT_CLOUD_API_SECRET", "configured-secret")
+    clear_actor_enrichment_cache()
+    monkeypatch.setattr(actor_enrichment, "_confluent_identity_enricher", lambda: FakeEnricher())
+
+    user = enrich_actor("u-iam123")
+    service_account = enrich_actor("sa-iam123")
+
+    assert user["actor_display_name"] == "Jane Admin"
+    assert user["actor_email"] == "jane@example.com"
+    assert user["actor_source"] == "confluent_api"
+    assert user["actor_confidence"] == "high"
+    assert service_account["actor_display_name"] == "Payments Pipeline"
+    assert service_account["actor_source"] == "confluent_api"
+    assert service_account["actor_confidence"] == "high"
 
 
 def test_actor_enrichment_cache_avoids_repeated_extension_lookup(monkeypatch):
     clear_actor_enrichment_cache()
     monkeypatch.setenv("IAM_ENRICHMENT_ENABLED", "true")
     monkeypatch.setenv("IAM_ENRICHMENT_SOURCE", "confluent_api")
+    monkeypatch.setenv("METRICS_ENRICHMENT_ENABLED", "false")
     monkeypatch.setenv("CONFLUENT_API_KEY", "configured-key")
     monkeypatch.setenv("CONFLUENT_API_SECRET", "configured-secret")
     calls = {"count": 0}
@@ -239,6 +301,7 @@ def test_actor_enrichment_failure_falls_back_without_logging_secrets(monkeypatch
     clear_actor_enrichment_cache()
     monkeypatch.setenv("IAM_ENRICHMENT_ENABLED", "true")
     monkeypatch.setenv("IAM_ENRICHMENT_SOURCE", "confluent_api")
+    monkeypatch.setenv("METRICS_ENRICHMENT_ENABLED", "false")
     monkeypatch.setenv("CONFLUENT_API_KEY", "sensitive-key")
     monkeypatch.setenv("CONFLUENT_API_SECRET", "sensitive-secret")
 
@@ -248,9 +311,23 @@ def test_actor_enrichment_failure_falls_back_without_logging_secrets(monkeypatch
     monkeypatch.setattr(actor_enrichment, "_lookup_confluent_principal", failing_lookup)
     with caplog.at_level(logging.INFO):
         result = enrich_actor("u-fallback")
-    assert result["actor_display_name"] == "Unknown user"
+    assert result["actor_display_name"] == "u-fallback"
+    assert result["actor_source"] == "fallback"
     assert "sensitive-key" not in caplog.text
     assert "sensitive-secret" not in caplog.text
+
+
+def test_metrics_correlation_is_not_high_confidence_by_default(monkeypatch):
+    clear_actor_enrichment_cache()
+    monkeypatch.setenv("IAM_ENRICHMENT_ENABLED", "false")
+    monkeypatch.setenv("METRICS_ENRICHMENT_ENABLED", "true")
+    monkeypatch.setenv("METRICS_ENRICHMENT_SOURCE", "correlation")
+    monkeypatch.setenv("IAM_METRICS_IDENTITY_MAP_JSON", '{"u-metrics123":{"display_name":"Metrics User"}}')
+    result = enrich_actor("u-metrics123")
+    assert result["actor_display_name"] == "Metrics User"
+    assert result["actor_source"] == "metrics"
+    assert result["actor_confidence"] in {"low", "medium"}
+    assert result["actor_confidence"] != "high"
 
 
 def test_source_ip_prefers_client_ip_over_cluster_id():
