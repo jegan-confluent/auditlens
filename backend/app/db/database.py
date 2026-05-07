@@ -164,14 +164,36 @@ def check_db_health_session(db: Session) -> dict:
 
 
 def _health_from_connection(conn) -> dict:
+    """Liveness + lightweight stats for ``/ready`` and ``/system/status``.
+
+    On Postgres at production volume ``SELECT COUNT(*)`` on ``audit_events``
+    is a full sequential scan (tens of seconds at 10M rows). The same trick
+    we use for ``/events`` totals — ``pg_class.reltuples`` — gives a planner
+    estimate in microseconds. SQLite keeps the exact count.
+    """
     conn.execute(text("select 1"))
-    event_count = conn.execute(text("select count(*) from audit_events")).scalar_one()
+    dialect = getattr(conn, "dialect", None) or getattr(conn.engine, "dialect", None)
+    dialect_name = getattr(dialect, "name", "") if dialect is not None else ""
+
+    if dialect_name == "postgresql":
+        # Planner estimate; refreshed by autovacuum/ANALYZE. Acceptable for a
+        # health probe, far cheaper than a full count.
+        estimate = conn.execute(
+            text(
+                "select greatest(reltuples, 0)::bigint "
+                "from pg_class where oid = 'audit_events'::regclass"
+            )
+        ).scalar_one_or_none()
+        event_count = int(estimate or 0)
+    else:
+        event_count = int(conn.execute(text("select count(*) from audit_events")).scalar_one() or 0)
+
     oldest = conn.execute(text("select min(timestamp) from audit_events")).scalar_one()
     newest = conn.execute(text("select max(timestamp) from audit_events")).scalar_one()
     return {
         "can_connect": True,
         "can_query": True,
-        "event_count": int(event_count or 0),
+        "event_count": event_count,
         "oldest_event": str(oldest) if oldest is not None else None,
         "newest_event": str(newest) if newest is not None else None,
     }
