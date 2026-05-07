@@ -32,3 +32,14 @@ def test_sqlite_demo_script_explicitly_uses_sqlite():
 def test_db_status_script_exists():
     source = (REPO_ROOT / "scripts" / "db_status.sh").read_text(encoding="utf-8")
     assert "backend.app.services.db_status_service" in source
+
+
+def test_resource_backfill_script_exposes_safe_flags():
+    source = (REPO_ROOT / "scripts" / "backfill_resource_intelligence.py").read_text(encoding="utf-8")
+    assert "--dry-run" in source
+    assert "--limit" in source
+    assert "--hours" in source
+    assert "--since" in source
+    assert "--until" in source
+    assert "--batch-size" in source
+    assert "--force" in source

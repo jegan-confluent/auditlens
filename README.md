@@ -147,6 +147,30 @@ scripts/db_status.sh
 
 Do not run millions of rows in one shot. Keep the time window short and advance in batches until the coverage stabilizes.
 
+## Backfill Resource Intelligence Safely
+
+Use historical resource backfill when older rows were written before the resource snapshot and catalog fields were available. New installs do not need a historical resource backfill.
+
+Start with a dry run:
+
+```bash
+PYTHONPATH=. ./.venv/bin/python scripts/backfill_resource_intelligence.py --dry-run --hours 24 --limit 10000
+```
+
+For a limited batch against a recent window:
+
+```bash
+PYTHONPATH=. ./.venv/bin/python scripts/backfill_resource_intelligence.py --hours 24 --batch-size 250 --limit 1000
+```
+
+For a force recompute when you intentionally want to refresh existing non-placeholder resource fields:
+
+```bash
+PYTHONPATH=. ./.venv/bin/python scripts/backfill_resource_intelligence.py --force --since 2026-05-05T00:00:00Z --until 2026-05-06T00:00:00Z --limit 5000
+```
+
+The script updates missing resource snapshot columns and reconciles `resource_catalog` in the same pass. It commits per batch, skips malformed rows, and logs counts only. Keep the time window short and use `--limit`/`--batch-size` to avoid large one-shot updates.
+
 Open:
 
 - UI: `http://127.0.0.1:3000/events`

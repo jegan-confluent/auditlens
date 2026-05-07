@@ -6,11 +6,13 @@ from time import sleep
 from typing import Any
 
 from sqlalchemy import or_, select, tuple_
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only, sessionmaker
 
 from backend.app.db.models import AuditEvent
-from src.product.source_enrichment import extract_source_info
 from src.product.event_normalization import normalize_event
+from src.product.resource_intelligence import extract_resource_context
+from src.product.source_enrichment import extract_source_info
+from backend.app.services.resource_service import upsert_resource_catalog
 
 logger = logging.getLogger("auditlens.backend.backfill")
 
@@ -72,6 +74,24 @@ FIELD_ATTRS = {
     "decision_label": "_decision_label",
     "recommended_action": "_recommended_action",
 }
+
+RESOURCE_FIELD_ATTRS = {
+    "resource_type": "resource_type",
+    "resource_name": "resource_name",
+    "resource_display": "resource_display",
+    "cluster_id": "cluster_id",
+    "cluster_name": "_cluster_name",
+    "environment_id": "environment_id",
+    "environment_name": "_environment_name",
+    "parent_resource": "_parent_resource",
+    "resource_scope": "_resource_scope",
+    "resource_display_name": "_resource_display_name",
+    "resource_criticality": "_resource_criticality",
+    "blast_radius_hint": "_blast_radius_hint",
+    "production_hint": "_production_hint",
+}
+RESOURCE_FIELDS = tuple(RESOURCE_FIELD_ATTRS.keys())
+RESOURCE_PLACEHOLDERS = {None, "", "-", "Unknown", "unknown", "Not provided by audit event"}
 
 
 def _load_json(value: Any) -> dict[str, Any]:
@@ -174,6 +194,107 @@ def _selected_fields(source_fields: bool, decision_fields: bool) -> tuple[str, .
     if decision_fields:
         fields.extend(DECISION_FIELDS)
     return tuple(fields)
+
+
+def _is_placeholder(value: Any) -> bool:
+    return value in RESOURCE_PLACEHOLDERS
+
+
+def _resource_missing_condition(column: Any):
+    return or_(
+        column.is_(None),
+        column == "",
+        column == "-",
+        column == "Unknown",
+        column == "unknown",
+        column == "Not provided by audit event",
+    )
+
+
+def _resource_batch_query(
+    *,
+    since: datetime | None,
+    until: datetime | None,
+    force: bool,
+    cursor: tuple[datetime, int] | None,
+    batch_size: int,
+):
+    columns = [
+        AuditEvent.id,
+        AuditEvent.timestamp,
+        AuditEvent.summary,
+        AuditEvent.raw_payload_json,
+        AuditEvent.resource_type,
+        AuditEvent.resource_name,
+        AuditEvent.resource_display,
+        AuditEvent.cluster_id,
+        AuditEvent.environment_id,
+        AuditEvent.flink_region,
+        AuditEvent.network_id,
+        AuditEvent._cluster_name,
+        AuditEvent._environment_name,
+        AuditEvent._parent_resource,
+        AuditEvent._resource_scope,
+        AuditEvent._resource_display_name,
+        AuditEvent._resource_criticality,
+        AuditEvent._blast_radius_hint,
+        AuditEvent._production_hint,
+    ]
+    query = select(AuditEvent).options(load_only(*columns))
+    if since is not None:
+        query = query.where(AuditEvent.timestamp >= since)
+    if until is not None:
+        query = query.where(AuditEvent.timestamp <= until)
+    if not force:
+        query = query.where(
+            or_(
+                _resource_missing_condition(AuditEvent.resource_display),
+                _resource_missing_condition(AuditEvent.resource_type),
+                _resource_missing_condition(AuditEvent.resource_name),
+                _resource_missing_condition(AuditEvent._cluster_name),
+                _resource_missing_condition(AuditEvent._environment_name),
+                _resource_missing_condition(AuditEvent._parent_resource),
+                _resource_missing_condition(AuditEvent._resource_scope),
+                _resource_missing_condition(AuditEvent._resource_display_name),
+                _resource_missing_condition(AuditEvent._resource_criticality),
+                _resource_missing_condition(AuditEvent._blast_radius_hint),
+                _resource_missing_condition(AuditEvent._production_hint),
+            )
+        )
+    if cursor is not None:
+        query = query.where(tuple_(AuditEvent.timestamp, AuditEvent.id) > cursor)
+    return query.order_by(AuditEvent.timestamp.asc(), AuditEvent.id.asc()).limit(batch_size)
+
+
+def _resource_updates(event: AuditEvent, payload: dict[str, Any], *, force: bool) -> tuple[dict[str, Any], dict[str, Any]]:
+    context = extract_resource_context(payload, event)
+    event_fields = context.to_event_fields()
+    event_fields["resource_display"] = context.resource_display_name
+    updates: dict[str, Any] = {}
+    for field, attr in RESOURCE_FIELD_ATTRS.items():
+        current = getattr(event, attr, None)
+        next_value = event_fields.get(field)
+        if _is_placeholder(next_value):
+            continue
+        if force or _is_placeholder(current):
+            updates[field] = next_value
+    return updates, {
+        "resource_id": context.resource_id,
+        "resource_type": context.resource_type,
+        "resource_name": context.resource_name,
+        "resource_display_name": context.resource_display_name,
+        "cluster_id": context.cluster_id,
+        "cluster_name": context.cluster_name,
+        "environment_id": context.environment_id,
+        "environment_name": context.environment_name,
+        "parent_resource": context.parent_resource,
+        "resource_scope": context.resource_scope,
+        "resource_criticality": context.resource_criticality,
+        "blast_radius_hint": context.blast_radius_hint,
+        "production_hint": context.production_hint,
+        "resource_source": context.resource_source,
+        "payload": payload,
+    }
 
 
 def _field_value_map(
@@ -456,3 +577,126 @@ def backfill_source_fields_from_raw_payload(
         decision_fields,
     )
     return result.as_dict()
+
+
+def backfill_resource_intelligence_from_raw_payload(
+    db: Session,
+    *,
+    dry_run: bool = True,
+    limit: int = 1000,
+    force: bool = False,
+    hours: int | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    batch_size: int = 250,
+) -> dict[str, Any]:
+    limit = max(1, min(int(limit), 100000))
+    batch_size = max(1, min(int(batch_size), limit))
+    effective_since = _effective_since(hours=hours, since=_normalize_dt(since))
+    effective_until = _normalize_dt(until)
+    processed = 0
+    scanned = 0
+    updated = 0
+    skipped = 0
+    invalid_json = 0
+    catalog_upserted = 0
+    catalog_failed = 0
+    cursor: tuple[datetime, int] | None = None
+    catalog_session_factory = sessionmaker(bind=db.get_bind(), autoflush=False, autocommit=False, future=True)
+    while processed < limit:
+        current_limit = min(batch_size, limit - processed)
+        batch = db.scalars(
+            _resource_batch_query(
+                since=effective_since,
+                until=effective_until,
+                force=force,
+                cursor=cursor,
+                batch_size=current_limit,
+            )
+        ).all()
+        if not batch:
+            break
+        changed_events: list[tuple[AuditEvent, dict[str, Any], dict[str, Any]]] = []
+        catalog_payloads: list[tuple[dict[str, Any], datetime]] = []
+        for event in batch:
+            processed += 1
+            scanned += 1
+            try:
+                payload = json.loads(event.raw_payload_json) if event.raw_payload_json else {}
+            except json.JSONDecodeError:
+                invalid_json += 1
+                cursor = (event.timestamp, event.id)
+                continue
+            try:
+                updates, catalog_entry = _resource_updates(event, payload, force=force)
+            except Exception as exc:  # pragma: no cover - best-effort enrichment
+                logger.debug("resource intelligence recompute failed for event_id=%s: %s", event.id, exc)
+                skipped += 1
+                cursor = (event.timestamp, event.id)
+                continue
+            if updates:
+                changed_events.append((event, updates, catalog_entry))
+            else:
+                skipped += 1
+                catalog_payloads.append((catalog_entry, event.timestamp))
+            cursor = (event.timestamp, event.id)
+        updated += len(changed_events)
+        if not dry_run and changed_events:
+            for event, updates, _ in changed_events:
+                for field, value in updates.items():
+                    setattr(event, RESOURCE_FIELD_ATTRS[field], value)
+            db.commit()
+        elif not dry_run:
+            db.rollback()
+        if dry_run:
+            catalog_upserted += len(changed_events) + len(catalog_payloads)
+        else:
+            with catalog_session_factory() as catalog_db:
+                for event, updates, catalog_entry in changed_events:
+                    try:
+                        upsert_resource_catalog(
+                            catalog_db,
+                            event=event,
+                            payload=catalog_entry["payload"],
+                            seen_at=event.timestamp,
+                            raise_on_error=True,
+                        )
+                        catalog_upserted += 1
+                    except Exception as exc:  # pragma: no cover - best-effort enrichment
+                        catalog_failed += 1
+                        logger.debug("resource catalog backfill failed for event_id=%s: %s", event.id, exc)
+                for payload_entry, seen_at in catalog_payloads:
+                    try:
+                        upsert_resource_catalog(
+                            catalog_db,
+                            payload=payload_entry["payload"],
+                            seen_at=seen_at,
+                            raise_on_error=True,
+                        )
+                        catalog_upserted += 1
+                    except Exception as exc:  # pragma: no cover - best-effort enrichment
+                        catalog_failed += 1
+                        logger.debug("resource catalog backfill failed: %s", exc)
+        if len(batch) < current_limit:
+            break
+    logger.info(
+        "resource intelligence backfill complete scanned=%s updated=%s skipped=%s catalog_upserted=%s catalog_failed=%s invalid_json=%s dry_run=%s force=%s",
+        scanned,
+        updated,
+        skipped,
+        catalog_upserted,
+        catalog_failed,
+        invalid_json,
+        dry_run,
+        force,
+    )
+    return {
+        "scanned": scanned,
+        "updated": updated,
+        "skipped": skipped,
+        "catalog_upserted": catalog_upserted,
+        "catalog_failed": catalog_failed,
+        "invalid_json": invalid_json,
+        "dry_run": dry_run,
+        "force": force,
+    }

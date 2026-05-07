@@ -48,6 +48,7 @@ def upsert_resource_catalog(
     payload: dict[str, Any] | None = None,
     *,
     seen_at: datetime | None = None,
+    raise_on_error: bool = False,
 ) -> ResourceCatalog | None:
     source_payload = _load_payload(event, payload)
     if not source_payload and event is None:
@@ -85,4 +86,6 @@ def upsert_resource_catalog(
     except Exception as exc:  # pragma: no cover - best-effort enrichment
         db.rollback()
         logger.debug("resource catalog upsert failed: %s", exc)
+        if raise_on_error:
+            raise
         return None
