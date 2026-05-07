@@ -427,6 +427,7 @@ class Metrics:
         self.db_last_error = None
         self.db_last_cleanup_at = None
         self.db_last_cleanup_deleted_count = 0
+        self.produce_retry_exhausted_total = 0
         self.delivery_attempts_by_topic = {}
         self.delivery_success_by_topic = {}
         self.delivery_failures_by_topic = {}
@@ -623,6 +624,10 @@ class Metrics:
         with self.lock:
             self.delivery_failures_by_topic[topic] = self.delivery_failures_by_topic.get(topic, 0) + 1
 
+    def record_produce_retry_exhausted(self):
+        with self.lock:
+            self.produce_retry_exhausted_total += 1
+
     def record_signal(self, signal_type: str):
         with self.lock:
             self.signal_counts[signal_type] = self.signal_counts.get(signal_type, 0) + 1
@@ -734,6 +739,7 @@ class Metrics:
                 "db_last_error": self.db_last_error,
                 "db_last_cleanup_at": self.db_last_cleanup_at,
                 "db_last_cleanup_deleted_count": self.db_last_cleanup_deleted_count,
+                "produce_retry_exhausted_total": self.produce_retry_exhausted_total,
                 "delivery_attempts_by_topic": dict(self.delivery_attempts_by_topic),
                 "delivery_success_by_topic": dict(self.delivery_success_by_topic),
                 "delivery_failures_by_topic": dict(self.delivery_failures_by_topic),
@@ -1514,6 +1520,9 @@ class MetricsHandler(BaseHTTPRequestHandler):
             prometheus_metrics.append("# HELP audit_forwarder_db_last_cleanup_deleted_count Rows deleted by the last DB retention cleanup")
             prometheus_metrics.append("# TYPE audit_forwarder_db_last_cleanup_deleted_count gauge")
             prometheus_metrics.append(f"audit_forwarder_db_last_cleanup_deleted_count {metrics_data.get('db_last_cleanup_deleted_count', 0)}")
+            prometheus_metrics.append("# HELP audit_forwarder_produce_retry_exhausted_total Produce retries exhausted before success")
+            prometheus_metrics.append("# TYPE audit_forwarder_produce_retry_exhausted_total counter")
+            prometheus_metrics.append(f"audit_forwarder_produce_retry_exhausted_total {metrics_data.get('produce_retry_exhausted_total', 0)}")
 
             prometheus_metrics.append("# HELP audit_forwarder_delivery_attempts_total Delivery attempts by topic")
             prometheus_metrics.append("# TYPE audit_forwarder_delivery_attempts_total counter")
@@ -2110,17 +2119,43 @@ def send_to_dlq(producer, raw_value: bytes, error_msg: str, source_topic: str, p
         logger.warning("Failed to send to DLQ: %s", e)
 
 # ──────────── safe produce helper ────────────
+MAX_PRODUCE_RETRIES = 10
+
+
 def safe_produce(p: Producer, topic: str, key: bytes, value: bytes):
-    while True:
+    retries = 0
+    event_fingerprint = key.decode("utf-8", errors="replace") if key else None
+    while retries < MAX_PRODUCE_RETRIES:
         try:
             # drive I/O to free up buffer slots
             p.poll(0)
             metrics.record_delivery_attempt(topic)
             p.produce(topic, key=key, value=value, callback=delivery_callback)
-            return
+            return True
         except BufferError:
             # buffer is full—wait briefly for background I/O
+            retries += 1
             p.poll(0.1)
+    metrics.record_produce_retry_exhausted()
+    logger.critical(
+        "Producer buffer exhausted after %d retries; routing to DLQ if enabled topic=%s event_fingerprint=%s",
+        MAX_PRODUCE_RETRIES,
+        topic,
+        event_fingerprint or "unknown",
+    )
+    if ENABLE_DLQ and topic != DLQ_TOPIC:
+        try:
+            send_to_dlq(
+                p,
+                value,
+                f"producer buffer exhausted after {MAX_PRODUCE_RETRIES} retries",
+                topic,
+                -1,
+                -1,
+            )
+        except Exception as exc:
+            logger.warning("Failed to route exhausted produce to DLQ: %s", exc)
+    return False
 
 # ──────────── partition assign callback ────────────
 def on_assign(consumer, partitions):
@@ -2290,6 +2325,8 @@ def flush_db_writer_buffer(payloads: list[dict], backoff: RuntimeBackoff, log_st
     batch_size = max(1, DB_WRITE_BATCH_SIZE)
     while payloads and (force or len(payloads) >= batch_size):
         chunk = payloads[:batch_size]
+        # Keep the in-memory buffer intact until the DB write returns success.
+        # If the write fails, the same chunk must remain retryable on the next pass.
         if not flush_db_writer_batch(chunk, backoff, log_state):
             return False
         del payloads[:len(chunk)]

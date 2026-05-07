@@ -1,5 +1,7 @@
+from typing import Any
+
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from pydantic import BaseModel
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from backend.app.db.database import get_db
@@ -7,8 +9,32 @@ from backend.app.schemas.event import AuditEventDetailOut
 from backend.app.schemas.response import EventListResponse
 from backend.app.services.event_service import get_event, list_deletions, list_events_result, list_failures
 from backend.app.services.triage_service import upsert_triage
+from src.product.auth import AuthConfig, Authenticator, Role
 
 router = APIRouter(tags=["events"])
+
+
+class _RedactedEventView:
+    __slots__ = ("_event",)
+
+    def __init__(self, event: Any):
+        self._event = event
+
+    def __getattr__(self, item: str):
+        if item == "raw_payload_json":
+            return None
+        return getattr(self._event, item)
+
+
+def _can_view_raw_payload(headers) -> bool:
+    try:
+        auth_config = AuthConfig.from_env()
+    except Exception:
+        return False
+    if not auth_config.enabled:
+        return False
+    result = Authenticator(auth_config).authenticate(headers)
+    return bool(result.ok and result.actor and result.actor.role == Role.ADMIN)
 
 
 class TriageUpdate(BaseModel):
@@ -69,10 +95,12 @@ def events(
 
 
 @router.get("/events/{event_id}", response_model=AuditEventDetailOut)
-def event_detail(event_id: int, db: Session = Depends(get_db)):
+def event_detail(event_id: int, request: Request, db: Session = Depends(get_db)):
     event = get_event(db, event_id)
     if event is None:
         raise HTTPException(status_code=404, detail="Event not found")
+    if not _can_view_raw_payload(request.headers):
+        return _RedactedEventView(event)
     return event
 
 

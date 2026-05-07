@@ -76,7 +76,7 @@ class AuditEventDetailOut(AuditEventListOut):
     client_id: str | None = None
     connection_id: str | None = None
     request_id: str | None = None
-    raw_payload_json: str
+    raw_payload_json: str | None = None
 
 
 AuditEventOut = AuditEventListOut

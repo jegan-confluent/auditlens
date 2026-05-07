@@ -48,6 +48,9 @@ def test_health_returns_ok(client):
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
     assert response.json()["database_mode"] == "sqlite"
+    assert response.headers["X-Content-Type-Options"] == "nosniff"
+    assert response.headers["X-Frame-Options"] == "DENY"
+    assert response.headers["Referrer-Policy"] == "no-referrer"
 
 
 def test_seeded_data_exists(client):
@@ -565,9 +568,25 @@ def test_event_triage_does_not_follow_old_numeric_ids(client, monkeypatch, tmp_p
     assert item["triage_status"] == "open"
 
 
-def test_event_detail_includes_raw_payload_json(client):
+def test_event_detail_redacts_raw_payload_json_for_non_admin(client):
     event_id = client.get("/events", params={"limit": 1}).json()["items"][0]["id"]
     response = client.get(f"/events/{event_id}")
+    assert response.status_code == 200
+    body = response.json()
+    assert "raw_payload_json" in body
+    assert body["raw_payload_json"] is None
+
+
+def test_event_detail_includes_raw_payload_json_for_admin(client, monkeypatch):
+    event_id = client.get("/events", params={"limit": 1}).json()["items"][0]["id"]
+    monkeypatch.setenv("API_AUTH_ENABLED", "true")
+    monkeypatch.setenv(
+        "API_AUTH_TOKENS_JSON",
+        json.dumps([
+            {"token": "admin-token", "actor_id": "admin", "role": "admin"},
+        ]),
+    )
+    response = client.get(f"/events/{event_id}", headers={"Authorization": "Bearer admin-token"})
     assert response.status_code == 200
     body = response.json()
     assert "raw_payload_json" in body

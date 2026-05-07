@@ -654,6 +654,78 @@ def test_exporter_can_export():
     assert result.ok is True
 
 
+def test_authenticator_handles_invalid_token_without_error():
+    actor = _actor(Role.ADMIN)
+    auth = Authenticator(AuthConfig(enabled=True, tokens={"abc": actor}))
+    result = auth.authenticate({"Authorization": "Bearer nope"})
+    assert result.ok is False
+    assert result.status_code == 401
+
+
+def test_authenticator_handles_malformed_token_type_without_error():
+    actor = _actor(Role.ADMIN)
+    auth = Authenticator(AuthConfig(enabled=True, tokens={"abc": actor}))
+    auth._extract_token = lambda headers: 123  # type: ignore[method-assign]
+    result = auth.authenticate({})
+    assert result.ok is False
+    assert result.status_code == 401
+
+
+def test_safe_produce_exhausts_retries_and_records_metric(monkeypatch):
+    attempts = {"count": 0}
+    dlq_calls = []
+
+    class FakeProducer:
+        def poll(self, timeout):
+            return None
+
+        def produce(self, *args, **kwargs):
+            attempts["count"] += 1
+            raise BufferError("producer buffer full")
+
+    monkeypatch.setattr(forwarder, "metrics", forwarder.Metrics())
+    monkeypatch.setattr(forwarder, "ENABLE_DLQ", True)
+    monkeypatch.setattr(forwarder, "DLQ_TOPIC", "audit.dlq.v1")
+    monkeypatch.setattr(forwarder, "send_to_dlq", lambda *args, **kwargs: dlq_calls.append((args, kwargs)))
+
+    result = forwarder.safe_produce(FakeProducer(), "audit.topic", b"evt-1", b"{}")
+
+    assert result is False
+    assert attempts["count"] == forwarder.MAX_PRODUCE_RETRIES
+    assert forwarder.metrics.get_metrics()["produce_retry_exhausted_total"] == 1
+    assert dlq_calls
+
+
+def test_flush_db_writer_buffer_retains_payloads_on_failure(monkeypatch):
+    calls = {"count": 0}
+
+    class FakeWriter:
+        def write_batch(self, payloads):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise RuntimeError("db down")
+            return DbWriteResult(attempted=len(payloads), inserted=len(payloads), elapsed_ms=1.0)
+
+        def cleanup_retention_if_due(self):
+            return None
+
+    writer = FakeWriter()
+    monkeypatch.setattr(forwarder, "ENABLE_DB_WRITER", True)
+    monkeypatch.setattr(forwarder, "initialize_db_writer_if_enabled", lambda: writer)
+    monkeypatch.setattr(forwarder, "_sleep_with_shutdown", lambda delay: None)
+
+    payloads = [{"id": "evt-1"}, {"id": "evt-2"}]
+    backoff = forwarder.RuntimeBackoff(initial=0.1, maximum=0.1, jitter_ratio=0)
+
+    failed = forwarder.flush_db_writer_buffer(payloads, backoff, {}, force=True)
+    assert failed is False
+    assert payloads == [{"id": "evt-1"}, {"id": "evt-2"}]
+
+    succeeded = forwarder.flush_db_writer_buffer(payloads, backoff, {}, force=True)
+    assert succeeded is True
+    assert payloads == []
+
+
 def test_scope_is_enforced(tmp_path):
     store = _store(tmp_path)
     event = {

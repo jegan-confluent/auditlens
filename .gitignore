@@ -5,6 +5,7 @@
 # CRITICAL: Secrets and credentials
 # ============================================================================
 .secrets
+.secret
 .env
 .env.*
 schema-watcher/.env.example
@@ -37,7 +38,12 @@ confluent.properties
 # Backup files that might contain secrets
 *.backup
 *.bak
+**/.backup
+**/*.bak
+**/*.backup
 *.env.backup
+*.secret
+*.secrets
 
 # Python
 # ============================================================================

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hmac
 import os
 from dataclasses import dataclass
 from enum import Enum
@@ -144,7 +145,7 @@ class Authenticator:
         if not token:
             return AuthResult(ok=False, status_code=401, error="missing credentials")
 
-        actor = self.config.tokens.get(token)
+        actor = self._match_token(token)
         if not actor:
             return AuthResult(ok=False, status_code=401, error="invalid credentials")
 
@@ -181,4 +182,19 @@ class Authenticator:
         api_key = headers.get("X-API-Key")
         if api_key:
             return api_key.strip()
+        return None
+
+    def _match_token(self, provided_token: str) -> Optional[AccessToken]:
+        if isinstance(provided_token, bytes):
+            provided_bytes = provided_token
+        elif isinstance(provided_token, str):
+            provided_bytes = provided_token.encode()
+        else:
+            return None
+        for stored_token, actor in self.config.tokens.items():
+            try:
+                if hmac.compare_digest(stored_token.encode(), provided_bytes):
+                    return actor
+            except TypeError:
+                continue
         return None
