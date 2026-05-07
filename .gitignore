@@ -171,3 +171,6 @@ data/
 logs/tokens-*.jsonl
 logs/audit-*.jsonl
 .claude/CLAUDE.local.md
+AUDIT_REPORT.md
+DASHBOARD_GAP_ANALYSIS.md
+docs/PHASE4_PREFLIGHT.md
