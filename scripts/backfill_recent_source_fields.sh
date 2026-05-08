@@ -9,7 +9,18 @@ if [ -z "${DATABASE_URL:-}" ]; then
   exit 1
 fi
 
-PYTHON_BIN="${PYTHON_BIN:-python3}"
+# Prefer a virtualenv interpreter when one is available; fall back to python3
+# only in environments without a venv (containers with deps installed globally).
+PYTHON_BIN="${PYTHON_BIN:-}"
+if [ -z "$PYTHON_BIN" ]; then
+  if [ -n "${VIRTUAL_ENV:-}" ] && [ -x "$VIRTUAL_ENV/bin/python" ]; then
+    PYTHON_BIN="$VIRTUAL_ENV/bin/python"
+  elif [ -x "$ROOT_DIR/.venv/bin/python" ]; then
+    PYTHON_BIN="$ROOT_DIR/.venv/bin/python"
+  else
+    PYTHON_BIN="python3"
+  fi
+fi
 BACKFILL_HOURS="${BACKFILL_HOURS:-4}"
 BACKFILL_LIMIT="${BACKFILL_LIMIT:-10000}"
 BACKFILL_DRY_RUN="${BACKFILL_DRY_RUN:-false}"
