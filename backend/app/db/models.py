@@ -571,3 +571,17 @@ Index(
     postgresql_where=AuditEvent.is_denied.is_(True),
     sqlite_where=AuditEvent.is_denied.is_(True),
 )
+# Phase 4 follow-up: partial indexes scoped to non-empty values for
+# /filters/options (mirrors Alembic 0005_filter_options_partial_indexes).
+Index(
+    "idx_audit_events_resource_type_notnull",
+    AuditEvent.resource_type,
+    postgresql_where=(AuditEvent.resource_type.isnot(None)) & (AuditEvent.resource_type != ""),
+    sqlite_where=(AuditEvent.resource_type.isnot(None)) & (AuditEvent.resource_type != ""),
+)
+Index(
+    "idx_audit_events_actor_notnull",
+    AuditEvent.actor,
+    postgresql_where=(AuditEvent.actor.isnot(None)) & (AuditEvent.actor != ""),
+    sqlite_where=(AuditEvent.actor.isnot(None)) & (AuditEvent.actor != ""),
+)
