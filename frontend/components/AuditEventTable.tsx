@@ -50,32 +50,54 @@ function displayResource(event: AuditEvent) {
 
 type ActorDisplay = { primary: string; secondary: string; isServiceAccount: boolean; unenriched: boolean };
 
+// True only when actor_display_name holds a real human-readable name —
+// distinct from the raw id and not one of the Unknown* placeholders. Some
+// events get persisted with display_name == raw_id when enrichment hasn't
+// run yet (cache cold, missing creds, missing IAM record); we must treat
+// those as unenriched so the cell renders in italic grey rather than
+// pretending the raw id is a name.
+function isEnrichedDisplay(display: string, raw: string): boolean {
+  if (!display) return false;
+  if (display === raw) return false;
+  return !UNKNOWN_PRINCIPAL_LABELS.has(display.toLowerCase());
+}
+
 function displayActor(event: AuditEvent): ActorDisplay {
   const isSA = isServiceAccount(event);
   const display = (event.actor_display_name || event.subject || event.actor || "").trim();
   const raw = (event.actor_raw_id || event.subject || event.actor || "").trim();
   const email = (event.actor_email || "").trim();
+  const enriched = isEnrichedDisplay(display, raw);
 
   if (isSA) {
-    // Treat the SA as enriched only when display is a real human-readable
-    // name (not the raw sa-xxxxx id and not an Unknown* placeholder).
-    const enriched = Boolean(
-      display
-      && !UNKNOWN_PRINCIPAL_LABELS.has(display.toLowerCase())
-      && display !== raw
-    );
     const primary = enriched ? display : (raw || "Unknown service account");
     const secondary = enriched && raw && raw !== primary ? raw : "";
     return { primary, secondary, isServiceAccount: true, unenriched: !enriched };
   }
+  // Human users: email is the most recognisable identifier — promote it.
   if (email) {
-    const secondary = display && display !== email ? display : (raw && raw !== email ? raw : "");
+    const secondary = enriched && display !== email ? display : (raw && raw !== email ? raw : "");
     return { primary: email, secondary, isServiceAccount: false, unenriched: false };
   }
-  if (display && !UNKNOWN_PRINCIPAL_LABELS.has(display.toLowerCase())) {
+  // No email — use the enriched display only when it's actually a name.
+  if (enriched) {
     return { primary: display, secondary: raw && raw !== display ? raw : "", isServiceAccount: false, unenriched: false };
   }
   return { primary: raw || "Unknown principal", secondary: "", isServiceAccount: false, unenriched: true };
+}
+
+// Best label for prose contexts (the plain-English sentence in the table).
+// Prefers the human display name over the email — "Marcia Lima deleted X"
+// reads more naturally than "mlima@confluent.io deleted X". The Who column
+// uses a different priority (email first) because email is the more
+// recognisable identifier when scanning a list of rows.
+function bestSentenceLabel(event: AuditEvent): string {
+  const display = (event.actor_display_name || "").trim();
+  const raw = (event.actor_raw_id || event.subject || event.actor || "").trim();
+  const email = (event.actor_email || "").trim();
+  if (isEnrichedDisplay(display, raw)) return display;
+  if (email) return email;
+  return raw || event.actor || "Unknown actor";
 }
 
 function displaySourceIp(event: AuditEvent) {
@@ -95,33 +117,34 @@ function displaySummary(event: AuditEvent) {
 // from action_category + action. Returns "" for Data / unmapped categories so
 // the caller falls back to event_title (Data activity is dominated by
 // automated reads that don't tell a useful story in the table).
-function plainEnglishSummary(event: AuditEvent, actorPrimary: string, resourceText: string): string {
+function plainEnglishSummary(event: AuditEvent, resourceText: string): string {
   const cat = (event.action_category || "").trim();
   const action = (event.action || event.normalized_action || "").trim();
   const compact = action.replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
   const cleanResource = resourceText && resourceText !== "Unknown" ? resourceText : "";
   const fallbackResource = cleanResource || "a resource";
+  const actorLabel = bestSentenceLabel(event);
 
   let phrase = "";
   if (cat === "Delete") {
-    phrase = `${actorPrimary} deleted ${fallbackResource}`;
+    phrase = `${actorLabel} deleted ${fallbackResource}`;
   } else if (cat === "Create") {
-    phrase = `${actorPrimary} created ${fallbackResource}`;
+    phrase = `${actorLabel} created ${fallbackResource}`;
   } else if (cat === "Modify") {
-    phrase = `${actorPrimary} updated config on ${fallbackResource}`;
+    phrase = `${actorLabel} updated config on ${fallbackResource}`;
   } else if (cat === "Security") {
-    if (compact.includes("revoke")) phrase = `${actorPrimary} revoked access on ${fallbackResource}`;
-    else if (compact.includes("grant") || compact.includes("bindrole")) phrase = `${actorPrimary} granted access on ${fallbackResource}`;
-    else if (compact.includes("createacl")) phrase = `${actorPrimary} created ACL on ${fallbackResource}`;
-    else if (compact.includes("deleteacl")) phrase = `${actorPrimary} deleted ACL on ${fallbackResource}`;
-    else phrase = `${actorPrimary} changed access on ${fallbackResource}`;
+    if (compact.includes("revoke")) phrase = `${actorLabel} revoked access on ${fallbackResource}`;
+    else if (compact.includes("grant") || compact.includes("bindrole")) phrase = `${actorLabel} granted access on ${fallbackResource}`;
+    else if (compact.includes("createacl")) phrase = `${actorLabel} created ACL on ${fallbackResource}`;
+    else if (compact.includes("deleteacl")) phrase = `${actorLabel} deleted ACL on ${fallbackResource}`;
+    else phrase = `${actorLabel} changed access on ${fallbackResource}`;
   } else if (cat === "API Key") {
     const target = cleanResource ? ` for ${cleanResource}` : "";
-    if (compact.includes("delete")) phrase = `${actorPrimary} deleted API key${target}`;
-    else if (compact.includes("create")) phrase = `${actorPrimary} created API key${target}`;
-    else if (compact.includes("rotate")) phrase = `${actorPrimary} rotated API key${target}`;
-    else if (compact.includes("update")) phrase = `${actorPrimary} updated API key${target}`;
-    else phrase = `${actorPrimary} changed API key${target}`;
+    if (compact.includes("delete")) phrase = `${actorLabel} deleted API key${target}`;
+    else if (compact.includes("create")) phrase = `${actorLabel} created API key${target}`;
+    else if (compact.includes("rotate")) phrase = `${actorLabel} rotated API key${target}`;
+    else if (compact.includes("update")) phrase = `${actorLabel} updated API key${target}`;
+    else phrase = `${actorLabel} changed API key${target}`;
   } else {
     return "";
   }
@@ -206,7 +229,7 @@ export default function AuditEventTable({ events, expandedId, expandedDetail, ex
             const reason = decisionReason(event);
             const triaged = event.triage_status && event.triage_status !== "open";
             const resourceText = displayResource(event);
-            const plainEng = plainEnglishSummary(event, actor.primary, resourceText);
+            const plainEng = plainEnglishSummary(event, resourceText);
             const isExpanded = expandedId === event.id;
             return (
               <Fragment key={event.id}>
