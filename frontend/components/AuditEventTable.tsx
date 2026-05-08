@@ -1,3 +1,4 @@
+import { Fragment } from "react";
 import type { AuditEvent } from "../lib/types";
 
 const UNKNOWN_PRINCIPAL_LABELS = new Set(["unknown actor", "unknown user", "unknown service account", "unknown principal"]);
@@ -27,9 +28,6 @@ function impactLabel(event: AuditEvent) {
   return event.decision_label || "Info";
 }
 
-// Promote decision_reason to a visible second line under the badge so the
-// "why" stops being a 12 px grey subline. Falls back to signal_reason if
-// decision_reason is missing.
 function decisionReason(event: AuditEvent): string {
   const reason = (event.decision_reason || event.signal_reason || "").trim();
   if (!reason) return "";
@@ -40,8 +38,6 @@ function decisionReason(event: AuditEvent): string {
 function isServiceAccount(event: AuditEvent): boolean {
   const type = (event.actor_type || event.subject_type || "").toLowerCase();
   if (SERVICE_ACCOUNT_TYPES.has(type)) return true;
-  // Fallback: "sa-" prefix on the raw id is a reliable signal in Confluent
-  // Cloud even when actor_type wasn't enriched.
   const raw = (event.actor_raw_id || event.actor || "").toLowerCase();
   return raw.startsWith("sa-") || raw.startsWith("user:sa-");
 }
@@ -52,28 +48,34 @@ function displayResource(event: AuditEvent) {
   return event.resource_display_short || event.resource_display || event.resource_type || "Unknown";
 }
 
-function displayActor(event: AuditEvent): { primary: string; secondary: string; isServiceAccount: boolean } {
+type ActorDisplay = { primary: string; secondary: string; isServiceAccount: boolean; unenriched: boolean };
+
+function displayActor(event: AuditEvent): ActorDisplay {
   const isSA = isServiceAccount(event);
   const display = (event.actor_display_name || event.subject || event.actor || "").trim();
   const raw = (event.actor_raw_id || event.subject || event.actor || "").trim();
   const email = (event.actor_email || "").trim();
 
-  // Service accounts: friendly display name primary, raw id secondary, SA badge.
   if (isSA) {
-    const primary = display && !UNKNOWN_PRINCIPAL_LABELS.has(display.toLowerCase()) ? display : raw || "Unknown service account";
-    const secondary = raw && raw !== primary ? raw : "";
-    return { primary, secondary, isServiceAccount: true };
+    // Treat the SA as enriched only when display is a real human-readable
+    // name (not the raw sa-xxxxx id and not an Unknown* placeholder).
+    const enriched = Boolean(
+      display
+      && !UNKNOWN_PRINCIPAL_LABELS.has(display.toLowerCase())
+      && display !== raw
+    );
+    const primary = enriched ? display : (raw || "Unknown service account");
+    const secondary = enriched && raw && raw !== primary ? raw : "";
+    return { primary, secondary, isServiceAccount: true, unenriched: !enriched };
   }
-  // Human users: email is the most recognisable identifier — promote it.
   if (email) {
     const secondary = display && display !== email ? display : (raw && raw !== email ? raw : "");
-    return { primary: email, secondary, isServiceAccount: false };
+    return { primary: email, secondary, isServiceAccount: false, unenriched: false };
   }
-  // No email — fall back to display, then raw.
   if (display && !UNKNOWN_PRINCIPAL_LABELS.has(display.toLowerCase())) {
-    return { primary: display, secondary: raw && raw !== display ? raw : "", isServiceAccount: false };
+    return { primary: display, secondary: raw && raw !== display ? raw : "", isServiceAccount: false, unenriched: false };
   }
-  return { primary: raw || "Unknown principal", secondary: "", isServiceAccount: false };
+  return { primary: raw || "Unknown principal", secondary: "", isServiceAccount: false, unenriched: true };
 }
 
 function displaySourceIp(event: AuditEvent) {
@@ -89,7 +91,102 @@ function displaySummary(event: AuditEvent) {
   return raw && primary && raw !== primary ? summary.replace(raw, primary) : summary;
 }
 
-export default function AuditEventTable({ events, onSelect }: { events: AuditEvent[]; onSelect: (event: AuditEvent) => void }) {
+// "[actor] [verb] [resource] on [cluster] in [environment]" sentence built
+// from action_category + action. Returns "" for Data / unmapped categories so
+// the caller falls back to event_title (Data activity is dominated by
+// automated reads that don't tell a useful story in the table).
+function plainEnglishSummary(event: AuditEvent, actorPrimary: string, resourceText: string): string {
+  const cat = (event.action_category || "").trim();
+  const action = (event.action || event.normalized_action || "").trim();
+  const compact = action.replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+  const cleanResource = resourceText && resourceText !== "Unknown" ? resourceText : "";
+  const fallbackResource = cleanResource || "a resource";
+
+  let phrase = "";
+  if (cat === "Delete") {
+    phrase = `${actorPrimary} deleted ${fallbackResource}`;
+  } else if (cat === "Create") {
+    phrase = `${actorPrimary} created ${fallbackResource}`;
+  } else if (cat === "Modify") {
+    phrase = `${actorPrimary} updated config on ${fallbackResource}`;
+  } else if (cat === "Security") {
+    if (compact.includes("revoke")) phrase = `${actorPrimary} revoked access on ${fallbackResource}`;
+    else if (compact.includes("grant") || compact.includes("bindrole")) phrase = `${actorPrimary} granted access on ${fallbackResource}`;
+    else if (compact.includes("createacl")) phrase = `${actorPrimary} created ACL on ${fallbackResource}`;
+    else if (compact.includes("deleteacl")) phrase = `${actorPrimary} deleted ACL on ${fallbackResource}`;
+    else phrase = `${actorPrimary} changed access on ${fallbackResource}`;
+  } else if (cat === "API Key") {
+    const target = cleanResource ? ` for ${cleanResource}` : "";
+    if (compact.includes("delete")) phrase = `${actorPrimary} deleted API key${target}`;
+    else if (compact.includes("create")) phrase = `${actorPrimary} created API key${target}`;
+    else if (compact.includes("rotate")) phrase = `${actorPrimary} rotated API key${target}`;
+    else if (compact.includes("update")) phrase = `${actorPrimary} updated API key${target}`;
+    else phrase = `${actorPrimary} changed API key${target}`;
+  } else {
+    return "";
+  }
+
+  const cluster = (event.cluster_name || "").trim();
+  const env = (event.environment_name || "").trim();
+  if (cluster) phrase += ` on ${cluster}`;
+  if (env) phrase += ` in ${env}`;
+  return phrase;
+}
+
+function ExpandedEventRow({ event, detail, loading, error }: {
+  event: AuditEvent;
+  detail: AuditEvent | null;
+  loading: boolean;
+  error: string | null;
+}) {
+  const data = detail || event;
+  const reason = (data.decision_reason || data.signal_reason || "").trim();
+  const recommended = (data.recommended_action || "").trim();
+  const resourceText = displayResource(data);
+  return (
+    <tr className="event-row-expanded">
+      <td colSpan={6}>
+        <div className="expanded-block">
+          {loading ? <p className="muted">Loading details…</p> : null}
+          {error ? <p className="panel-error">Could not load detail — {error}</p> : null}
+          <div className="expanded-why">
+            <strong>Why this matters:</strong> <span>{reason || data.decision_label || "Audit activity"}</span>
+            {recommended ? <div className="expanded-recommended">→ Recommended: {recommended}</div> : null}
+          </div>
+          <div className="expanded-grid">
+            <div><span className="muted">Resource:</span>{" "}<strong>{resourceText}</strong>{data.resource_type ? <span className="muted"> ({data.resource_type})</span> : null}</div>
+            <div><span className="muted">Cluster:</span>{" "}<strong>{data.cluster_name || data.cluster_id || "—"}</strong>{"  "}<span className="muted">Environment:</span>{" "}<strong>{data.environment_name || data.environment_id || "—"}</strong></div>
+            <div><span className="muted">Source IP:</span>{" "}<strong>{data.source_ip || "—"}</strong>{"  "}<span className="muted">Time:</span>{" "}<strong>{new Date(data.timestamp).toLocaleString()}</strong></div>
+            <div><span className="muted">Triage:</span>{" "}<strong>{data.triage_status || "open"}</strong></div>
+          </div>
+          <details className="expanded-tech">
+            <summary>Technical details ▸</summary>
+            <div className="expanded-grid expanded-grid-tech">
+              <div><span className="muted">Signal type:</span> {data.signal_type || "—"}</div>
+              <div><span className="muted">Risk level:</span> {data.risk_level || "—"}</div>
+              <div><span className="muted">Impact:</span> {data.impact_type || "—"}</div>
+              <div><span className="muted">Resource family:</span> {data.resource_family || "—"}</div>
+              <div><span className="muted">Resource scope:</span> {data.resource_scope || "—"}</div>
+              <div><span className="muted">Actor source:</span> {data.actor_source || "—"} ({data.actor_confidence || "—"})</div>
+              <div><span className="muted">Client ID:</span> {data.client_id || "—"}</div>
+              <div><span className="muted">Request ID:</span> {data.request_id || "—"}</div>
+              <div><span className="muted">Fingerprint:</span> <code>{data.event_fingerprint}</code></div>
+            </div>
+          </details>
+        </div>
+      </td>
+    </tr>
+  );
+}
+
+export default function AuditEventTable({ events, expandedId, expandedDetail, expandedLoading, expandedError, onToggleExpand }: {
+  events: AuditEvent[];
+  expandedId: number | null;
+  expandedDetail: AuditEvent | null;
+  expandedLoading: boolean;
+  expandedError: string | null;
+  onToggleExpand: (event: AuditEvent) => void;
+}) {
   return (
     <div className="panel table-panel">
       <table className="event-table">
@@ -108,28 +205,50 @@ export default function AuditEventTable({ events, onSelect }: { events: AuditEve
             const actor = displayActor(event);
             const reason = decisionReason(event);
             const triaged = event.triage_status && event.triage_status !== "open";
+            const resourceText = displayResource(event);
+            const plainEng = plainEnglishSummary(event, actor.primary, resourceText);
+            const isExpanded = expandedId === event.id;
             return (
-              <tr key={event.id} onClick={() => onSelect(event)} className={`event-row signal-${event.signal_type}`}>
-                <td className="nowrap">{new Date(event.timestamp).toLocaleString()}</td>
-                <td className="decision-cell">
-                  <span className={`status ${statusClass(event)}`}>{impactLabel(event)}</span>
-                  {triaged ? (
-                    <span className="decision-reason">triaged</span>
-                  ) : reason ? (
-                    <span className="decision-reason" title={event.decision_reason || event.signal_reason || ""}>{reason}</span>
-                  ) : null}
-                </td>
-                <td className="identity-cell" title={actor.secondary || actor.primary}>
-                  <strong>
-                    {actor.primary}
-                    {actor.isServiceAccount ? <span className="actor-badge sa" title="Service account">SA</span> : null}
-                  </strong>
-                  {actor.secondary ? <span>{actor.secondary}</span> : null}
-                </td>
-                <td className="summary-cell"><strong>{event.event_title || event.normalized_action}</strong><span>{displaySummary(event)}</span></td>
-                <td className="resource-cell" title={event.resource_scope ? `${displayResource(event)}\n${event.resource_scope}` : displayResource(event)}>{displayResource(event)}</td>
-                <td className="truncate-cell" title={displaySourceIp(event)}>{displaySourceIp(event)}</td>
-              </tr>
+              <Fragment key={event.id}>
+                <tr onClick={() => onToggleExpand(event)} className={`event-row signal-${event.signal_type}${isExpanded ? " expanded" : ""}`}>
+                  <td className="nowrap">{new Date(event.timestamp).toLocaleString()}</td>
+                  <td className="decision-cell">
+                    <span className={`status ${statusClass(event)}`}>{impactLabel(event)}</span>
+                    {triaged ? (
+                      <span className="decision-reason">triaged</span>
+                    ) : reason ? (
+                      <span className="decision-reason" title={event.decision_reason || event.signal_reason || ""}>{reason}</span>
+                    ) : null}
+                  </td>
+                  <td className={`identity-cell${actor.unenriched ? " unenriched" : ""}`} title={actor.secondary || actor.primary}>
+                    <strong>
+                      {actor.primary}
+                      {actor.isServiceAccount ? <span className="actor-badge sa" title="Service account">SA</span> : null}
+                    </strong>
+                    {actor.secondary ? <span>{actor.secondary}</span> : null}
+                  </td>
+                  <td className="summary-cell">
+                    {plainEng ? (
+                      <strong>{plainEng}</strong>
+                    ) : (
+                      <>
+                        <strong>{event.event_title || event.normalized_action}</strong>
+                        <span>{displaySummary(event)}</span>
+                      </>
+                    )}
+                  </td>
+                  <td className="resource-cell" title={event.resource_scope ? `${resourceText}\n${event.resource_scope}` : resourceText}>{resourceText}</td>
+                  <td className="truncate-cell" title={displaySourceIp(event)}>{displaySourceIp(event)}</td>
+                </tr>
+                {isExpanded ? (
+                  <ExpandedEventRow
+                    event={event}
+                    detail={expandedDetail}
+                    loading={expandedLoading}
+                    error={expandedError}
+                  />
+                ) : null}
+              </Fragment>
             );
           })}
         </tbody>

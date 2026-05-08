@@ -56,6 +56,28 @@ const RESULT_TO_QUERY: Record<string, { result?: string; is_denied?: string }> =
   Denied: { is_denied: "true" }
 };
 
+// Human-readable label for a `time_window` filter value (e.g. "12h" → "last
+// 12 hours"). Used by banners that summarise the current scan window so the
+// copy reflects the live filter state instead of a hardcoded duration.
+export function humanTimeWindowLabel(value: string): string {
+  const trimmed = (value || "").trim();
+  if (!trimmed) return "current window";
+  if (trimmed === "1h") return "last hour";
+  if (trimmed.endsWith("h")) {
+    const n = Number(trimmed.slice(0, -1));
+    if (Number.isFinite(n) && n > 0) return `last ${n} hour${n === 1 ? "" : "s"}`;
+  }
+  if (trimmed.endsWith("d")) {
+    const n = Number(trimmed.slice(0, -1));
+    if (Number.isFinite(n) && n > 0) return `last ${n} day${n === 1 ? "" : "s"}`;
+  }
+  if (trimmed.endsWith("m")) {
+    const n = Number(trimmed.slice(0, -1));
+    if (Number.isFinite(n) && n > 0) return `last ${n} minute${n === 1 ? "" : "s"}`;
+  }
+  return `last ${trimmed}`;
+}
+
 // Backend `time_window` only accepts Nm/Nh (regex ^[1-9][0-9]*[mh]$). The UI
 // exposes 7d / 30d for ergonomics; translate to hours before sending.
 function encodeTimeWindow(value: string): string {

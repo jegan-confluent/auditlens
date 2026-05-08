@@ -7,14 +7,14 @@ function titleFor(summary: SummaryResponse) {
   return "No action needed";
 }
 
-function messageFor(summary: SummaryResponse) {
+function messageFor(summary: SummaryResponse, windowLabel: string) {
   if (summary.overall_status === "action_required") {
-    return `${summary.failure_count.toLocaleString()} failures, ${summary.denied_count.toLocaleString()} denied attempts, and ${summary.destructive_count.toLocaleString()} destructive actions were found in the scanned window.`;
+    return `${summary.failure_count.toLocaleString()} failures, ${summary.denied_count.toLocaleString()} denied attempts, and ${summary.destructive_count.toLocaleString()} destructive actions in the ${windowLabel}.`;
   }
   if (summary.overall_status === "review_needed") {
-    return `${summary.configuration_change_count.toLocaleString()} configuration changes and ${summary.access_change_count.toLocaleString()} access changes need review.`;
+    return `${summary.configuration_change_count.toLocaleString()} configuration changes and ${summary.access_change_count.toLocaleString()} access changes in the ${windowLabel} need review.`;
   }
-  return summary.short_digest || "Most activity is routine authentication, authorization, or read-only access. No destructive, failed, or configuration-changing activity was detected in the scanned window.";
+  return summary.short_digest || `Most activity in the ${windowLabel} is routine authentication, authorization, or read-only access. No destructive, failed, or configuration-changing activity was detected.`;
 }
 
 function actionFor(summary: SummaryResponse) {
@@ -36,8 +36,9 @@ function ctaFor(summary: SummaryResponse) {
   return { label: "Show full audit trail", patch };
 }
 
-export default function DecisionBanner({ summary, onApplyDecision }: {
+export default function DecisionBanner({ summary, timeWindowLabel, onApplyDecision }: {
   summary: SummaryResponse;
+  timeWindowLabel: string;
   onApplyDecision?: (patch: Partial<EventFilters>) => void;
 }) {
   const cta = ctaFor(summary);
@@ -46,7 +47,7 @@ export default function DecisionBanner({ summary, onApplyDecision }: {
       <div>
         <div className="eyebrow">Decision</div>
         <h2>{titleFor(summary)}</h2>
-        <p>{messageFor(summary)}</p>
+        <p>{messageFor(summary, timeWindowLabel)}</p>
         {summary.summary_scope === "sampled" ? <span>{summary.sample_warning || `Based on latest ${summary.scanned_events.toLocaleString()} of ${summary.total_events.toLocaleString()} matching events.`}</span> : null}
       </div>
       <div className="decision-action">
