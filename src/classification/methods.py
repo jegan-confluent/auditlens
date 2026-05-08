@@ -177,6 +177,26 @@ _CRITICAL_METHODS_DEFAULT = {
     # Domain & Access Point
     'DeleteDomain',
     'DeleteAccessPoint',
+
+    # RBAC — Confluent emits the *ById variant; pattern-match would catch the
+    # Delete prefix but the explicit set documents intent.
+    'DeleteRoleBindingById',
+    # Promoted from HIGH: revoking all role-resource bindings for a principal
+    # is irreversible and operationally equivalent to a destructive change.
+    'RevokeRoleResourcesForPrincipal',
+    # Schema Registry cluster deletion is irreversible (loses subjects + schemas).
+    'DeleteSchemaRegistryCluster',
+    # Promoted from MEDIUM: tearing down a network removes connectivity for
+    # every cluster scoped to it.
+    'DeleteNetwork',
+    # KSQL cluster delete (capital-K naming variant).
+    'DeleteKSQLCluster',
+    # SSO connection delete cuts off federation for the org.
+    'DeleteSSOConnection',
+    # Identity provider / pool delete (already enumerated above; harmless dup,
+    # but kept to make audit-trail of this revision explicit).
+    'DeleteIdentityProvider',
+    'DeleteIdentityPool',
 }
 
 CRITICAL_METHODS = _get_methods('critical_methods', _CRITICAL_METHODS_DEFAULT)
@@ -206,7 +226,8 @@ _HIGH_METHODS_DEFAULT = {
     'DeleteRoleBinding',
     'UpdateRoleBinding',
     'UnbindAllRolesForPrincipal',  # Removes all role bindings for a principal
-    'RevokeRoleResourcesForPrincipal',  # Revokes role resources for a principal
+    # Note: RevokeRoleResourcesForPrincipal was promoted to CRITICAL.
+    'GrantRoleResourcesForPrincipal',
 
     # User Management
     'CreateInvitation',
@@ -214,6 +235,7 @@ _HIGH_METHODS_DEFAULT = {
     'CreateUser',
     'DeleteUser',
     'UpdateUser',
+    'InviteUser',
 
     # Identity Provider Configuration
     'CreateIdentityProvider',
@@ -308,6 +330,35 @@ _HIGH_METHODS_DEFAULT = {
     # Domain & Access Point
     'CreateDomain',
     'CreateAccessPoint',
+
+    # Confluent caps the API in API Key — distinct strings from CreateApiKey,
+    # explicit set must enumerate both spellings (pattern fallback works but
+    # this documents intent and protects routing if patterns are tightened).
+    'CreateAPIKey',
+    'DeleteAPIKey',
+    'UpdateAPIKey',
+
+    # SSO connection mutations.
+    'CreateSSOConnection',
+    'UpdateSSOConnection',
+
+    # Promoted up from MEDIUM: ACL/config and consumer-group changes that
+    # were materially under-prioritised when bucketed as MEDIUM.
+    'kafka.AlterConfigs',
+    'kafka.IncrementalAlterConfigs',
+    'kafka.DeleteGroups',
+
+    # Cluster linking — kafka. prefixed variants Confluent actually emits.
+    'kafka.CreateClusterLinks',
+    'kafka.DeleteClusterLinks',
+
+    # Schema Registry KEK / DEK lifecycle (security-sensitive encryption keys).
+    'schema-registry.RegisterDek',
+    'schema-registry.RegisterKek',
+    'schema-registry.DeregisterDek',
+    'schema-registry.DeregisterKek',
+    'schema-registry.DeleteSubject',
+    'schema-registry.DeleteSchemaVersion',
 }
 
 HIGH_METHODS = _get_methods('high_methods', _HIGH_METHODS_DEFAULT)
@@ -319,8 +370,8 @@ HIGH_METHODS = _get_methods('high_methods', _HIGH_METHODS_DEFAULT)
 
 _MEDIUM_METHODS_DEFAULT = {
     # Kafka Configuration
-    'kafka.AlterConfigs',
-    'kafka.IncrementalAlterConfigs',
+    # Note: kafka.AlterConfigs, kafka.IncrementalAlterConfigs, and
+    # kafka.DeleteGroups were promoted to HIGH.
     'kafka.DescribeConfigs',
 
     # Cluster Updates
@@ -337,7 +388,6 @@ _MEDIUM_METHODS_DEFAULT = {
     'kafka.CreatePartitions',
 
     # Consumer Group Management
-    'kafka.DeleteGroups',
     'kafka.OffsetDelete',
 
     # ksqlDB Operations
@@ -357,10 +407,9 @@ _MEDIUM_METHODS_DEFAULT = {
     'UpdateSchema',
     'CreateSubject',
 
-    # Network
+    # Network — DeleteNetwork was promoted to CRITICAL.
     'CreateNetwork',
     'UpdateNetwork',
-    'DeleteNetwork',
 
     # TableFlow
     'CreateTableflow',
@@ -491,6 +540,7 @@ _READ_ONLY_METHODS_DEFAULT = {
     'GetSchema',
     'DescribeConnector',
     'GetKSQLClusters',
+    'GetKSQLCluster',
     'ListWorkspaces',
     'ListComputePools',
     'ListSchemaRegistryClusters',
@@ -499,7 +549,34 @@ _READ_ONLY_METHODS_DEFAULT = {
     'GetNetworks',
     'schema-registry.GetAllTagDefs',
     'schema-registry.GetEntityByTypeAndName',
+    'schema-registry.GetDek',
     'SignIn',
+
+    # Caps-API variants Confluent emits — explicit set must enumerate both
+    # forms because pattern-matching collides with the API Key bucket.
+    'GetAPIKey',
+    'GetAPIKeys',
+
+    # Flink / statement / workspace reads.
+    'GetStatement',
+    'ListStatements',
+    'ListFlinkRegions',
+    'GetWorkspace',
+
+    # Custom connector / endpoint / identity-pool list reads.
+    'ListCustomConnectorPlugins',
+    'ListEndpoints',
+    'ListIdentityPool',
+
+    # Networking reads.
+    'GetTransitGateways',
+
+    # ksqlDB authentication / authorization (very high volume; READ_ONLY by
+    # the criticality model). Already present in AUTHENTICATION_METHODS /
+    # AUTHORIZATION_CHECK_METHODS — listing here documents read-only intent
+    # for the criticality cascade.
+    'ksql.Authenticate',
+    'ksql.Authorize',
 
     # Produce/Consume (routine operations)
     'kafka.Produce',

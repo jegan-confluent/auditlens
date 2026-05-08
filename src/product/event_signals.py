@@ -1,6 +1,15 @@
+import logging
 from typing import Any
 
 from src.product.event_intelligence import event_digest, event_digest_from_model
+
+
+logger = logging.getLogger(__name__)
+
+# Track unique unclassified method names so the catch-all warning fires once
+# per method per process. Without this guard a single unmapped method that
+# arrives at high QPS would flood the log.
+_unknown_methods_seen: set[str] = set()
 
 
 ACTION_REQUIRED_REASONS = {
@@ -150,6 +159,19 @@ def classify_signal(event_or_fields: Any) -> dict[str, str]:
             "recommended_action": "Review if unexpected",
             "decision_label": "Info",
         }
+    method_name = _as_text(
+        _field(event_or_fields, "methodName")
+        or _field(event_or_fields, "method_name")
+        or action
+    ) or "<missing>"
+    key = method_name.lower()[:128]
+    if key not in _unknown_methods_seen:
+        _unknown_methods_seen.add(key)
+        logger.warning(
+            "unclassified_method method=%s action=%s",
+            method_name,
+            action or "<missing>",
+        )
     return {
         "signal_type": "informational",
         "signal_reason": "unknown",

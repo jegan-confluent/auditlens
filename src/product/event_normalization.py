@@ -105,23 +105,65 @@ def derive_action_category(method_name: str | None, action: str | None) -> str:
     lowered = re.sub(r"[_./-]+", " ", combined).lower()
     compact = re.sub(r"[^a-z0-9]+", "", lowered)
 
+    # Reads of API keys are Data, not API Key. The API Key bucket should
+    # reflect mutations only — checked before the API Key step.
+    if "getapikey" in compact or "listapikey" in compact:
+        return "Data"
+    # SignIn is an authentication-class event; bucket as Security so it does
+    # not land in the catch-all Other bucket.
+    if "signin" in compact:
+        return "Security"
     if "apikey" in compact or "api key" in lowered:
         return "API Key"
-    if any(marker in compact for marker in ("createacl", "createacls", "deleteacl", "deleteacls", "rolebinding", "rbac")) or re.search(r"\bacl\b", lowered):
+    # ACL / RBAC and access-control changes (revoke / grant / invite). Confluent
+    # emits Revoke/GrantRoleResourcesForPrincipal and InviteUser as
+    # access-control mutations that previously fell to Other.
+    if (
+        any(marker in compact for marker in (
+            "createacl", "createacls", "deleteacl", "deleteacls",
+            "rolebinding", "rbac",
+            "revoke", "grant", "inviteuser", "revokerole", "grantrole",
+        ))
+        or re.search(r"\bacl\b", lowered)
+    ):
         return "Security"
     if "createtopic" in compact or "createtopics" in compact:
         return "Create"
     if "deletetopic" in compact or "deletetopics" in compact:
         return "Delete"
-    if any(marker in compact for marker in ("getstatement", "liststatements", "tableflowgettable", "produce", "fetch", "consume", "read")):
+    # Specific Data markers first; then word-boundary regex so the long tail
+    # of Get*/List*/Describe* methods land in Data instead of Other.
+    if any(marker in compact for marker in (
+        "getstatement", "liststatements", "tableflowgettable",
+        "tableflowlisttables", "listtables", "listnamespaces",
+        "produce", "fetch", "consume", "read",
+    )):
+        return "Data"
+    if (
+        re.search(r"\bget[a-z]+\b", lowered)
+        or re.search(r"\blist[a-z]+\b", lowered)
+        or re.search(r"\bdescribe[a-z]+\b", lowered)
+    ):
         return "Data"
     if any(marker in compact for marker in ("authorize", "authorization", "authentication", "authenticate")):
         return "Security"
-    if "delete" in compact:
+    # Delete equivalents include the schema-registry deregister-{dek,kek,keypair}
+    # methods which previously fell through.
+    if "delete" in compact or any(marker in compact for marker in (
+        "deregisterdek", "deregisterkek", "deregisterkeypair",
+    )):
         return "Delete"
-    if any(marker in compact for marker in ("updatestatement", "patchstatement", "alter", "update", "modify", "config")):
+    # pause/resume/suspend/restart are operational state toggles — bucket as
+    # Modify (PauseConnector, ResumeExporter, PauseKsqldbCluster, ...).
+    if any(marker in compact for marker in (
+        "updatestatement", "patchstatement", "alter", "update", "modify", "config",
+        "pause", "resume", "suspend", "restart",
+    )):
         return "Modify"
-    if "create" in compact:
+    # Schema Registry register-{schema,dek,kek,keypair} are Create equivalents.
+    if "create" in compact or any(marker in compact for marker in (
+        "registerschema", "registerdek", "registerkek", "registerkeypair",
+    )):
         return "Create"
     return "Other"
 

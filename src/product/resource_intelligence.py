@@ -49,6 +49,43 @@ RESOURCE_TYPE_ALIASES = {
     "network": "network",
     "user": "user",
     "unknown": "unknown",
+    # Confluent emits these compact / camelCase variants that previously fell
+    # through to the raw lowercased string. Map them to canonical types so
+    # the dashboard stops splitting the same logical concept across multiple
+    # chips.
+    "cloudapikey": "api_key",
+    "flinkenvironmentregionapikey": "api_key",
+    "serviceaccountapikey": "api_key",
+    "clusterapikey": "api_key",
+    "identitypool": "identity_pool",
+    "identityprovider": "identity_provider",
+    "customconnectorplugin": "custom_connector_plugin",
+    "byokkey": "byok_key",
+    "securitysso": "sso_connection",
+    "multifactorauthentication": "mfa",
+    "notificationintegration": "notification",
+    "notificationsubscription": "notification",
+    "healthpluscluster": "cluster",
+    "usmkafkacluster": "cluster",
+    "usmconnectcluster": "cluster",
+    "computepool": "compute_pool",
+    "flink_workspace": "workspace",
+    "privatelinkattachment": "private_link",
+    "privatelinkattachmentconnection": "private_link",
+    "privatelinkaccess": "private_link",
+    "transitgatewayattachment": "transit_gateway",
+    "peering": "peering",
+    "aichatcompletions": "ai",
+    "billing": "billing",
+    "audit": "audit",
+    "supportplan": "organization",
+    "streamlineage": "lineage",
+    "connectartifact": "connector",
+    "flinkartifact": "compute_pool",
+    "dnsrecord": "network",
+    "identity_provider": "identity_provider",
+    "identity_pool": "identity_pool",
+    "role_binding": "role_binding",
 }
 
 RESOURCE_TYPE_LABELS = {

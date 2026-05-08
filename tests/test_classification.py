@@ -64,10 +64,15 @@ class TestMethodClassifications:
             assert method in HIGH_METHODS, f"{method} should be HIGH"
 
     def test_medium_methods_contains_config_ops(self):
-        """Test that medium methods include configuration operations."""
+        """Test that medium methods include configuration operations.
+
+        kafka.AlterConfigs and kafka.IncrementalAlterConfigs were promoted to
+        HIGH (they materially change cluster config). kafka.CreatePartitions
+        and kafka.DescribeConfigs remain MEDIUM.
+        """
         config = [
-            'kafka.AlterConfigs',
             'kafka.CreatePartitions',
+            'kafka.DescribeConfigs',
         ]
         for method in config:
             assert method in MEDIUM_METHODS, f"{method} should be MEDIUM"
@@ -179,15 +184,20 @@ class TestCalculateCriticality:
         result = calculate_criticality(event)
         assert result.criticality == CriticalityLevel.HIGH
 
-    def test_alter_configs_is_medium(self):
-        """Test that kafka.AlterConfigs is MEDIUM."""
+    def test_alter_configs_is_high(self):
+        """Test that kafka.AlterConfigs is HIGH.
+
+        Promoted from MEDIUM in the 2026-05-08 classification fix: altering
+        cluster/topic configs is a material security/operational change that
+        deserves attention within hours, not a daily review.
+        """
         event = {
             'methodName': 'kafka.AlterConfigs',
             'resultStatus': 'SUCCESS',
             'principal': 'User:admin',
         }
         result = calculate_criticality(event)
-        assert result.criticality == CriticalityLevel.MEDIUM
+        assert result.criticality == CriticalityLevel.HIGH
 
     def test_produce_event_is_low(self):
         """Test that kafka.Produce is LOW."""

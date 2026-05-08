@@ -76,6 +76,19 @@ critical_methods:
   - DeleteDomain
   - DeleteAccessPoint
 
+  # RBAC — *ById is the variant Confluent emits.
+  - DeleteRoleBindingById
+  # Promoted from HIGH: revoking all role-resource bindings is irreversible.
+  - RevokeRoleResourcesForPrincipal
+  # Schema Registry cluster delete loses all subjects + schemas.
+  - DeleteSchemaRegistryCluster
+  # Promoted from MEDIUM: tearing down a network removes connectivity.
+  - DeleteNetwork
+  # KSQL cluster delete (capital-K naming variant).
+  - DeleteKSQLCluster
+  # SSO connection delete cuts off federation.
+  - DeleteSSOConnection
+
 high_methods:
   # API Key Operations
   - CreateApiKey
@@ -96,7 +109,8 @@ high_methods:
   - DeleteRoleBinding
   - UpdateRoleBinding
   - UnbindAllRolesForPrincipal
-  - RevokeRoleResourcesForPrincipal
+  # Note: RevokeRoleResourcesForPrincipal was promoted to CRITICAL.
+  - GrantRoleResourcesForPrincipal
 
   # User Management
   - CreateInvitation
@@ -104,6 +118,7 @@ high_methods:
   - CreateUser
   - DeleteUser
   - UpdateUser
+  - InviteUser
 
   # Identity Provider Configuration
   - CreateIdentityProvider
@@ -199,10 +214,35 @@ high_methods:
   - CreateDomain
   - CreateAccessPoint
 
-medium_methods:
-  # Kafka Configuration
+  # Caps-API spellings Confluent actually emits.
+  - CreateAPIKey
+  - DeleteAPIKey
+  - UpdateAPIKey
+
+  # SSO connection mutations.
+  - CreateSSOConnection
+  - UpdateSSOConnection
+
+  # Promoted from MEDIUM.
   - kafka.AlterConfigs
   - kafka.IncrementalAlterConfigs
+  - kafka.DeleteGroups
+
+  # Cluster linking — kafka. prefixed variants.
+  - kafka.CreateClusterLinks
+  - kafka.DeleteClusterLinks
+
+  # Schema Registry KEK / DEK lifecycle.
+  - schema-registry.RegisterDek
+  - schema-registry.RegisterKek
+  - schema-registry.DeregisterDek
+  - schema-registry.DeregisterKek
+  - schema-registry.DeleteSubject
+  - schema-registry.DeleteSchemaVersion
+
+medium_methods:
+  # Kafka Configuration — kafka.AlterConfigs / IncrementalAlterConfigs /
+  # DeleteGroups were promoted to HIGH.
   - kafka.DescribeConfigs
 
   # Cluster Updates
@@ -218,8 +258,7 @@ medium_methods:
   - kafka.CreateTopics
   - kafka.CreatePartitions
 
-  # Consumer Group Management
-  - kafka.DeleteGroups
+  # Consumer Group Management — kafka.DeleteGroups was promoted to HIGH.
   - kafka.OffsetDelete
 
   # ksqlDB Operations
@@ -239,10 +278,9 @@ medium_methods:
   - UpdateSchema
   - CreateSubject
 
-  # Network
+  # Network — DeleteNetwork was promoted to CRITICAL.
   - CreateNetwork
   - UpdateNetwork
-  - DeleteNetwork
 
   # TableFlow
   - CreateTableflow
@@ -344,6 +382,39 @@ read_only_methods:
   # API/UI Access
   - ApiAccess
   - UIAccess
+
+  # Caps-API variants and broader Get/List enumeration so the criticality
+  # cascade and the action_category cascade agree on read_only methods.
+  - GetAPIKey
+  - GetAPIKeys
+  - GetApiKeys
+  - GetUsers
+  - GetServiceAccounts
+  - GetEnvironments
+  - GetKafkaClusters
+  - GetConnectors
+  - GetKSQLClusters
+  - GetKSQLCluster
+  - GetNetworks
+  - GetTransitGateways
+  - GetPrivateLinkAttachments
+  - GetPrivateLinkAttachmentConnections
+  - GetWorkspace
+  - GetStatement
+  - ListStatements
+  - ListWorkspaces
+  - ListComputePools
+  - ListFlinkRegions
+  - ListSchemaRegistryClusters
+  - ListCustomConnectorPlugins
+  - ListEndpoints
+  - ListIdentityPool
+  - SignIn
+  - schema-registry.GetAllTagDefs
+  - schema-registry.GetEntityByTypeAndName
+  - schema-registry.GetDek
+  - ksql.Authenticate
+  - ksql.Authorize
 
 # Pattern matching for method classification
 patterns:
