@@ -159,12 +159,20 @@ services:
     image: auditlens-api:v0.1.0
     container_name: auditlens-api
     restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+      - path: .secrets
+        required: false
     environment:
       - DATABASE_URL=${DATABASE_URL:-sqlite:////var/lib/auditlens/auditlens_api.db}
       - AUDITLENS_RUNTIME_DIR=/var/lib/auditlens
       - FORWARDER_HEALTH_URL=${FORWARDER_HEALTH_URL:-http://auditlens-forwarder:${METRICS_PORT:-8003}/health}
       - EVENT_RETENTION_DAYS=${EVENT_RETENTION_DAYS:-7}
       - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
+      - IAM_ENRICHMENT_ENABLED=${IAM_ENRICHMENT_ENABLED:-false}
+      - CONFLUENT_CLOUD_API_KEY=${CONFLUENT_CLOUD_API_KEY:-}
+      - CONFLUENT_CLOUD_API_SECRET=${CONFLUENT_CLOUD_API_SECRET:-}
     volumes:
       - auditlens_data:/var/lib/auditlens
     ports:

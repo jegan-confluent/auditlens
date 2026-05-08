@@ -13,12 +13,12 @@ export type EventFilters = {
   impact_type: string;
 };
 
-// Default landing state = "Needs Attention": last 24h, decision-mode, only
+// Default landing state = "Needs Attention": last 12h, decision-mode, only
 // action_required + attention signals, with routine noise hidden. The user
 // can switch to the full audit trail with a single click.
 export const defaultFilters: EventFilters = {
   mode: "decision",
-  time_window: "24h",
+  time_window: "12h",
   resource_type: "",
   resource: "",
   cluster_name: "",
@@ -116,6 +116,7 @@ export function activeFilterLabels(filters: EventFilters) {
     if (key === "mode" && value === "audit_trail") return "Full audit trail mode";
     if (key === "time_window" && value === "1h") return "Last hour";
     if (key === "time_window" && value === "6h") return "Last 6 hours";
+    if (key === "time_window" && value === "12h") return "Last 12 hours";
     if (key === "time_window" && value === "24h") return "Last 24 hours";
     if (key === "time_window" && value === "7d") return "Last 7 days";
     if (key === "time_window" && value === "30d") return "Last 30 days";

@@ -123,6 +123,7 @@ def derive_action_category(method_name: str | None, action: str | None) -> str:
             "createacl", "createacls", "deleteacl", "deleteacls",
             "rolebinding", "rbac",
             "revoke", "grant", "inviteuser", "revokerole", "grantrole",
+            "bindrole",
         ))
         or re.search(r"\bacl\b", lowered)
     ):
@@ -135,7 +136,8 @@ def derive_action_category(method_name: str | None, action: str | None) -> str:
     # of Get*/List*/Describe* methods land in Data instead of Other.
     if any(marker in compact for marker in (
         "getstatement", "liststatements", "tableflowgettable",
-        "tableflowlisttables", "listtables", "listnamespaces",
+        "tableflowlisttables", "tableflowoauthtokens",
+        "listtables", "listnamespaces",
         "produce", "fetch", "consume", "read",
     )):
         return "Data"

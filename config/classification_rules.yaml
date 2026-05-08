@@ -111,6 +111,7 @@ high_methods:
   - UnbindAllRolesForPrincipal
   # Note: RevokeRoleResourcesForPrincipal was promoted to CRITICAL.
   - GrantRoleResourcesForPrincipal
+  - BindRoleForPrincipal
 
   # User Management
   - CreateInvitation
@@ -382,6 +383,9 @@ read_only_methods:
   # API/UI Access
   - ApiAccess
   - UIAccess
+
+  # Tableflow OAuth token fetches (read-only Flink/Tableflow internals).
+  - TableflowOAuthTokens
 
   # Caps-API variants and broader Get/List enumeration so the criticality
   # cascade and the action_category cascade agree on read_only methods.

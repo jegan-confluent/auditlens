@@ -228,6 +228,7 @@ _HIGH_METHODS_DEFAULT = {
     'UnbindAllRolesForPrincipal',  # Removes all role bindings for a principal
     # Note: RevokeRoleResourcesForPrincipal was promoted to CRITICAL.
     'GrantRoleResourcesForPrincipal',
+    'BindRoleForPrincipal',
 
     # User Management
     'CreateInvitation',
@@ -590,6 +591,10 @@ _READ_ONLY_METHODS_DEFAULT = {
     # API/UI Access
     'ApiAccess',
     'UIAccess',
+
+    # Tableflow OAuth token fetches — read-only, high-volume Flink/Tableflow
+    # internals; previously hit the unclassified-method catch-all.
+    'TableflowOAuthTokens',
 }
 
 READ_ONLY_METHODS = _get_methods('read_only_methods', _READ_ONLY_METHODS_DEFAULT)

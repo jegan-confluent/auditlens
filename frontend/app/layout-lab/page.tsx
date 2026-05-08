@@ -74,7 +74,7 @@ export default function LayoutLabPage() {
           <div>
             <div className="eyebrow">Decision</div>
             <h2>Action required</h2>
-            <p>Topic deletion and failed access attempts were detected in the latest two-hour window.</p>
+            <p>Topic deletion and failed access attempts were detected in the latest scanned window.</p>
             <span>Sampled summary: latest 5,000 matching events. Filters: Decision mode, routine hidden.</span>
           </div>
           <div className="decision-action">

@@ -25,9 +25,22 @@ import time
 import threading
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 from cachetools import TTLCache
+
+
+def _extract_page_token(next_value: Optional[str]) -> Optional[str]:
+    # Confluent list endpoints return `metadata.next` as a fully-qualified URL
+    # whose `page_token` query param is the actual continuation token. Passing
+    # the whole URL back as `page_token=` double-encodes it and yields 400.
+    if not next_value:
+        return None
+    if next_value.startswith(("http://", "https://")):
+        token = parse_qs(urlparse(next_value).query).get("page_token", [None])[0]
+        return token or None
+    return next_value
 
 logger = logging.getLogger(__name__)
 
@@ -217,7 +230,7 @@ class ConfluentCloudClient:
                             raw_data=env,
                         ))
 
-                    page_token = data.get("metadata", {}).get("next")
+                    page_token = _extract_page_token(data.get("metadata", {}).get("next"))
                     if not page_token:
                         break
 
@@ -283,7 +296,7 @@ class ConfluentCloudClient:
                             raw_data=cluster,
                         ))
 
-                    page_token = data.get("metadata", {}).get("next")
+                    page_token = _extract_page_token(data.get("metadata", {}).get("next"))
                     if not page_token:
                         break
 

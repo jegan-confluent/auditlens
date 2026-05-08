@@ -87,19 +87,32 @@ class RateTrackerConfig:
     # Cleanup old data after this many seconds
     data_retention_seconds: int = 3600  # 1 hour
 
+    # Principals to skip anomaly detection for entirely (e.g. trusted Flink /
+    # Tableflow service accounts that legitimately spike at 100+ ev/s).
+    whitelist_principals: tuple = ()
+
     @classmethod
     def from_env(cls) -> 'RateTrackerConfig':
         """Create configuration from environment variables."""
+        # ANOMALY_SPIKE_THRESHOLD is the primary knob (default 500 to avoid
+        # alerting on legitimate high-volume service accounts). The legacy
+        # ANOMALY_ACTIVITY_SPIKE_THRESHOLD is honored as a fallback.
+        spike_env = os.getenv('ANOMALY_SPIKE_THRESHOLD')
+        if spike_env is None:
+            spike_env = os.getenv('ANOMALY_ACTIVITY_SPIKE_THRESHOLD', '500')
+        whitelist_raw = os.getenv('ANOMALY_WHITELIST_PRINCIPALS', '')
+        whitelist = tuple(p.strip() for p in whitelist_raw.split(',') if p.strip())
         return cls(
             window_seconds=int(os.getenv('ANOMALY_WINDOW_SECONDS', '60')),
             auth_failure_threshold=int(os.getenv('ANOMALY_AUTH_FAILURE_THRESHOLD', '10')),
-            activity_spike_threshold=int(os.getenv('ANOMALY_ACTIVITY_SPIKE_THRESHOLD', '100')),
+            activity_spike_threshold=int(spike_env),
             deletion_threshold=int(os.getenv('ANOMALY_DELETION_THRESHOLD', '5')),
             api_key_threshold=int(os.getenv('ANOMALY_API_KEY_THRESHOLD', '10')),
             enable_auth_failure_detection=os.getenv('ANOMALY_ENABLE_AUTH', 'true').lower() == 'true',
             enable_activity_spike_detection=os.getenv('ANOMALY_ENABLE_ACTIVITY', 'true').lower() == 'true',
             enable_deletion_detection=os.getenv('ANOMALY_ENABLE_DELETION', 'true').lower() == 'true',
             enable_api_key_detection=os.getenv('ANOMALY_ENABLE_API_KEY', 'true').lower() == 'true',
+            whitelist_principals=whitelist,
         )
 
 
@@ -218,6 +231,9 @@ class RateTracker:
         granted = event.get('granted')
 
         if not principal:
+            return alerts
+
+        if principal in self.config.whitelist_principals:
             return alerts
 
         # Track general activity

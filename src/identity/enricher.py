@@ -20,9 +20,22 @@ import threading
 from dataclasses import dataclass
 from enum import Enum
 from typing import Dict, Optional, Any, List
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 from cachetools import TTLCache
+
+
+def _extract_page_token(next_value: Optional[str]) -> Optional[str]:
+    # Confluent's IAM/v2 list endpoints return `metadata.next` as a fully-qualified
+    # URL containing the next page's `page_token` query param. Passing that whole
+    # URL back in as `page_token=` double-encodes it and produces 400 Bad Request.
+    if not next_value:
+        return None
+    if next_value.startswith(("http://", "https://")):
+        token = parse_qs(urlparse(next_value).query).get("page_token", [None])[0]
+        return token or None
+    return next_value
 
 logger = logging.getLogger(__name__)
 
@@ -174,7 +187,7 @@ class IdentityEnricher:
                         self._service_accounts[sa_id] = info
 
                 # Check for more pages
-                page_token = data.get("metadata", {}).get("next")
+                page_token = _extract_page_token(data.get("metadata", {}).get("next"))
                 if not page_token:
                     break
 
@@ -218,7 +231,7 @@ class IdentityEnricher:
                         self._users[f"User:{user_id}"] = info
 
                 # Check for more pages
-                page_token = data.get("metadata", {}).get("next")
+                page_token = _extract_page_token(data.get("metadata", {}).get("next"))
                 if not page_token:
                     break
 
