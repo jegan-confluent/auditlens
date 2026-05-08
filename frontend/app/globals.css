@@ -92,6 +92,12 @@ a {
   font-weight: 700;
 }
 
+.header-status.loading {
+  background: #f2f4f7;
+  border-color: var(--line);
+  color: var(--muted);
+}
+
 .header-status.connected {
   background: var(--success-soft);
   border-color: #abefc6;
@@ -681,12 +687,48 @@ th {
   background: #fbfcfd;
 }
 
-.event-row.signal-noise {
-  color: #667085;
+/* Per-signal left border so the eye goes to red rows first. The first cell
+ * carries the visible stripe; the row tints subtly to reinforce. */
+.event-row > td:first-child {
+  border-left: 3px solid transparent;
 }
-
+.event-row.signal-action_required > td:first-child {
+  border-left-color: #DC2626;
+}
 .event-row.signal-action_required {
   background: #fffafa;
+}
+.event-row.signal-attention > td:first-child {
+  border-left-color: #D97706;
+}
+.event-row.signal-noise {
+  color: #667085;
+  opacity: 0.6;
+}
+.event-row.signal-informational > td:first-child {
+  border-left-color: transparent;
+}
+
+.decision-cell .decision-reason {
+  display: block;
+  margin-top: 6px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.3;
+}
+
+.actor-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: #e0e7ff;
+  color: #3730a3;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  vertical-align: middle;
 }
 
 .nowrap {
@@ -818,6 +860,67 @@ code {
   margin-top: 18px;
 }
 
+.drawer-stale-banner {
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  border: 1px solid #fedf89;
+  border-radius: 8px;
+  background: var(--warn-soft);
+  color: var(--warn);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.why-this-matters {
+  margin-bottom: 14px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+  background: var(--accent-soft);
+}
+
+.why-this-matters strong {
+  display: block;
+  margin-top: 4px;
+  font-size: 14px;
+  line-height: 1.4;
+}
+
+.why-this-matters p {
+  margin: 8px 0 0;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.technical-details {
+  margin-top: 18px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcfd;
+}
+
+.technical-details > summary {
+  cursor: pointer;
+  font-weight: 700;
+  color: var(--muted);
+  list-style: none;
+}
+
+.technical-details > summary::before {
+  content: "▸ ";
+}
+
+.technical-details[open] > summary::before {
+  content: "▾ ";
+}
+
+.technical-details > .detail-grid {
+  margin-top: 12px;
+}
+
 .triage-actions {
   display: flex;
   flex-wrap: wrap;
@@ -851,6 +954,36 @@ pre {
 .error-state,
 .loading-state {
   min-height: 140px;
+}
+
+.lag-banner {
+  margin-bottom: 14px;
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: 14px;
+}
+
+.lag-banner.warning {
+  background: var(--warn-soft);
+  border-color: #fedf89;
+  color: var(--warn);
+}
+
+.lag-banner.critical {
+  background: var(--danger-soft);
+  border-color: #fecdca;
+  color: var(--danger);
+}
+
+.panel-error {
+  margin: 8px 0 0;
+  padding: 10px 12px;
+  border: 1px solid #fecdca;
+  border-radius: 6px;
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-size: 13px;
 }
 
 .filter-chips {

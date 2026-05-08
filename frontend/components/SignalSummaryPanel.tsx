@@ -6,15 +6,46 @@ function countFor(summary: SummaryResponse, key: "noise_count" | "informational_
 }
 
 function resourceTypeForFamily(family: string) {
+  // Mirrors src/product/resource_intelligence.RESOURCE_TYPE_ALIASES (the
+  // canonical types the forwarder emits after the 2026-05-08 alias
+  // extension). When `flowPatch` produces a `resource_type` query value the
+  // backend filter expects the string to round-trip canonically, so map
+  // every family the classifier can emit.
   const mapping: Record<string, string> = {
     topic: "Topic",
+    subject: "Subject",
     connector: "Connector",
     schema_registry: "Schema Registry",
     api_key: "API Key",
     acl: "ACL / RBAC",
     rbac: "ACL / RBAC",
+    role_binding: "ACL / RBAC",
     cluster: "Cluster",
-    flink: "Compute Pool"
+    environment: "Environment",
+    organization: "Organization",
+    user: "User",
+    service_account: "Service Account",
+    ksql: "KSQLDB",
+    ksqldb: "KSQLDB",
+    flink: "Compute Pool",
+    compute_pool: "Compute Pool",
+    workspace: "Workspace",
+    statement: "Statement",
+    tableflow: "Tableflow",
+    network: "Network",
+    private_link: "Private Link",
+    transit_gateway: "Transit Gateway",
+    identity_pool: "Identity Pool",
+    identity_provider: "Identity Provider",
+    custom_connector_plugin: "Custom Connector Plugin",
+    byok_key: "BYOK Key",
+    sso_connection: "SSO Connection",
+    mfa: "MFA",
+    notification: "Notification",
+    ai: "AI",
+    lineage: "Stream Lineage",
+    billing: "Billing",
+    audit: "Audit"
   };
   return mapping[family] || "";
 }

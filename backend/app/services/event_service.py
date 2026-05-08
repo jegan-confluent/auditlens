@@ -19,6 +19,10 @@ from backend.app.services.triage_service import attach_triage_snapshots, get_tri
 from src.product.event_normalization import canonical_resource_type
 
 MAX_EVENT_LIMIT = 500
+# Per-transaction statement_timeout for /events (Postgres). The default 30s
+# pool-level timeout is exceeded by the decision-mode count() query on the
+# production table; 120s matches /summary's allowance.
+EVENTS_ROUTE_STATEMENT_TIMEOUT_MS = 120000
 SIGNAL_FILTER_MAX_SCAN = 5000
 SIGNAL_FILTER_BATCH_SIZE = 500
 VALID_SIGNAL_TYPES = {"noise", "informational", "attention", "action_required"}
@@ -199,9 +203,12 @@ def _event_filter_conditions(
     time_window: str | None = None,
     resource_type: str | None = None,
     resource: str | None = None,
+    cluster_name: str | None = None,
+    environment_name: str | None = None,
     action_category: str | None = None,
     actor: str | None = None,
     result: str | None = None,
+    is_denied: bool | None = None,
 ) -> list[Any]:
     conditions: list[Any] = []
     since = parse_time_window(time_window)
@@ -230,12 +237,30 @@ def _event_filter_conditions(
                 func.lower(AuditEvent.summary).like(pattern),
             )
         )
+    if cluster_name and cluster_name.strip():
+        pattern = f"%{cluster_name.strip().lower()}%"
+        conditions.append(
+            or_(
+                func.lower(AuditEvent._cluster_name).like(pattern),
+                func.lower(AuditEvent.cluster_id).like(pattern),
+            )
+        )
+    if environment_name and environment_name.strip():
+        pattern = f"%{environment_name.strip().lower()}%"
+        conditions.append(
+            or_(
+                func.lower(AuditEvent._environment_name).like(pattern),
+                func.lower(AuditEvent.environment_id).like(pattern),
+            )
+        )
     if action_category and action_category.strip():
         conditions.append(AuditEvent.action_category == action_category.strip())
     if actor and actor.strip():
         conditions.append(func.lower(AuditEvent.actor).like(f"%{actor.strip().lower()}%"))
     if result and result.strip():
         conditions.append(AuditEvent.result == result.strip())
+    if is_denied is True:
+        conditions.append(AuditEvent.is_denied.is_(True))
     return conditions
 
 
@@ -363,6 +388,12 @@ def list_events_result(
     limit = min(max(limit, 1), MAX_EVENT_LIMIT)
     offset = max(offset, 0)
     mode = _normalize_mode(mode)
+    # Decision-mode count() over the OR-heavy predicate is expensive on the
+    # production-sized table. Match the per-route timeout treatment we already
+    # apply in summary_service so the route doesn't 500 under derived filters
+    # (signal_type / hide_noise / impact_type) which now ship as the default.
+    if db.get_bind().dialect.name == "postgresql":
+        db.execute(text(f"SET LOCAL statement_timeout = {EVENTS_ROUTE_STATEMENT_TIMEOUT_MS}"))
     signal_types = _parse_signal_types(signal_type)
     impact_types = _parse_impact_types(impact_type)
     change_types = _parse_change_types(change_type)

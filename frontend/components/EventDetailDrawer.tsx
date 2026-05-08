@@ -3,6 +3,8 @@
 import type { AuditEvent } from "../lib/types";
 
 const UNKNOWN_PRINCIPAL_LABELS = new Set(["unknown actor", "unknown user", "unknown service account", "unknown principal"]);
+const SERVICE_ACCOUNT_TYPES = new Set(["service_account", "serviceaccount", "service-account"]);
+const STALE_EVENT_THRESHOLD_MS = 2 * 60 * 60 * 1000; // 2 hours
 
 function displayAction(event: AuditEvent) {
   return event.normalized_action || event.action_category || event.action || "Unknown";
@@ -14,29 +16,38 @@ function displayResource(event: AuditEvent) {
   return event.resource_display_short || event.resource_display || event.resource_type || "Unknown";
 }
 
-function displayActor(event: AuditEvent) {
-  const display = (event.actor_display_name || event.subject || event.actor || "").trim();
-  const raw = (event.actor_raw_id || event.subject || event.actor || "").trim();
-  if (display && !UNKNOWN_PRINCIPAL_LABELS.has(display.toLowerCase())) return display;
-  if (event.actor_email && event.actor_email !== display) return event.actor_email;
-  if (raw) return raw;
-  return "Unknown principal";
+function isServiceAccount(event: AuditEvent): boolean {
+  const type = (event.actor_type || event.subject_type || "").toLowerCase();
+  if (SERVICE_ACCOUNT_TYPES.has(type)) return true;
+  const raw = (event.actor_raw_id || event.actor || "").toLowerCase();
+  return raw.startsWith("sa-") || raw.startsWith("user:sa-");
 }
 
-function actorSecondary(event: AuditEvent) {
-  const raw = event.actor_raw_id || event.subject || event.actor || "";
-  const email = event.actor_email || "";
-  const primary = displayActor(event);
-  if (email && raw && email !== raw && primary !== email && primary !== raw) return `${email} / ${raw}`;
-  if (email && primary !== email) return email;
-  return raw && raw !== primary ? raw : "";
+function displayActor(event: AuditEvent): { primary: string; secondary: string; isServiceAccount: boolean } {
+  const isSA = isServiceAccount(event);
+  const display = (event.actor_display_name || event.subject || event.actor || "").trim();
+  const raw = (event.actor_raw_id || event.subject || event.actor || "").trim();
+  const email = (event.actor_email || "").trim();
+  if (isSA) {
+    const primary = display && !UNKNOWN_PRINCIPAL_LABELS.has(display.toLowerCase()) ? display : raw || "Unknown service account";
+    const secondary = raw && raw !== primary ? raw : "";
+    return { primary, secondary, isServiceAccount: true };
+  }
+  if (email) {
+    const secondary = display && display !== email ? display : (raw && raw !== email ? raw : "");
+    return { primary: email, secondary, isServiceAccount: false };
+  }
+  if (display && !UNKNOWN_PRINCIPAL_LABELS.has(display.toLowerCase())) {
+    return { primary: display, secondary: raw && raw !== display ? raw : "", isServiceAccount: false };
+  }
+  return { primary: raw || "Unknown principal", secondary: "", isServiceAccount: false };
 }
 
 function displaySummary(event: AuditEvent) {
   const summary = event.event_summary || event.summary || "";
   const raw = event.actor_raw_id || event.subject || event.actor || "";
-  const actor = displayActor(event);
-  return raw && actor && raw !== actor ? summary.replace(raw, actor) : summary;
+  const { primary } = displayActor(event);
+  return raw && primary && raw !== primary ? summary.replace(raw, primary) : summary;
 }
 
 function displaySource(event: AuditEvent) {
@@ -55,6 +66,14 @@ function copyText(value: string) {
   navigator.clipboard.writeText(value).catch(() => undefined);
 }
 
+function eventAgeHours(event: AuditEvent): number | null {
+  const ts = Date.parse(event.timestamp);
+  if (Number.isNaN(ts)) return null;
+  const ageMs = Date.now() - ts;
+  if (ageMs < STALE_EVENT_THRESHOLD_MS) return null;
+  return Math.round(ageMs / (60 * 60 * 1000));
+}
+
 const triageActions = [
   { status: "acknowledged", label: "Acknowledge" },
   { status: "approved", label: "Mark Approved" },
@@ -69,6 +88,11 @@ export default function EventDetailDrawer({ event, onClose, onTriage }: {
   onTriage?: (status: string) => void;
 }) {
   if (!event) return null;
+  const actor = displayActor(event);
+  const ageHours = eventAgeHours(event);
+  const recommended = (event.recommended_action || "").trim();
+  const reason = (event.decision_reason || event.signal_reason || "").trim();
+
   return (
     <aside className="drawer">
       <div className="drawer-header">
@@ -79,40 +103,61 @@ export default function EventDetailDrawer({ event, onClose, onTriage }: {
         </div>
         <button onClick={onClose}>Close</button>
       </div>
+
+      {ageHours !== null ? (
+        <div className="drawer-stale-banner">
+          ⚠️ This event is {ageHours} {ageHours === 1 ? "hour" : "hours"} old — forwarder may be behind real-time.
+        </div>
+      ) : null}
+
+      <section className="why-this-matters">
+        <div className="eyebrow">Why this matters</div>
+        <strong>{reason || event.decision_label || "Audit activity"}</strong>
+        {recommended ? <p>→ Recommended: {recommended}</p> : null}
+      </section>
+
       <div className="detail-grid">
-        <div><div className="detail-label">Timestamp</div><strong>{new Date(event.timestamp).toLocaleString()}</strong></div>
-        <div><div className="detail-label">Who</div><strong>{displayActor(event)}</strong>{actorSecondary(event) ? <span className="detail-secondary">{actorSecondary(event)}</span> : null}</div>
-        <div><div className="detail-label">Actor Type</div><strong>{event.actor_type || event.subject_type || "unknown"}</strong></div>
-        <div><div className="detail-label">Actor Source</div><strong>{event.actor_source || "fallback"}</strong>{event.actor_confidence ? <span className="detail-secondary">{event.actor_confidence} confidence</span> : null}</div>
-        <div><div className="detail-label">Action</div><strong>{event.event_title || displayAction(event)}</strong></div>
-        <div><div className="detail-label">Decision</div><strong>{event.decision_label}: {event.recommended_action}</strong></div>
-        <div><div className="detail-label">Decision Reason</div><strong>{event.decision_reason || event.signal_reason}</strong></div>
-        <div><div className="detail-label">Triage Status</div><strong>{event.triage_status || "open"}</strong>{event.triage_note ? <span className="detail-secondary">{event.triage_note}</span> : null}</div>
-        <div><div className="detail-label">Risk Level</div><strong>{event.risk_level}</strong></div>
-        <div><div className="detail-label">Impact Type</div><strong>{event.impact_type}</strong></div>
-        <div><div className="detail-label">Change Type</div><strong>{event.change_type}</strong></div>
-        <div><div className="detail-label">Resource Family</div><strong>{event.resource_family}</strong></div>
-        <div><div className="detail-label">Result</div><strong>{event.result || "Unknown"}</strong></div>
-        <div><div className="detail-label">Resource</div><strong>{displayResource(event)}</strong></div>
-        <div><div className="detail-label">Resource Type</div><strong>{event.resource_type || "unknown"}</strong></div>
-        <div><div className="detail-label">Resource Scope</div><strong>{displayContext(event.resource_scope)}</strong></div>
-        <div><div className="detail-label">Parent Resource</div><strong>{displayContext(event.parent_resource)}</strong></div>
-        <div><div className="detail-label">Resource Criticality</div><strong>{displayContext(event.resource_criticality)}</strong></div>
-        <div><div className="detail-label">Blast Radius</div><strong>{displayContext(event.blast_radius_hint)}</strong></div>
-        <div><div className="detail-label">Production Hint</div><strong>{displayContext(event.production_hint)}</strong></div>
-        <div><div className="detail-label">Environment</div><strong>{displayContext(event.environment_name || event.environment_id)}</strong></div>
+        <div><div className="detail-label">Who</div><strong>{actor.primary}{actor.isServiceAccount ? <span className="actor-badge sa">SA</span> : null}</strong>{actor.secondary ? <span className="detail-secondary">{actor.secondary}</span> : null}</div>
+        <div><div className="detail-label">What</div><strong>{event.event_title || displayAction(event)}</strong></div>
+        <div><div className="detail-label">Resource</div><strong>{displayResource(event)}</strong>{event.resource_type ? <span className="detail-secondary">{event.resource_type}</span> : null}</div>
+        <div><div className="detail-label">When</div><strong>{new Date(event.timestamp).toLocaleString()}</strong></div>
         <div><div className="detail-label">Cluster</div><strong>{displayContext(event.cluster_name || event.cluster_id)}</strong></div>
-        <div><div className="detail-label">Region</div><strong>{event.flink_region || "Not provided by audit event"}</strong></div>
+        <div><div className="detail-label">Environment</div><strong>{displayContext(event.environment_name || event.environment_id)}</strong></div>
         <div><div className="detail-label">Source IP</div><strong>{displaySource(event)}</strong></div>
-        <div><div className="detail-label">Client ID</div><strong>{event.client_id || "Not provided by audit event"}</strong></div>
-        <div><div className="detail-label">Connection ID</div><strong>{event.connection_id || "Not provided by audit event"}</strong></div>
-        <div><div className="detail-label">Request ID</div><strong>{event.request_id || "Not provided by audit event"}</strong></div>
+        <div><div className="detail-label">Result</div><strong>{event.result || "Unknown"}</strong></div>
+        <div><div className="detail-label">Triage Status</div><strong>{event.triage_status || "open"}</strong>{event.triage_note ? <span className="detail-secondary">{event.triage_note}</span> : null}</div>
       </div>
+
       <div className="triage-actions">
         {triageActions.map((action) => (
           <button key={action.status} onClick={() => onTriage?.(action.status)}>{action.label}</button>
         ))}
       </div>
+
+      <details className="technical-details">
+        <summary>Technical details</summary>
+        <div className="detail-grid">
+          <div><div className="detail-label">Signal Type</div><strong>{event.signal_type || "—"}</strong></div>
+          <div><div className="detail-label">Signal Reason</div><strong>{event.signal_reason || "—"}</strong></div>
+          <div><div className="detail-label">Risk Level</div><strong>{event.risk_level || "—"}</strong></div>
+          <div><div className="detail-label">Impact Type</div><strong>{event.impact_type || "—"}</strong></div>
+          <div><div className="detail-label">Change Type</div><strong>{event.change_type || "—"}</strong></div>
+          <div><div className="detail-label">Resource Family</div><strong>{event.resource_family || "—"}</strong></div>
+          <div><div className="detail-label">Resource Scope</div><strong>{displayContext(event.resource_scope)}</strong></div>
+          <div><div className="detail-label">Parent Resource</div><strong>{displayContext(event.parent_resource)}</strong></div>
+          <div><div className="detail-label">Resource Criticality</div><strong>{displayContext(event.resource_criticality)}</strong></div>
+          <div><div className="detail-label">Blast Radius</div><strong>{displayContext(event.blast_radius_hint)}</strong></div>
+          <div><div className="detail-label">Production Hint</div><strong>{displayContext(event.production_hint)}</strong></div>
+          <div><div className="detail-label">Region</div><strong>{event.flink_region || "—"}</strong></div>
+          <div><div className="detail-label">Actor Type</div><strong>{event.actor_type || event.subject_type || "—"}</strong></div>
+          <div><div className="detail-label">Actor Source</div><strong>{event.actor_source || "—"}</strong>{event.actor_confidence ? <span className="detail-secondary">{event.actor_confidence} confidence</span> : null}</div>
+          <div><div className="detail-label">Actor Enriched At</div><strong>{event.actor_enriched_at || "—"}</strong></div>
+          <div><div className="detail-label">Client ID</div><strong>{event.client_id || "—"}</strong></div>
+          <div><div className="detail-label">Connection ID</div><strong>{event.connection_id || "—"}</strong></div>
+          <div><div className="detail-label">Request ID</div><strong>{event.request_id || "—"}</strong></div>
+        </div>
+      </details>
+
       <div className="fingerprint-row">
         <div>
           <div className="detail-label">Fingerprint</div>

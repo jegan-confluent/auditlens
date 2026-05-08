@@ -8,62 +8,173 @@ import EventDetailDrawer from "../../components/EventDetailDrawer";
 import LoadingState from "../../components/LoadingState";
 import SummaryCards from "../../components/SummaryCards";
 import SystemStatusPanel from "../../components/SystemStatusPanel";
-import { getDeletions, getEvent, getEvents, getFailures, getSummary, getSystemStatus } from "../../lib/api";
+import {
+  getDeletions,
+  getEvent,
+  getEvents,
+  getFailures,
+  getReadinessStatus,
+  getSummary,
+  getSystemStatus,
+  isAbortError
+} from "../../lib/api";
 import type { AuditEvent, EventListResponse, SummaryResponse, SystemStatus } from "../../lib/types";
 
+type Panel<T> = { data: T | null; error: string | null };
+
+function emptyPanel<T>(): Panel<T> {
+  return { data: null, error: null };
+}
+
+function classifyLag(newestEvent: string | null): { tone: "fresh" | "warning" | "critical"; ageHours: number } | null {
+  if (!newestEvent) return null;
+  const ts = Date.parse(newestEvent);
+  if (Number.isNaN(ts)) return null;
+  const ageHours = (Date.now() - ts) / (60 * 60 * 1000);
+  if (ageHours >= 6) return { tone: "critical", ageHours };
+  if (ageHours >= 1) return { tone: "warning", ageHours };
+  return { tone: "fresh", ageHours };
+}
+
+function formatAge(ageHours: number): string {
+  if (ageHours < 1) {
+    const mins = Math.max(1, Math.round(ageHours * 60));
+    return `${mins} min`;
+  }
+  const rounded = Math.round(ageHours * 10) / 10;
+  return `${rounded} h`;
+}
+
 export default function DashboardPage() {
-  const [summary, setSummary] = useState<SummaryResponse | null>(null);
-  const [recent, setRecent] = useState<EventListResponse | null>(null);
-  const [failures, setFailures] = useState<EventListResponse | null>(null);
-  const [deletions, setDeletions] = useState<EventListResponse | null>(null);
-  const [system, setSystem] = useState<SystemStatus | null>(null);
+  const [recent, setRecent] = useState<Panel<EventListResponse>>(emptyPanel());
+  const [summary, setSummary] = useState<Panel<SummaryResponse>>(emptyPanel());
+  const [failures, setFailures] = useState<Panel<EventListResponse>>(emptyPanel());
+  const [deletions, setDeletions] = useState<Panel<EventListResponse>>(emptyPanel());
+  const [system, setSystem] = useState<Panel<SystemStatus>>(emptyPanel());
+  const [newestEvent, setNewestEvent] = useState<string | null>(null);
   const [selected, setSelected] = useState<AuditEvent | null>(null);
-  const [lastUpdated, setLastUpdated] = useState<string>("");
-  const [error, setError] = useState<string | null>(null);
-  const emptyEvents: EventListResponse = { items: [], limit: 5, offset: 0, total: 0, scanned_events: 0, signal_filter_applied: false, hide_noise_applied: false, result_limit_reached: false };
+  const [drawerError, setDrawerError] = useState<string | null>(null);
 
   useEffect(() => {
-    getEvents(new URLSearchParams({ limit: "10", time_window: "2h", mode: "decision" })).then(setRecent).catch((err: Error) => setError(err.message));
-    getSummary(new URLSearchParams({ time_window: "2h", mode: "decision" })).then((data) => {
-      setSummary(data);
-      setLastUpdated(new Date().toLocaleTimeString());
-    }).catch((err: Error) => setError(err.message));
-    getFailures().then(setFailures).catch(() => setFailures(emptyEvents));
-    getDeletions().then(setDeletions).catch(() => setDeletions(emptyEvents));
-    getSystemStatus().then(setSystem).catch(() => setSystem(null));
+    const controller = new AbortController();
+    const { signal } = controller;
+
+    const recentParams = new URLSearchParams({ limit: "10", time_window: "24h", mode: "decision" });
+    const summaryParams = new URLSearchParams({ time_window: "24h", mode: "decision" });
+
+    getEvents(recentParams, signal)
+      .then((data) => setRecent({ data, error: null }))
+      .catch((err: Error) => {
+        if (isAbortError(err)) return;
+        setRecent({ data: null, error: err.message });
+      });
+    getSummary(summaryParams, signal)
+      .then((data) => setSummary({ data, error: null }))
+      .catch((err: Error) => {
+        if (isAbortError(err)) return;
+        setSummary({ data: null, error: err.message });
+      });
+    getFailures(signal)
+      .then((data) => setFailures({ data, error: null }))
+      .catch((err: Error) => {
+        if (isAbortError(err)) return;
+        setFailures({ data: null, error: err.message });
+      });
+    getDeletions(signal)
+      .then((data) => setDeletions({ data, error: null }))
+      .catch((err: Error) => {
+        if (isAbortError(err)) return;
+        setDeletions({ data: null, error: err.message });
+      });
+    getSystemStatus(signal)
+      .then((data) => setSystem({ data, error: null }))
+      .catch((err: Error) => {
+        if (isAbortError(err)) return;
+        setSystem({ data: null, error: err.message });
+      });
+    getReadinessStatus(signal)
+      .then((ready) => setNewestEvent(ready.newest_event ?? null))
+      .catch((err) => {
+        if (isAbortError(err)) return;
+        setNewestEvent(null);
+      });
+
+    return () => controller.abort();
   }, []);
 
   const selectEvent = async (event: AuditEvent) => {
     try {
       setSelected(await getEvent(event.id));
+      setDrawerError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Unable to load event detail");
+      setDrawerError(err instanceof Error ? err.message : "Unable to load event detail");
     }
   };
 
-  if (error) return <main className="page"><ErrorState message={error} /></main>;
-  if (!recent) return <main className="page"><LoadingState label="Loading recent decision events" /></main>;
-  const failureEvents = failures || emptyEvents;
-  const deletionEvents = deletions || emptyEvents;
+  if (drawerError) {
+    return <main className="page"><ErrorState message={drawerError} /></main>;
+  }
+  if (!recent.data && !recent.error) {
+    return <main className="page"><LoadingState label="Loading recent decision events" /></main>;
+  }
+
+  const lag = classifyLag(newestEvent);
 
   return (
     <main className="page">
-      {summary ? <SummaryCards summary={summary} lastUpdated={lastUpdated} /> : <ErrorState message="Summary is still loading or unavailable. Recent decision events are shown below." />}
+      {lag && lag.tone !== "fresh" ? (
+        <div className={`lag-banner ${lag.tone}`} role="status">
+          <strong>{lag.tone === "critical" ? "🚨" : "⚠️"} Data may be delayed</strong>
+          <span> — last event received {formatAge(lag.ageHours)} ago.</span>
+        </div>
+      ) : null}
+
+      {summary.data ? (
+        <SummaryCards summary={summary.data} newestEvent={newestEvent} />
+      ) : (
+        <ErrorState message={summary.error || "Summary unavailable. Recent decision events are shown below."} />
+      )}
+
       <section className="panel" style={{ marginTop: 16 }}>
         <h2>Recent Decision Events</h2>
-        {recent.items.length ? <AuditEventTable events={recent.items} onSelect={selectEvent} /> : <EmptyState />}
+        {recent.error ? (
+          <p className="panel-error">Could not load Recent Events — {recent.error}</p>
+        ) : recent.data && recent.data.items.length ? (
+          <AuditEventTable events={recent.data.items} onSelect={selectEvent} />
+        ) : (
+          <EmptyState />
+        )}
       </section>
+
       <div className="grid" style={{ marginTop: 16 }}>
         <section className="panel">
           <h2>Failures</h2>
-          {failureEvents.items.length ? <AuditEventTable events={failureEvents.items} onSelect={selectEvent} /> : <EmptyState diagnostics="No failed events in the current data set." />}
+          {failures.error ? (
+            <p className="panel-error">Could not load Failures — {failures.error}</p>
+          ) : failures.data && failures.data.items.length ? (
+            <AuditEventTable events={failures.data.items} onSelect={selectEvent} />
+          ) : (
+            <EmptyState diagnostics="No failed events in the current data set." />
+          )}
         </section>
         <section className="panel">
           <h2>Deletions</h2>
-          {deletionEvents.items.length ? <AuditEventTable events={deletionEvents.items} onSelect={selectEvent} /> : <EmptyState diagnostics="No delete-category events in the current data set." />}
+          {deletions.error ? (
+            <p className="panel-error">Could not load Deletions — {deletions.error}</p>
+          ) : deletions.data && deletions.data.items.length ? (
+            <AuditEventTable events={deletions.data.items} onSelect={selectEvent} />
+          ) : (
+            <EmptyState diagnostics="No delete-category events in the current data set." />
+          )}
         </section>
       </div>
-      {system ? <div style={{ marginTop: 16 }}><SystemStatusPanel status={system} /></div> : null}
+
+      {system.error ? (
+        <p className="panel-error" style={{ marginTop: 16 }}>Could not load System status — {system.error}</p>
+      ) : system.data ? (
+        <div style={{ marginTop: 16 }}><SystemStatusPanel status={system.data} /></div>
+      ) : null}
+
       <EventDetailDrawer event={selected} onClose={() => setSelected(null)} />
     </main>
   );

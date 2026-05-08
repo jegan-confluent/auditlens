@@ -10,8 +10,23 @@ import FilterBar from "../../components/FilterBar";
 import LoadingState from "../../components/LoadingState";
 import NarrativeStrip from "../../components/NarrativeStrip";
 import SignalSummaryPanel from "../../components/SignalSummaryPanel";
-import { getEvent, getEvents, getFilters, getSummary, getSystemStatus, updateEventTriage } from "../../lib/api";
-import { activeFilterLabels, allActivityFilters, defaultFilters, paramsFromFilters, summaryParamsFromFilters, type EventFilters } from "../../lib/eventFilters";
+import {
+  getEvent,
+  getEvents,
+  getFilters,
+  getSummary,
+  getSystemStatus,
+  isAbortError,
+  updateEventTriage
+} from "../../lib/api";
+import {
+  activeFilterLabels,
+  allActivityFilters,
+  defaultFilters,
+  paramsFromFilters,
+  summaryParamsFromFilters,
+  type EventFilters
+} from "../../lib/eventFilters";
 import type { AuditEvent, EventListResponse, FilterOptions, SummaryResponse, SystemStatus } from "../../lib/types";
 
 export default function EventsPage() {
@@ -27,35 +42,63 @@ export default function EventsPage() {
   const [system, setSystem] = useState<SystemStatus | null>(null);
 
   useEffect(() => {
-    getFilters().then(setOptions).catch((err: Error) => setError(err.message));
+    const controller = new AbortController();
+    getFilters(controller.signal)
+      .then(setOptions)
+      .catch((err: Error) => {
+        if (isAbortError(err)) return;
+        setError(err.message);
+      });
+    return () => controller.abort();
   }, []);
 
   useEffect(() => {
+    const controller = new AbortController();
     setError(null);
-    getEvents(paramsFromFilters(filters, offset))
+    getEvents(paramsFromFilters(filters, offset), controller.signal)
       .then(setData)
       .catch((err: Error) => {
+        if (isAbortError(err)) return;
         setError(err.message);
-        getSystemStatus().then(setSystem).catch(() => setSystem(null));
+        getSystemStatus(controller.signal)
+          .then(setSystem)
+          .catch((sysErr) => {
+            if (isAbortError(sysErr)) return;
+            setSystem(null);
+          });
       });
+    return () => controller.abort();
   }, [filters, offset]);
 
   useEffect(() => {
+    const controller = new AbortController();
     setSummaryLoading(true);
     setSummaryError(null);
-    getSummary(summaryParamsFromFilters(filters))
+    getSummary(summaryParamsFromFilters(filters), controller.signal)
       .then(setSummary)
-      .catch((err: Error) => setSummaryError(err.message))
-      .finally(() => setSummaryLoading(false));
+      .catch((err: Error) => {
+        if (isAbortError(err)) return;
+        setSummaryError(err.message);
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setSummaryLoading(false);
+      });
+    return () => controller.abort();
   }, [filters]);
 
   const refreshSummary = () => {
+    const controller = new AbortController();
     setSummaryLoading(true);
     setSummaryError(null);
-    return getSummary(summaryParamsFromFilters(filters))
+    return getSummary(summaryParamsFromFilters(filters), controller.signal)
       .then(setSummary)
-      .catch((err: Error) => setSummaryError(err.message))
-      .finally(() => setSummaryLoading(false));
+      .catch((err: Error) => {
+        if (isAbortError(err)) return;
+        setSummaryError(err.message);
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setSummaryLoading(false);
+      });
   };
 
   const selectEvent = async (event: AuditEvent) => {
@@ -82,7 +125,6 @@ export default function EventsPage() {
   };
   const resetFilters = () => updateFilters(defaultFilters);
   const showAllActivity = () => updateFilters(allActivityFilters);
-  const showDecisionMode = () => updateFilters(defaultFilters);
   const applyFlowFilters = (patch: Partial<EventFilters>) => updateFilters({ ...filters, ...patch });
   const applyDecisionFilters = (patch: Partial<EventFilters>) => updateFilters({ ...filters, ...patch });
   const activeFilters = activeFilterLabels(filters);
@@ -94,12 +136,6 @@ export default function EventsPage() {
   return (
     <main className="page">
       <h1>Events</h1>
-      <div className="mode-bar">
-        <strong>{isDecisionMode ? "Decision mode. Routine informational activity is hidden." : "Full audit trail mode. Routine read/list activity is included."}</strong>
-        <button onClick={showDecisionMode}>Back to decision mode</button>
-        <button onClick={showAllActivity}>Show all activity</button>
-        <button onClick={() => updateFilters({ ...filters, mode: "decision", impact_type: "destructive", hide_noise: "false", signal: "" })}>Show only destructive changes</button>
-      </div>
       {summary ? (
         <>
           <DecisionBanner summary={summary} onApplyDecision={applyDecisionFilters} />

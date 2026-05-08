@@ -24,7 +24,6 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
               <Link href="/dashboard">Dashboard</Link>
               <Link href="/events">Events</Link>
               <Link href="/system">System</Link>
-              <Link href="/layout-lab">Layout Lab</Link>
             </nav>
             <HeaderStatus />
           </header>

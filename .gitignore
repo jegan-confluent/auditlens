@@ -61,6 +61,10 @@ eggs/
 .eggs/
 lib/
 lib64/
+# `lib/` above is for Python distribution artifacts. The frontend has its
+# own ./frontend/lib directory of TypeScript modules that must be tracked.
+!frontend/lib/
+!frontend/lib/**
 parts/
 sdist/
 var/
