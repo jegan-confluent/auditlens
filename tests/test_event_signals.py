@@ -37,11 +37,15 @@ def test_failed_authentication_is_action_required():
     assert result["signal_reason"] == "failure_detected"
 
 
-def test_failed_read_only_404_uses_review_copy():
+def test_failed_read_only_get_is_informational():
+    # Read-only methods (Get*/List*) must never escalate to action_required,
+    # even on failure. A 404 from a read is a missing resource, not a
+    # security or destructive event. The early-return read-only rule fires
+    # before the failure cascade so the classifier keeps these as noise-tier
+    # informational signals.
     result = signal({"type": "io.confluent.flink.server/request", "methodName": "GetStatement", "resultStatus": "404 NOT_FOUND"})
-    assert result["signal_type"] == "action_required"
-    assert result["signal_reason"] == "failure_detected"
-    assert result["recommended_action"] == "Review failed read request"
+    assert result["signal_type"] == "informational"
+    assert result["signal_reason"] == "read_only_lookup"
 
 
 def test_read_only_lookup_is_informational():

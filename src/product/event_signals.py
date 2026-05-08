@@ -50,6 +50,36 @@ def _digest(source: Any) -> dict[str, str]:
     return event_digest_from_model(source)
 
 
+_ALWAYS_NOISE_METHODS = frozenset({
+    # Routine RBAC checks. Confluent emits these constantly; both ALLOW and
+    # DENY outcomes are normal authorization-system traffic and should never
+    # land in action_required, regardless of granted/result.
+    "mds.authorize",
+    # Read-path data plane and platform-internal auth refresh that are
+    # by-definition noise. A failure on any of these is also noise — the
+    # user's explicit instruction is "ALWAYS noise".
+    "kafka.fetch",
+    "flink.authenticate",
+    "scheduledjwksrefresh",
+})
+
+# Read-only methods that don't fit the Get*/List* prefix rule below but are
+# still pure reads (Tableflow's table-listing helpers).
+_ALWAYS_INFORMATIONAL_METHODS = frozenset({
+    "tableflowgettable",
+    "tableflowlisttables",
+})
+
+
+def _method_name_lower(event_or_fields: Any, fallback_action: str) -> str:
+    raw = _as_text(
+        _field(event_or_fields, "methodName")
+        or _field(event_or_fields, "method_name")
+        or fallback_action
+    )
+    return raw.lower()
+
+
 def classify_signal(event_or_fields: Any) -> dict[str, str]:
     digest = _digest(event_or_fields)
     impact = digest["impact_type"]
@@ -60,8 +90,33 @@ def classify_signal(event_or_fields: Any) -> dict[str, str]:
     action = _as_text(_field(event_or_fields, "action")).lower()
     normalized_action = _as_text(_field(event_or_fields, "normalized_action")).lower()
     action_text = f"{action} {normalized_action}"
+    method_name = _method_name_lower(event_or_fields, action)
     is_failure = bool(_field(event_or_fields, "is_failure", False)) or any(marker in result for marker in ("fail", "error", "not_found", "not found", "404"))
     is_denied = bool(_field(event_or_fields, "is_denied", False)) or "denied" in result or change == "denied"
+
+    # ── Early-return classifiers ───────────────────────────────────────────
+    # These run BEFORE the failure/denial cascade so that read-only and
+    # routine-noise methods don't get promoted to action_required when they
+    # happen to fail (e.g. GetStatement with a 404, mds.Authorize with
+    # granted=False).
+    if method_name in _ALWAYS_NOISE_METHODS:
+        return {
+            "signal_type": "noise",
+            "signal_reason": "auth_noise",
+            "recommended_action": "No action needed",
+            "decision_label": "Noise",
+        }
+    if (
+        method_name.startswith("get")
+        or method_name.startswith("list")
+        or method_name in _ALWAYS_INFORMATIONAL_METHODS
+    ):
+        return {
+            "signal_type": "informational",
+            "signal_reason": "read_only_lookup",
+            "recommended_action": "No action needed",
+            "decision_label": "Info",
+        }
 
     if is_denied:
         return {
