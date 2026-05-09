@@ -1,4 +1,4 @@
-import type { AuditEvent, EventListResponse, FilterOptions, SummaryResponse, SystemStatus } from "./types";
+import type { AuditEvent, EventListResponse, FilterOptions, ForwarderHealth, SummaryResponse, SystemStatus, VacuumResult } from "./types";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8080";
 
@@ -54,6 +54,23 @@ export function getFilters(signal?: AbortSignal) {
 
 export function getSystemStatus(signal?: AbortSignal) {
   return request<SystemStatus>("/system/status", signal);
+}
+
+export function getForwarderHealth(signal?: AbortSignal) {
+  return request<ForwarderHealth>("/system/forwarder-health", signal);
+}
+
+export async function runForwarderVacuum(signal?: AbortSignal): Promise<VacuumResult> {
+  const response = await fetch(`${API_BASE}/system/vacuum`, {
+    method: "POST",
+    cache: "no-store",
+    signal,
+  });
+  const body = (await response.json()) as VacuumResult;
+  if (!response.ok && !body.status) {
+    throw new Error(`${response.status} ${response.statusText}`);
+  }
+  return body;
 }
 
 export type ReadinessSnapshot = {

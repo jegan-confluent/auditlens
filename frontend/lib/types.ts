@@ -146,3 +146,77 @@ export type SystemStatus = {
   database_mode: string;
   db_health?: Record<string, unknown>;
 };
+
+// Shape of GET /system/forwarder-health (proxies the forwarder's /health).
+// Most fields are optional because the proxy returns
+// {"status": "unknown", "error": "..."} on failure to fetch.
+export type ForwarderHealth = {
+  status?: string;
+  state?: string;
+  error?: string;
+  processed_total?: number;
+  consumer_lag?: number;
+  processing_rate?: number;
+  freshness?: {
+    last_enriched_event_time?: string | null;
+    last_enriched_ingest_at?: string | null;
+    last_committed_at?: string | null;
+  };
+  observability?: {
+    consumer_runtime?: {
+      consumer_state?: string;
+      last_successful_poll?: string | null;
+      poll_count?: number;
+      empty_poll_count?: number;
+      records_consumed_total?: number;
+      consecutive_error_count?: number;
+      last_error?: string | null;
+    };
+    db_writer?: {
+      enabled?: boolean;
+      db_writer_state?: string;
+      db_write_success_total?: number;
+      db_write_error_total?: number;
+      db_write_batch_size?: number;
+      db_last_successful_write?: string | null;
+      db_last_error?: string | null;
+      db_last_cleanup_at?: string | null;
+      db_last_cleanup_deleted_count?: number;
+      retention_days?: number;
+    };
+    persistence_storage?: {
+      enabled?: boolean;
+      healthy?: boolean;
+      backend?: string;
+      db_path?: string;
+      db_file_bytes?: number;
+      max_db_size?: number;
+      db_max_bytes?: number;
+      storage_mode?: string;
+      storage_status?: string;
+      sqlite_reclaimable_bytes?: number;
+      last_vacuum_at?: string | null;
+      last_vacuum_status?: string;
+      hot_cache_retention_hours?: number;
+      data_loss_possible?: boolean;
+    };
+    data_quality?: {
+      missing_principal_total?: number;
+      missing_resource_total?: number;
+      unknown_method_total?: number;
+      classification_fallback_total?: number;
+      suppressed_authz_noise_total?: number;
+    };
+  };
+};
+
+export type VacuumResult = {
+  status: "success" | "failure" | string;
+  trigger?: string;
+  before_bytes?: number;
+  after_bytes?: number;
+  reclaimed_bytes?: number;
+  duration_ms?: number;
+  error?: string;
+  at?: string;
+};
