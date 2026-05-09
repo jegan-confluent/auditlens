@@ -210,6 +210,64 @@ class AuditEventDbWriter:
         metadata.create_all(self.engine)
         self._ensure_columns()
         self._ensure_indexes()
+        self.timescaledb_enabled = self._detect_and_enable_timescaledb()
+
+    def _detect_and_enable_timescaledb(self) -> bool:
+        """If TimescaleDB is installed, convert audit_events and
+        audit_events_noise to hypertables and add a compression policy.
+        Otherwise log "not detected" and continue with regular tables —
+        zero behavior change.
+
+        Hypertables transparently partition by ``timestamp`` (1-day
+        chunks by default), which keeps INSERT cost flat as the table
+        grows and lets the retention sweep drop chunks instead of
+        DELETE-ing rows."""
+        if self.mode != "postgres":
+            logger.info("TimescaleDB skipped — not running on Postgres")
+            return False
+        try:
+            with self.engine.connect() as conn:
+                row = conn.execute(text(
+                    "SELECT extversion FROM pg_extension WHERE extname = 'timescaledb'"
+                )).fetchone()
+        except Exception as exc:
+            logger.debug("TimescaleDB detection probe failed: %s", exc)
+            return False
+        if not row:
+            logger.info("TimescaleDB not detected — using standard tables")
+            return False
+        version = row[0]
+        logger.info("TimescaleDB %s detected — converting tables to hypertables", version)
+        try:
+            with self.engine.begin() as conn:
+                # create_hypertable + add_compression_policy are both
+                # idempotent via if_not_exists=>TRUE; safe to call on
+                # every startup. migrate_data => true allows converting
+                # existing tables that already have rows.
+                for table_name in ("audit_events", "audit_events_noise"):
+                    conn.execute(text(
+                        f"SELECT create_hypertable('{table_name}', 'timestamp', "
+                        "if_not_exists => TRUE, migrate_data => TRUE)"
+                    ))
+                    try:
+                        conn.execute(text(
+                            f"ALTER TABLE {table_name} SET ("
+                            "timescaledb.compress, timescaledb.compress_orderby = 'timestamp DESC')"
+                        ))
+                    except Exception as exc:
+                        # Older Timescale versions or repeat application.
+                        logger.debug("compress ALTER failed on %s: %s", table_name, exc)
+                    conn.execute(text(
+                        f"SELECT add_compression_policy('{table_name}', "
+                        "INTERVAL '1 day', if_not_exists => TRUE)"
+                    ))
+            return True
+        except Exception as exc:
+            logger.warning(
+                "TimescaleDB hypertable conversion failed (continuing with standard tables): %s",
+                exc,
+            )
+            return False
 
     @property
     def mode(self) -> str:
