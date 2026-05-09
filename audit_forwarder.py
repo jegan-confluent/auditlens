@@ -1961,54 +1961,79 @@ def start_metrics_server(port=METRICS_PORT):
     return server
 
 
-def start_lag_monitor(consumer, metrics_obj, interval_seconds: int = 30) -> threading.Thread:
-    """Run consumer-lag polling on a daemon thread.
+def persist_safely(label: str, fn, *args, **kwargs) -> None:
+    """Run a SQLite hot-cache write that must never block the consume path.
 
-    The hot consume loop used to call ``get_watermark_offsets`` for every
-    assigned partition once per minute. With 11 partitions and a 5 s
-    librdkafka timeout per call, a single network blip could stall the
-    loop for tens of seconds. ``get_watermark_offsets`` and
-    ``consumer.position`` are both safe to call from a non-poll thread
-    (librdkafka serialises internally), so we delegate the polling here.
-    Results are written into ``metrics_obj.partition_lag`` via
-    ``update_lag``; the consume loop is no longer affected by lag-poll
-    latency.
+    Postgres is the durable source of truth (db_writer.write_batch). The
+    in-process SQLite store is a query accelerator only — a failed write
+    here is logged at WARN and dropped. Callers explicitly choose this
+    helper for hot-path writes; durable writes still propagate exceptions.
     """
-    interval = max(5, int(interval_seconds))
+    try:
+        fn(*args, **kwargs)
+    except Exception as exc:
+        logger.warning("sqlite_write_failed label=%s error=%s", label, mask_sensitive_text(str(exc)))
 
-    def loop() -> None:
-        while not _shutdown_requested:
-            try:
-                assignment = consumer.assignment() or []
-            except Exception as exc:
-                logger.debug("Lag monitor: consumer.assignment() failed: %s", exc)
-                _sleep_with_shutdown(interval)
-                continue
-            for tp in assignment:
-                if _shutdown_requested:
-                    return
-                try:
-                    low, high = consumer.get_watermark_offsets(tp, timeout=2.0)
-                    positions = consumer.position([tp])
-                    if positions and len(positions) > 0:
-                        pos = positions[0].offset
-                        if pos >= 0:
-                            lag = high - pos
-                            metrics_obj.update_lag(tp.partition, pos, high)
-                            logger.info(
-                                "Lag p%d: pos=%d, high=%d, lag=%d",
-                                tp.partition, pos, high, lag,
-                            )
-                except Exception as exc:
-                    logger.debug("Lag monitor: partition %s lookup failed: %s", getattr(tp, "partition", "?"), exc)
-            _sleep_with_shutdown(interval)
 
-    thread = threading.Thread(target=loop, daemon=True, name="auditlens-lag-monitor")
-    thread.start()
-    logger.info("Lag monitor started (interval=%ds)", interval)
-    return thread
+def make_rdkafka_stats_callback(metrics_obj):
+    """Build a librdkafka stats callback that updates per-partition lag.
+
+    librdkafka emits a JSON stats blob every ``statistics.interval.ms``
+    that includes ``consumer_lag`` per partition. Reading from that is
+    free (no network), thread-safe (callback runs in a librdkafka
+    background thread), and replaces the previous synchronous
+    ``get_watermark_offsets`` polling that could stall the consume
+    loop during cross-region latency spikes.
+
+    Stats arrive as a JSON string; we parse and write into
+    ``metrics_obj.partition_lag`` so existing /health and Prometheus
+    surfaces see fresh numbers without code changes.
+    """
+    def _on_stats(stats_json_str: str) -> None:
+        try:
+            stats = orjson.loads(stats_json_str)
+        except Exception as exc:
+            logger.debug("rdkafka stats parse failed: %s", exc)
+            return
+        try:
+            for topic_data in (stats.get("topics") or {}).values():
+                for partition_id, partition_data in (topic_data.get("partitions") or {}).items():
+                    try:
+                        p_id = int(partition_id)
+                    except (TypeError, ValueError):
+                        continue
+                    if p_id < 0:
+                        # librdkafka uses negative ids for internal "partition -1" tombstones
+                        continue
+                    consumer_lag = partition_data.get("consumer_lag")
+                    if consumer_lag is None or consumer_lag < 0:
+                        continue
+                    hi = partition_data.get("hi_offset")
+                    pos = (hi - consumer_lag) if isinstance(hi, int) and hi >= 0 else (hi or 0)
+                    metrics_obj.update_lag(p_id, pos, hi if isinstance(hi, int) else (pos + consumer_lag))
+        except Exception as exc:
+            logger.debug("rdkafka stats apply failed: %s", exc)
+
+    return _on_stats
 
 # ──────────── kafka configs ────────────
+# Consumer tuning rationale:
+# - fetch.min.bytes 64 KB: wait for real batches; saves request overhead.
+# - fetch.wait.max.ms 500 ms: bound on how long the broker waits for those bytes.
+# - fetch.max.bytes 50 MB: large enough for catchup scenarios over hot partitions.
+# - max.partition.fetch.bytes 1 MB: per-partition cap; defaults are fine.
+# - session.timeout.ms 45 s + heartbeat.interval.ms 15 s (1/3 of session): tolerate
+#   slow PG writes without rebalancing while still detecting a hung consumer.
+# - max.poll.interval.ms 5 min: only relevant for the high-level `subscribe`
+#   model; we use confluent-kafka's lower-level consumer where librdkafka does
+#   heartbeats internally, but we set it as a defence-in-depth limit.
+# - group.instance.id: static membership — restarts don't trigger a full
+#   rebalance, only a brief heartbeat gap.
+# - queued.max.messages.kbytes 1 GB: large internal librdkafka buffer so the
+#   consume thread keeps fetching while the processor is slow.
+# - statistics.interval.ms 10 s: fires stats_cb (set in main()) so we read
+#   per-partition lag from rdkafka stats instead of synchronous
+#   get_watermark_offsets calls.
 consumer_conf = {
     "bootstrap.servers":         AUDIT_BOOTSTRAP,
     "security.protocol":         "SASL_SSL",
@@ -2020,15 +2045,23 @@ consumer_conf = {
     "enable.auto.commit":        False,
     "auto.offset.reset":         AUTO_OFFSET_RESET,
     "fetch.min.bytes":           int(os.getenv("KAFKA_FETCH_MIN_BYTES", str(64 * 1024))),
-    "fetch.max.bytes":           int(os.getenv("KAFKA_FETCH_MAX_BYTES", str(32 * 1024 * 1024))),
-    "fetch.wait.max.ms":         int(os.getenv("KAFKA_FETCH_WAIT_MAX_MS", "500")),
-    "max.partition.fetch.bytes": int(os.getenv("KAFKA_MAX_PARTITION_FETCH_BYTES", str(4 * 1024 * 1024))),
+    "fetch.max.bytes":           int(os.getenv("KAFKA_FETCH_MAX_BYTES", str(50 * 1024 * 1024))),
+    "fetch.wait.max.ms":         int(os.getenv("KAFKA_FETCH_MAX_WAIT_MS", os.getenv("KAFKA_FETCH_WAIT_MAX_MS", "500"))),
+    "max.partition.fetch.bytes": int(os.getenv("KAFKA_MAX_PARTITION_FETCH_BYTES", str(1 * 1024 * 1024))),
     "queued.min.messages":       int(os.getenv("KAFKA_QUEUED_MIN_MESSAGES", "1000")),
-    "queued.max.messages.kbytes": int(os.getenv("KAFKA_QUEUED_MAX_MESSAGES_KBYTES", str(64 * 1024))),
-    # Cross-region latency settings
-    "socket.timeout.ms":         30000,              # 30s socket timeout
-    "session.timeout.ms":        45000,              # 45s session timeout
+    "queued.max.messages.kbytes": int(os.getenv("KAFKA_QUEUED_MAX_MESSAGES_KBYTES", str(1 * 1024 * 1024))),
+    "session.timeout.ms":        int(os.getenv("KAFKA_SESSION_TIMEOUT_MS", "45000")),
+    "heartbeat.interval.ms":     int(os.getenv("KAFKA_HEARTBEAT_INTERVAL_MS", "15000")),
+    "max.poll.interval.ms":      int(os.getenv("KAFKA_MAX_POLL_INTERVAL_MS", "300000")),
+    "socket.timeout.ms":         30000,
+    "statistics.interval.ms":    int(os.getenv("KAFKA_STATS_INTERVAL_MS", "10000")),
 }
+_group_instance_id = os.getenv("KAFKA_GROUP_INSTANCE_ID", "").strip()
+if _group_instance_id:
+    # Static membership keeps the same partition assignment across restarts —
+    # avoids a full rebalance storm when the forwarder cycles. Set to a
+    # stable, unique-per-replica id (e.g. "auditlens-forwarder-1").
+    consumer_conf["group.instance.id"] = _group_instance_id
 
 producer_conf = {
     "bootstrap.servers":            DEST_BOOTSTRAP,
@@ -2882,8 +2915,11 @@ def main():
     else:
         logger.info("Webhook alerting disabled (no configuration)")
 
-    # Create clients
-    consumer = Consumer(consumer_conf)
+    # Create clients. Hook the librdkafka stats callback so per-partition
+    # consumer_lag flows in via stats.json, not synchronous watermark polls.
+    consumer_conf_with_stats = dict(consumer_conf)
+    consumer_conf_with_stats["stats_cb"] = make_rdkafka_stats_callback(metrics)
+    consumer = Consumer(consumer_conf_with_stats)
     producer = Producer(producer_conf)
 
     # Start metrics server
@@ -3014,9 +3050,8 @@ def main():
     consumer.subscribe([AUDIT_TOPIC], on_assign=on_assign, on_revoke=on_revoke)
     logger.info("Subscribed to %s with consumer group %s", AUDIT_TOPIC, GROUP_ID)
 
-    # Lag polling runs on its own daemon thread so an unresponsive partition
-    # cannot stall the consume loop on get_watermark_offsets.
-    start_lag_monitor(consumer, metrics, interval_seconds=int(os.getenv("LAG_MONITOR_INTERVAL_SECONDS", "30")))
+    # Per-partition lag is now sourced from the librdkafka stats_cb (see
+    # make_rdkafka_stats_callback). No synchronous watermark polling.
 
     # Main processing loop
     BATCH_SIZE     = int(os.getenv("KAFKA_CONSUME_BATCH_SIZE", "100"))
@@ -3081,7 +3116,11 @@ def main():
                         event_key = enriched_event.get('id', '').encode('utf-8') if enriched_event.get('id') else None
 
                         if product_store:
-                            product_store.persist_enriched_event(enriched_event, msg.topic(), msg.partition(), msg.offset())
+                            persist_safely(
+                                "enriched_event",
+                                product_store.persist_enriched_event,
+                                enriched_event, msg.topic(), msg.partition(), msg.offset(),
+                            )
                             metrics.record_persistence_success(product_store.health())
                         if ENABLE_DB_WRITER:
                             db_write_buffer.append(enriched_event)
@@ -3123,7 +3162,7 @@ def main():
                                 api_state.record_alert(anomaly_alert)
                                 metrics.record_signal(anomaly.anomaly_type.value)
                                 if product_store:
-                                    product_store.persist_alert(anomaly_alert)
+                                    persist_safely("anomaly_alert", product_store.persist_alert, anomaly_alert)
                                     metrics.record_persistence_success(product_store.health())
 
                         # Send alert for built-in alert rules or CRITICAL events
@@ -3145,7 +3184,11 @@ def main():
 
                         if enriched_event.get("is_high_risk"):
                             if product_store:
-                                product_store.persist_high_risk_event(enriched_event, msg.partition(), msg.offset())
+                                persist_safely(
+                                    "high_risk_event",
+                                    product_store.persist_high_risk_event,
+                                    enriched_event, msg.partition(), msg.offset(),
+                                )
                                 metrics.record_persistence_success(product_store.health())
                             safe_produce(
                                 producer,
@@ -3167,7 +3210,7 @@ def main():
                             api_state.record_alert(operator_alert)
                             metrics.record_signal("operator_alert")
                             if product_store:
-                                product_store.persist_alert(operator_alert)
+                                persist_safely("operator_alert", product_store.persist_alert, operator_alert)
                                 metrics.record_persistence_success(product_store.health())
 
                         if ENABLE_MULTI_TOPIC_ROUTING and topic_router:
@@ -3273,8 +3316,8 @@ def main():
                                    agg_stats['pending_denials'])
                 last_heartbeat = now
 
-            # Periodic maintenance tick (lag polling itself is now on its own
-            # daemon thread — see start_lag_monitor).
+            # Periodic maintenance tick (lag polling itself is now sourced
+            # from rdkafka stats — see make_rdkafka_stats_callback).
             if now - last_lag_ts >= 60:
                 # Periodic cleanup of rate tracker to prevent memory leak
                 anomaly_tracker.cleanup()

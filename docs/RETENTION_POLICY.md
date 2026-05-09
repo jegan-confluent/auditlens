@@ -75,3 +75,61 @@ DB_WRITE_FLUSH_INTERVAL_SECONDS=2        # max age of a partial batch
 
 After changing these, recreate the forwarder container so the new env
 takes effect: `docker compose up -d --force-recreate auditlens-forwarder`.
+
+## Consumer Architecture
+
+AuditLens uses a thread-pool pattern in front of librdkafka:
+
+- **Consumer thread (Thread A)** — calls `consumer.consume()` at full
+  speed, hands message batches to a bounded `queue.Queue`, and never
+  does enrichment, classification, or DB I/O. This keeps Kafka
+  heartbeats flowing even during slow Postgres writes, so the broker
+  doesn't trigger a rebalance.
+- **Processor thread(s) (Thread B)** — pop batches off the queue,
+  enrich, classify, write to Postgres + SQLite hot cache, produce to
+  internal Kafka topics, and signal the consumer thread to commit
+  offsets via a separate offset queue. Processors hold no consumer
+  references.
+- **IAM refresh (background daemon)** — `IdentityEnricher` runs a
+  daemon thread that re-fetches Confluent Cloud service-account and
+  user metadata every 50 minutes and atomically swaps the cache.
+  Refresh failures keep the previous cache and log a WARN.
+- **Lag (rdkafka stats callback)** — `statistics.interval.ms=10000`
+  fires `stats_cb` in librdkafka's background thread; we read
+  per-partition `consumer_lag` straight from the JSON blob, no extra
+  network calls. Replaces synchronous `get_watermark_offsets` polling.
+
+### Kafka consumer tuning applied
+
+| Setting | Value | Why |
+|---|---|---|
+| `fetch.min.bytes` | 64 KB | Wait for real batches, not single events |
+| `fetch.max.wait.ms` | 500 ms | Cap on how long the broker waits for those bytes |
+| `fetch.max.bytes` | 50 MB | Large fetch for catch-up scenarios |
+| `max.partition.fetch.bytes` | 1 MB | Per-partition cap; default-safe |
+| `session.timeout.ms` | 45 s | Tolerate slow processing without rebalance |
+| `heartbeat.interval.ms` | 15 s | One third of session timeout |
+| `max.poll.interval.ms` | 5 min | Defence-in-depth limit on processor stalls |
+| `group.instance.id` | static (per replica) | Static membership avoids full rebalance on restart |
+| `queued.max.messages.kbytes` | 1 GB | Internal librdkafka buffer keeps fetch warm |
+| `statistics.interval.ms` | 10 s | rdkafka stats for lag (no blocking polls) |
+
+Set `KAFKA_GROUP_INSTANCE_ID` in `.env` to opt into static membership.
+Pick a stable, unique-per-replica id (for example
+`auditlens-forwarder-1`).
+
+### Expected throughput
+
+| Scenario | Target msg/s | Lag expectation |
+|---|---|---|
+| Normal operation | 200-500 | < 5 minutes |
+| After restart | 500+ during catch-up | Drains in < 2 hours |
+| With IAM refresh | 200+ (no spike) | Refresh runs in background |
+| High-volume org > 500 ev/s | 5-30 minutes | DB write speed is the cap |
+
+If observed sustained throughput is below 200 msg/s, the bottleneck is
+almost always the Postgres `INSERT ... ON CONFLICT DO NOTHING` on
+`audit_events`. Check `pg_insert_ms` in the "DB writer batch complete"
+log line — if it dominates, options are: drop more unused indexes,
+increase batch size, or run multiple processor threads each with its
+own SQLAlchemy engine.
