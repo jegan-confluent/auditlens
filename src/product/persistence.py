@@ -323,25 +323,33 @@ class SQLiteProductStore:
     def _write(self, sql: str, params: tuple[Any, ...]) -> None:
         assert self._conn is not None
         with self._lock:
-            if self._storage_bytes() > self.config.db_max_bytes:
-                try:
-                    self._rotate_hot_cache_unlocked(trigger="write")
-                except Exception as exc:
-                    self._mark_storage_degraded_unlocked(str(exc), trigger="write")
+            # Skip the per-write storage refresh: it's PRAGMA + file stat heavy
+            # and dominates write latency at hundreds of msg/s. The cleanup
+            # loop, health check, and explicit enforce_storage_bounds() callers
+            # all refresh status separately. Rotation safety still works because
+            # _drop_write_if_emergency() refreshes status on the emergency path.
             self._conn.execute(sql, params)
             self._conn.commit()
             self._status["last_write_at"] = utc_now_iso()
-            self._refresh_storage_status()
+
+    # Throttle the per-write status refresh: cleanup loop, health check, and
+    # enforce_storage_bounds() refresh status on their own cadence; the hot
+    # write path only needs to verify periodically.
+    _STATUS_REFRESH_INTERVAL_SECONDS = 5.0
+    _last_status_refresh_monotonic = 0.0
 
     def _drop_write_if_emergency(self, priority: str) -> bool:
         with self._lock:
-            self._refresh_storage_status()
-            if self._storage_bytes() > self.config.db_max_bytes:
-                try:
-                    self._rotate_hot_cache_unlocked(trigger="write")
-                except Exception as exc:
-                    self._mark_storage_degraded_unlocked(str(exc), trigger="write")
-            self._refresh_storage_status()
+            now = time.monotonic()
+            if now - self._last_status_refresh_monotonic >= self._STATUS_REFRESH_INTERVAL_SECONDS:
+                self._refresh_storage_status()
+                if self._storage_bytes() > self.config.db_max_bytes:
+                    try:
+                        self._rotate_hot_cache_unlocked(trigger="write")
+                    except Exception as exc:
+                        self._mark_storage_degraded_unlocked(str(exc), trigger="write")
+                    self._refresh_storage_status()
+                self._last_status_refresh_monotonic = now
         if self._storage_mode() != "emergency" and not self._status.get("storage_degraded"):
             return False
         if priority == "high":
@@ -639,6 +647,7 @@ class SQLiteProductStore:
                 self._status["cleanup_status"] = "success"
                 self._status["cleanup_last_error"] = None
                 self._refresh_storage_status()
+                self._vacuum_if_useful_unlocked()
                 return deleted_rows
             except Exception as exc:
                 self._status["last_cleanup_at"] = utc_now_iso()
@@ -1080,9 +1089,72 @@ class SQLiteProductStore:
             self._status["last_checkpoint_status"] = "skipped"
             self._status["last_checkpoint_error"] = str(exc)
 
+    # Auto-vacuum threshold: ~500MB reclaimable. Below this the rebuild cost
+    # (VACUUM rewrites the entire DB file) exceeds the disk-reclaim benefit.
+    _VACUUM_RECLAIM_THRESHOLD_BYTES = 500 * 1024 * 1024
+
+    def vacuum(self) -> Dict[str, Any]:
+        """Run a full SQLite VACUUM. Public entry point for /admin/vacuum."""
+        with self._lock:
+            return self._vacuum_unlocked(trigger="manual")
+
     def _vacuum_if_useful_unlocked(self) -> None:
-        self._status["last_vacuum_status"] = "not_used"
-        self._status["last_vacuum_error"] = None
+        reclaimable = int(self._status.get("sqlite_reclaimable_bytes") or 0)
+        storage_mode = str(self._status.get("storage_mode") or "normal")
+        should_vacuum = (
+            reclaimable >= self._VACUUM_RECLAIM_THRESHOLD_BYTES
+            or storage_mode in {"critical", "emergency"}
+        )
+        if not should_vacuum:
+            return
+        self._vacuum_unlocked(trigger=f"auto:{storage_mode}")
+
+    def _vacuum_unlocked(self, *, trigger: str) -> Dict[str, Any]:
+        assert self._conn is not None
+        before_bytes = int(self._status.get("db_file_bytes") or 0)
+        before_reclaimable = int(self._status.get("sqlite_reclaimable_bytes") or 0)
+        started = time.monotonic()
+        try:
+            # Checkpoint first so the WAL doesn't get rewritten as part of VACUUM.
+            self._checkpoint_wal_best_effort_unlocked(mode="TRUNCATE")
+            # VACUUM cannot run inside an explicit transaction. The connection
+            # was opened with isolation_level=None for autocommit, but commit()
+            # any pending implicit transaction defensively first.
+            self._conn.commit()
+            self._conn.execute("VACUUM")
+            duration_ms = int((time.monotonic() - started) * 1000)
+            self._status["last_vacuum_at"] = utc_now_iso()
+            self._status["last_vacuum_status"] = "success"
+            self._status["last_vacuum_error"] = None
+            self._refresh_storage_status()
+            after_bytes = int(self._status.get("db_file_bytes") or 0)
+            reclaimed = max(0, before_bytes - after_bytes)
+            logger.info(
+                "SQLite VACUUM complete trigger=%s before_bytes=%d after_bytes=%d reclaimed_bytes=%d duration_ms=%d",
+                trigger, before_bytes, after_bytes, reclaimed, duration_ms,
+            )
+            return {
+                "status": "success",
+                "trigger": trigger,
+                "before_bytes": before_bytes,
+                "after_bytes": after_bytes,
+                "before_reclaimable_bytes": before_reclaimable,
+                "reclaimed_bytes": reclaimed,
+                "duration_ms": duration_ms,
+                "at": self._status["last_vacuum_at"],
+            }
+        except Exception as exc:
+            self._status["last_vacuum_at"] = utc_now_iso()
+            self._status["last_vacuum_status"] = "failure"
+            self._status["last_vacuum_error"] = str(exc)
+            self._refresh_storage_status()
+            logger.warning("SQLite VACUUM failed trigger=%s error=%s", trigger, exc)
+            return {
+                "status": "failure",
+                "trigger": trigger,
+                "error": str(exc),
+                "at": self._status["last_vacuum_at"],
+            }
 
     def _refresh_storage_status(self) -> None:
         db_path = self.config.db_path

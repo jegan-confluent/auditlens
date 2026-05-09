@@ -1921,6 +1921,30 @@ class MetricsHandler(BaseHTTPRequestHandler):
             })
             return
 
+        if parsed.path == "/admin/vacuum":
+            actor = self._authorize_request(parsed.path, {}, export=False)
+            if actor is None:
+                return
+            if actor.role != Role.ADMIN:
+                self._record_api_audit(actor, "vacuum", parsed.path, 403, body, "admin access required")
+                self._json_error(403, "admin access required")
+                return
+            if not (product_store and PERSISTENCE_CONFIG.enabled):
+                self._record_api_audit(actor, "vacuum", parsed.path, 503, body, "persistence disabled")
+                self._json_error(503, "persistence disabled")
+                return
+            try:
+                result = product_store.vacuum()
+            except Exception as exc:
+                logger.exception("VACUUM via /admin/vacuum failed")
+                self._record_api_audit(actor, "vacuum", parsed.path, 500, body, str(exc))
+                self._json_error(500, f"vacuum failed: {exc}")
+                return
+            status_code = 200 if result.get("status") == "success" else 500
+            self._record_api_audit(actor, "vacuum", parsed.path, status_code, body)
+            self._send_json(status_code, result)
+            return
+
         self.send_response(404)
         self.end_headers()
     
