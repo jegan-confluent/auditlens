@@ -15,6 +15,103 @@ from src.product.resource_intelligence import (
 from src.product.source_enrichment import extract_source_info
 
 
+# Methods we treat as pure noise: produce/fetch traffic, authentication,
+# and authorization-check fanout. None of these need actor enrichment,
+# event intelligence, or resource criticality scoring — they're routine
+# data plane and access-check chatter.
+BULK_NOISE_METHODS: frozenset[str] = frozenset({
+    'mds.authorize',
+    'kafka.fetch',
+    'kafka.produce',
+    'flink.authenticate',
+    'flink.authorize',
+    'schema-registry.authentication',
+    'schema-registry.authorize',
+    'kafka.authentication',
+    'scheduledjwksrefresh',
+    'ksql.authenticate',
+    'ksql.authorize',
+    'ip-filter.authorize',
+})
+
+
+def is_bulk_noise(method_name: str | None) -> bool:
+    """True when the event is high-volume noise that the bulk lane should
+    handle with the minimal-normalize fast path."""
+    if not method_name:
+        return False
+    return str(method_name).lower() in BULK_NOISE_METHODS
+
+
+def minimal_normalize(event: dict[str, Any]) -> dict[str, Any]:
+    """Fast path for bulk-noise events. Skips IAM lookup, decision
+    snapshot, resource intelligence, and signal cascade — produces only
+    the columns the noise table actually stores. Target: < 1ms per event.
+    """
+    method = event.get('methodName') or event.get('method') or event.get('action') or ''
+    data = event.get('data') if isinstance(event.get('data'), dict) else {}
+    auth_info = data.get('authenticationInfo') if isinstance(data, dict) else None
+    if not isinstance(auth_info, dict):
+        auth_info = {}
+    authz_info = data.get('authorizationInfo') if isinstance(data, dict) else None
+    if not isinstance(authz_info, dict):
+        authz_info = {}
+
+    actor = (
+        auth_info.get('principal')
+        or event.get('user_display')
+        or event.get('user')
+        or event.get('principal')
+        or event.get('subject')
+        or event.get('actor')
+        or 'unknown'
+    )
+    resource = (
+        event.get('resource_name')
+        or event.get('resourceName')
+        or event.get('authzResourceName')
+        or (data.get('resourceName') if isinstance(data, dict) else None)
+        or ''
+    )
+    granted = authz_info.get('granted')
+    if granted is None:
+        granted = event.get('granted')
+    granted_bool = True if granted is None else bool(granted)
+    is_failure_flag = bool(event.get('is_failure'))
+
+    return {
+        'action': method,
+        'normalized_action': 'Auth/Access check',
+        'action_category': 'Security',
+        'signal_type': 'noise',
+        'signal_reason': 'auth_noise',
+        'result': 'Success' if granted_bool and not is_failure_flag else 'Failure',
+        'is_routine_noise': True,
+        'is_denied': not granted_bool,
+        'is_failure': is_failure_flag or not granted_bool,
+        'actor': str(actor),
+        'actor_id': None,
+        'actor_display_name': str(actor),
+        'actor_email': None,
+        'actor_type': 'unknown',
+        'actor_source': 'minimal',
+        'actor_confidence': 'none',
+        'actor_enriched_at': None,
+        'resource_name': str(resource),
+        'resource_display': str(resource),
+        'resource_type': 'unknown',
+        'cluster_id': event.get('cluster_id') or event.get('clusterId') or None,
+        'source_ip': event.get('source_ip') or event.get('clientIp') or None,
+        'environment_id': event.get('environment_id') or event.get('environmentId') or None,
+        'summary': f"{actor} auth check",
+        'event_title': 'Routine auth check',
+        'event_summary': 'Routine authentication or authorization check',
+        'risk_level': 'low',
+        'impact_type': 'none',
+        'change_type': 'none',
+    }
+
+
 def canonical_resource_type(value: Any) -> str:
     return _canonical_resource_type(value)
 
