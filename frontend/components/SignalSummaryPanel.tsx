@@ -1,16 +1,11 @@
 import type { SummaryResponse } from "../lib/types";
 import type { EventFilters } from "../lib/eventFilters";
 
-function countFor(summary: SummaryResponse, key: "noise_count" | "informational_count" | "attention_count" | "action_required_count") {
-  return (summary[key] || 0).toLocaleString();
-}
-
 function resourceTypeForFamily(family: string) {
   // Mirrors src/product/resource_intelligence.RESOURCE_TYPE_ALIASES (the
   // canonical types the forwarder emits after the 2026-05-08 alias
   // extension). When `flowPatch` produces a `resource_type` query value the
-  // backend filter expects the string to round-trip canonically, so map
-  // every family the classifier can emit.
+  // backend filter expects the string to round-trip canonically.
   const mapping: Record<string, string> = {
     topic: "Topic",
     subject: "Subject",
@@ -61,61 +56,97 @@ function flowPatch(group: SummaryResponse["flow_groups"][number]): Partial<Event
   };
 }
 
-function filterPreview(patch: Partial<EventFilters>) {
-  return [
-    patch.actor ? `Actor: ${patch.actor}` : "",
-    patch.signal ? `Signal: ${patch.signal}` : "",
-    patch.resource ? `Resource: ${patch.resource}` : ""
-  ].filter(Boolean);
+function statPatch(signal: string): Partial<EventFilters> {
+  return { mode: signal === "noise" ? "audit_trail" : "decision", signal, hide_noise: signal === "noise" ? "false" : "true" };
+}
+
+function iconForSignal(signal: string): string {
+  if (signal === "action_required") return "🔴";
+  if (signal === "attention") return "🟡";
+  if (signal === "informational") return "ℹ️";
+  return "·";
+}
+
+function formatAge(iso: string): string {
+  const ts = Date.parse(iso);
+  if (Number.isNaN(ts)) return "recently";
+  const ageMin = Math.max(0, (Date.now() - ts) / 60000);
+  if (ageMin < 1) return "just now";
+  if (ageMin < 60) return `${Math.round(ageMin)}m ago`;
+  const ageH = ageMin / 60;
+  if (ageH < 24) return `${Math.round(ageH * 10) / 10}h ago`;
+  return `${Math.round(ageH / 24)}d ago`;
 }
 
 export default function SignalSummaryPanel({ summary, onApplyFlow }: {
   summary: SummaryResponse;
   onApplyFlow?: (patch: Partial<EventFilters>) => void;
 }) {
-  const matters =
-    summary.action_required_count > 0
-      ? `${summary.action_required_count.toLocaleString()} action required`
-      : summary.attention_count > 0
-        ? `${summary.attention_count.toLocaleString()} items need review`
-        : "No action needed";
-
   return (
     <section className={`signal-panel ${summary.overall_status}`}>
-      <div className="signal-headline">
-        <div>
-          <div className="eyebrow">What matters</div>
-          <h2>{matters}</h2>
-          <p>{summary.headline}</p>
-        </div>
-        <div className="signal-digest">
-          {summary.short_digest}
-          {summary.summary_scope === "sampled" ? <span>{summary.sample_warning || `Summary based on latest ${summary.scanned_events.toLocaleString()} matching events.`}</span> : null}
-        </div>
-      </div>
-      <div className="signal-counts">
-        <div><span>Noise</span><strong>{countFor(summary, "noise_count")}</strong></div>
-        <div><span>Info</span><strong>{countFor(summary, "informational_count")}</strong></div>
-        <div><span>Review</span><strong>{countFor(summary, "attention_count")}</strong></div>
-        <div><span>Action Needed</span><strong>{countFor(summary, "action_required_count")}</strong></div>
+      <div className="signal-stat-cards">
+        <button
+          type="button"
+          className="signal-stat-card noise"
+          onClick={() => onApplyFlow?.(statPatch("noise"))}
+        >
+          <span className="signal-stat-icon" aria-hidden>🔇</span>
+          <span className="signal-stat-count">{summary.noise_count.toLocaleString()}</span>
+          <span className="signal-stat-label">Noise</span>
+        </button>
+        <button
+          type="button"
+          className="signal-stat-card info"
+          onClick={() => onApplyFlow?.(statPatch("informational"))}
+        >
+          <span className="signal-stat-icon" aria-hidden>ℹ️</span>
+          <span className="signal-stat-count">{summary.informational_count.toLocaleString()}</span>
+          <span className="signal-stat-label">Info</span>
+        </button>
+        <button
+          type="button"
+          className={`signal-stat-card review ${summary.attention_count > 0 ? "amber" : ""}`}
+          onClick={() => onApplyFlow?.(statPatch("attention"))}
+        >
+          <span className="signal-stat-icon" aria-hidden>👀</span>
+          <span className="signal-stat-count">{summary.attention_count.toLocaleString()}</span>
+          <span className="signal-stat-label">Review</span>
+        </button>
+        <button
+          type="button"
+          className={`signal-stat-card action ${summary.action_required_count > 0 ? "red" : ""}`}
+          onClick={() => onApplyFlow?.(statPatch("action_required"))}
+        >
+          <span className="signal-stat-icon" aria-hidden>🔴</span>
+          <span className="signal-stat-count">{summary.action_required_count.toLocaleString()}</span>
+          <span className="signal-stat-label">Action</span>
+        </button>
       </div>
       {summary.flow_groups.length ? (
         <div className="flow-list">
           <div className="eyebrow">Top activity flows</div>
           {summary.flow_groups.slice(0, 5).map((group) => {
             const patch = flowPatch(group);
-            const preview = filterPreview(patch);
             const clickable = Boolean(onApplyFlow && (patch.actor || patch.signal || patch.resource_type || patch.resource));
+            const signalClass = group.signal_type === "action_required" ? "action_required" : group.signal_type === "attention" ? "attention" : "informational";
+            const ButtonOrDiv = clickable ? "button" : "div";
             return (
-              <div key={`${group.group_title}-${group.first_seen}`} className={`flow-card ${group.signal_type}`}>
-                <strong>{group.group_title}</strong>
-                <span>{group.group_summary}</span>
-                <span>{group.event_count.toLocaleString()} events • {new Date(group.first_seen).toLocaleString()} - {new Date(group.last_seen).toLocaleString()}</span>
-                <span>{group.subject} • {group.resource_family}{group.resource_display_short && group.resource_display_short !== "Unknown" ? ` • ${group.resource_display_short}` : ""}</span>
-                {preview.length ? <span className="filter-preview">{preview.join(" • ")}</span> : null}
-                <em>{group.recommended_action}</em>
-                {clickable ? <button onClick={() => onApplyFlow?.(patch)}>Filter by this activity</button> : <span>Open details only</span>}
-              </div>
+              <ButtonOrDiv
+                key={`${group.group_title}-${group.first_seen}`}
+                type={clickable ? "button" : undefined}
+                className={`flow-row ${signalClass}`}
+                onClick={clickable ? () => onApplyFlow?.(patch) : undefined}
+              >
+                <span className="flow-icon" aria-hidden>{iconForSignal(group.signal_type)}</span>
+                <span className="flow-body">
+                  <span className="flow-title">{group.group_title}</span>
+                  <span className="flow-meta">
+                    {group.subject || "—"} · {formatAge(group.last_seen)}
+                    {group.event_count > 1 ? ` · ${group.event_count.toLocaleString()} events` : ""}
+                  </span>
+                </span>
+                <span className="flow-arrow" aria-hidden>{clickable ? "→" : ""}</span>
+              </ButtonOrDiv>
             );
           })}
         </div>
