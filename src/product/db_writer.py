@@ -315,7 +315,50 @@ class AuditEventDbWriter:
         self._upsert_catalog_rows(resource_rows)
         return len(resource_rows)
 
+    @staticmethod
+    def _dedupe_catalog_rows(resource_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Collapse duplicate resource_id rows down to one entry per id.
+
+        Postgres's ``ON CONFLICT DO UPDATE`` cannot affect the same target
+        row twice in a single statement (CardinalityViolation). Audit
+        batches frequently contain many events for the same resource
+        (e.g. dozens of authz checks against the same topic in the same
+        second), all of which produce the same resource_id. We keep the
+        last entry by ``last_seen_at`` so the recency update in the
+        upsert reflects the latest event in the batch.
+        """
+        if not resource_rows:
+            return resource_rows
+        deduped: dict[Any, dict[str, Any]] = {}
+        for row in resource_rows:
+            key = row.get("resource_id")
+            if key is None:
+                # Drop rows missing the conflict key — they would fail
+                # the constraint anyway.
+                continue
+            existing = deduped.get(key)
+            if existing is None:
+                deduped[key] = row
+                continue
+            # Compare last_seen_at; keep the row with the more recent
+            # timestamp. Datetime objects compare directly; strings
+            # compare lexicographically (ISO-8601 keeps that monotonic).
+            try:
+                if row.get("last_seen_at") and (
+                    not existing.get("last_seen_at")
+                    or row["last_seen_at"] >= existing["last_seen_at"]
+                ):
+                    deduped[key] = row
+            except TypeError:
+                # Mixed datetime/str shapes — fall back to "later wins"
+                # in iteration order, which is also the upsert's default.
+                deduped[key] = row
+        return list(deduped.values())
+
     def _upsert_catalog_rows(self, resource_rows: list[dict[str, Any]]) -> None:
+        resource_rows = self._dedupe_catalog_rows(resource_rows)
+        if not resource_rows:
+            return
         with self.engine.begin() as conn:
             if self.mode == "postgres":
                 stmt = postgres_insert(resource_catalog).values(resource_rows)
