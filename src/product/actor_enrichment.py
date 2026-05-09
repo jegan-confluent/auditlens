@@ -167,11 +167,17 @@ def _confluent_identity_enricher() -> ConfluentIdentityEnricher | None:
         return None
     if not config.confluent_api_key or not config.confluent_api_secret:
         return None
-    return ConfluentIdentityEnricher(
+    enricher = ConfluentIdentityEnricher(
         api_key=config.confluent_api_key,
         api_secret=config.confluent_api_secret,
         cache_ttl=config.cache_ttl_seconds,
     )
+    # Background-refresh the IAM cache so the consume loop never pays the
+    # 6-8 s cost of the initial 11-page load on the hot path. The first
+    # refresh runs inside the daemon thread; resolve() returns raw_id
+    # until it completes.
+    enricher.start_background_refresh()
+    return enricher
 
 
 def _looks_like_raw_principal(value: str) -> bool:

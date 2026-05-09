@@ -1960,6 +1960,54 @@ def start_metrics_server(port=METRICS_PORT):
     logger.info(f"Metrics server started on port {port}")
     return server
 
+
+def start_lag_monitor(consumer, metrics_obj, interval_seconds: int = 30) -> threading.Thread:
+    """Run consumer-lag polling on a daemon thread.
+
+    The hot consume loop used to call ``get_watermark_offsets`` for every
+    assigned partition once per minute. With 11 partitions and a 5 s
+    librdkafka timeout per call, a single network blip could stall the
+    loop for tens of seconds. ``get_watermark_offsets`` and
+    ``consumer.position`` are both safe to call from a non-poll thread
+    (librdkafka serialises internally), so we delegate the polling here.
+    Results are written into ``metrics_obj.partition_lag`` via
+    ``update_lag``; the consume loop is no longer affected by lag-poll
+    latency.
+    """
+    interval = max(5, int(interval_seconds))
+
+    def loop() -> None:
+        while not _shutdown_requested:
+            try:
+                assignment = consumer.assignment() or []
+            except Exception as exc:
+                logger.debug("Lag monitor: consumer.assignment() failed: %s", exc)
+                _sleep_with_shutdown(interval)
+                continue
+            for tp in assignment:
+                if _shutdown_requested:
+                    return
+                try:
+                    low, high = consumer.get_watermark_offsets(tp, timeout=2.0)
+                    positions = consumer.position([tp])
+                    if positions and len(positions) > 0:
+                        pos = positions[0].offset
+                        if pos >= 0:
+                            lag = high - pos
+                            metrics_obj.update_lag(tp.partition, pos, high)
+                            logger.info(
+                                "Lag p%d: pos=%d, high=%d, lag=%d",
+                                tp.partition, pos, high, lag,
+                            )
+                except Exception as exc:
+                    logger.debug("Lag monitor: partition %s lookup failed: %s", getattr(tp, "partition", "?"), exc)
+            _sleep_with_shutdown(interval)
+
+    thread = threading.Thread(target=loop, daemon=True, name="auditlens-lag-monitor")
+    thread.start()
+    logger.info("Lag monitor started (interval=%ds)", interval)
+    return thread
+
 # ──────────── kafka configs ────────────
 consumer_conf = {
     "bootstrap.servers":         AUDIT_BOOTSTRAP,
@@ -2419,10 +2467,14 @@ def flush_db_writer_batch(payloads: list[dict], backoff: RuntimeBackoff, log_sta
             metrics.record_db_retention_cleanup(cleanup)
         backoff.reset()
         logger.info(
-            "DB writer batch complete attempted=%d inserted=%d elapsed_ms=%.1f",
+            "DB writer batch complete attempted=%d inserted=%d elapsed_ms=%.1f "
+            "[normalize=%.0fms pg_insert=%.0fms catalog_upsert=%.0fms]",
             result.attempted,
             result.inserted,
             result.elapsed_ms,
+            getattr(result, "normalize_ms", 0.0),
+            getattr(result, "pg_insert_ms", 0.0),
+            getattr(result, "catalog_upsert_ms", 0.0),
         )
         return True
     except Exception as exc:
@@ -2798,17 +2850,22 @@ def main():
     else:
         logger.info("Schema Registry not configured (optional)")
 
-    # Initialize anomaly detection
-    anomaly_config = RateTrackerConfig(
-        window_seconds=ANOMALY_WINDOW_SECONDS,
-        auth_failure_threshold=ANOMALY_AUTH_FAILURE_THRESHOLD,
-        activity_spike_threshold=ANOMALY_ACTIVITY_SPIKE_THRESHOLD,
-        deletion_threshold=ANOMALY_DELETION_THRESHOLD,
-        api_key_threshold=ANOMALY_API_KEY_THRESHOLD,
-    )
+    # Initialize anomaly detection.
+    # Use from_env() so ANOMALY_WHITELIST_PRINCIPALS, ANOMALY_SPIKE_THRESHOLD,
+    # and ANOMALY_DEDUP_WINDOW_SECONDS take effect at runtime. The legacy
+    # module-level ANOMALY_ACTIVITY_SPIKE_THRESHOLD constant is honored by
+    # from_env() as a fallback when ANOMALY_SPIKE_THRESHOLD is unset.
+    anomaly_config = RateTrackerConfig.from_env()
     anomaly_tracker = RateTracker(anomaly_config)
-    logger.info("Anomaly detection initialized: window=%ds, auth_failure_threshold=%d",
-                ANOMALY_WINDOW_SECONDS, ANOMALY_AUTH_FAILURE_THRESHOLD)
+    logger.info(
+        "Anomaly detection initialized: window=%ds, auth_failure_threshold=%d, "
+        "activity_spike_threshold=%d, dedup_window=%ds, whitelist_principals=%s",
+        anomaly_config.window_seconds,
+        anomaly_config.auth_failure_threshold,
+        anomaly_config.activity_spike_threshold,
+        anomaly_config.dedup_window_seconds,
+        list(anomaly_config.whitelist_principals) or "<none>",
+    )
 
     # Initialize webhook alerting
     webhook_sender = get_webhook_sender()
@@ -2956,6 +3013,10 @@ def main():
     # On rejoins after crash: resumes from last committed offset
     consumer.subscribe([AUDIT_TOPIC], on_assign=on_assign, on_revoke=on_revoke)
     logger.info("Subscribed to %s with consumer group %s", AUDIT_TOPIC, GROUP_ID)
+
+    # Lag polling runs on its own daemon thread so an unresponsive partition
+    # cannot stall the consume loop on get_watermark_offsets.
+    start_lag_monitor(consumer, metrics, interval_seconds=int(os.getenv("LAG_MONITOR_INTERVAL_SECONDS", "30")))
 
     # Main processing loop
     BATCH_SIZE     = int(os.getenv("KAFKA_CONSUME_BATCH_SIZE", "100"))
@@ -3212,28 +3273,30 @@ def main():
                                    agg_stats['pending_denials'])
                 last_heartbeat = now
 
-            # lag report
+            # Periodic maintenance tick (lag polling itself is now on its own
+            # daemon thread — see start_lag_monitor).
             if now - last_lag_ts >= 60:
-                for tp in consumer.assignment():
-                    try:
-                        low, high = consumer.get_watermark_offsets(tp, timeout=5.0)
-                        positions = consumer.position([tp])
-                        if positions and len(positions) > 0:
-                            pos = positions[0].offset
-                            if pos >= 0:
-                                lag = high - pos
-                                metrics.update_lag(tp.partition, pos, high)
-                                logger.info("Lag p%d: pos=%d, high=%d, lag=%d",
-                                            tp.partition, pos, high, lag)
-                    except Exception as e:
-                        logger.warning("Error getting lag for partition %d: %s", tp.partition, e)
-
                 # Periodic cleanup of rate tracker to prevent memory leak
                 anomaly_tracker.cleanup()
                 tracker_stats = anomaly_tracker.get_stats()
                 logger.debug("Rate tracker cleanup: %d principals, %d IPs tracked",
                             tracker_stats.get('tracked_principals', 0),
                             tracker_stats.get('tracked_ips', 0))
+
+                # Surface anomaly-suppression tally so operators can see how
+                # noisy each (principal, type) pair was without per-event log
+                # spam. Drains the counter inside the tracker.
+                try:
+                    summary = anomaly_tracker.flush_suppression_summary()
+                    for anomaly_type, principal, count in summary:
+                        logger.info(
+                            "%s: %s suppressed %d repeats in last %ds",
+                            principal or "<unknown>", anomaly_type, count,
+                            anomaly_tracker.config.dedup_window_seconds,
+                        )
+                except AttributeError:
+                    pass  # older RateTracker without the helper
+
                 if product_store:
                     try:
                         product_store.cleanup_expired()

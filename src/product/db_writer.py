@@ -37,6 +37,11 @@ class DbWriteResult:
     attempted: int
     inserted: int
     elapsed_ms: float
+    # Per-phase breakdown so operators can tell at a glance whether a slow
+    # batch is dominated by row-building, the PG INSERT, or the catalog upsert.
+    normalize_ms: float = 0.0
+    pg_insert_ms: float = 0.0
+    catalog_upsert_ms: float = 0.0
 
 
 metadata = MetaData()
@@ -235,6 +240,7 @@ class AuditEventDbWriter:
         }
 
     def write_batch(self, payloads: list[dict[str, Any]]) -> DbWriteResult:
+        normalize_started = time.perf_counter()
         rows = [self._row(payload) for payload in payloads]
         resource_rows = []
         for payload, row in zip(payloads, rows):
@@ -246,9 +252,11 @@ class AuditEventDbWriter:
             if record["resource_type"] == "unknown" and record["resource_name"] in {"", "-"}:
                 continue
             resource_rows.append(record)
+        normalize_ms = (time.perf_counter() - normalize_started) * 1000
         if not rows:
-            return DbWriteResult(attempted=0, inserted=0, elapsed_ms=0.0)
+            return DbWriteResult(attempted=0, inserted=0, elapsed_ms=0.0, normalize_ms=normalize_ms)
         started = time.perf_counter()
+        pg_insert_started = time.perf_counter()
         if self.mode == "postgres":
             statement = (
                 postgres_insert(audit_events)
@@ -261,6 +269,8 @@ class AuditEventDbWriter:
         with self.engine.begin() as conn:
             result = conn.execute(statement)
             inserted = len(result.fetchall()) if self.mode == "postgres" else int(result.rowcount or 0)
+        pg_insert_ms = (time.perf_counter() - pg_insert_started) * 1000
+        catalog_upsert_started = time.perf_counter()
         if resource_rows:
             try:
                 with self.engine.begin() as conn:
@@ -319,7 +329,15 @@ class AuditEventDbWriter:
                     conn.execute(resource_statement)
             except Exception as exc:  # pragma: no cover - best-effort enrichment
                 logger.debug("resource catalog write failed: %s", exc)
-        return DbWriteResult(attempted=len(rows), inserted=inserted, elapsed_ms=(time.perf_counter() - started) * 1000)
+        catalog_upsert_ms = (time.perf_counter() - catalog_upsert_started) * 1000
+        return DbWriteResult(
+            attempted=len(rows),
+            inserted=inserted,
+            elapsed_ms=(time.perf_counter() - started) * 1000,
+            normalize_ms=normalize_ms,
+            pg_insert_ms=pg_insert_ms,
+            catalog_upsert_ms=catalog_upsert_ms,
+        )
 
     def cleanup_retention(self, *, dry_run: bool = False, retention_days: int | None = None) -> dict[str, Any]:
         days = max(1, int(retention_days or self.retention_days))

@@ -32,6 +32,15 @@ class AnomalyType(str, Enum):
     API_KEY_ABUSE = "api_key_abuse"
 
 
+def _normalize_principal_for_compare(principal: Optional[str]) -> str:
+    """Strip the leading ``User:`` qualifier so audit-event principals
+    (which are emitted as ``User:sa-7y6xj82``) compare against the raw id
+    used in the whitelist and the dedup map."""
+    if not principal:
+        return ""
+    return principal[5:] if principal.startswith("User:") else principal
+
+
 @dataclass
 class AnomalyAlert:
     """An anomaly detection alert."""
@@ -89,7 +98,15 @@ class RateTrackerConfig:
 
     # Principals to skip anomaly detection for entirely (e.g. trusted Flink /
     # Tableflow service accounts that legitimately spike at 100+ ev/s).
+    # Comparisons are done against the normalized id (without "User:" prefix),
+    # so users may set this to "sa-7y6xj82" without worrying about how the
+    # forwarder names the principal in a given event.
     whitelist_principals: tuple = ()
+
+    # Dedup window for repeated alerts about the same (principal, anomaly_type).
+    # Within this window, only the first alert is emitted; the rest are tallied
+    # and surfaced as a periodic suppression-summary log line.
+    dedup_window_seconds: int = 300
 
     @classmethod
     def from_env(cls) -> 'RateTrackerConfig':
@@ -113,6 +130,7 @@ class RateTrackerConfig:
             enable_deletion_detection=os.getenv('ANOMALY_ENABLE_DELETION', 'true').lower() == 'true',
             enable_api_key_detection=os.getenv('ANOMALY_ENABLE_API_KEY', 'true').lower() == 'true',
             whitelist_principals=whitelist,
+            dedup_window_seconds=int(os.getenv('ANOMALY_DEDUP_WINDOW_SECONDS', '300')),
         )
 
 
@@ -200,9 +218,17 @@ class RateTracker:
         # Bounded to prevent memory leaks with high-cardinality principals
         self._known_ips: LRUCache = LRUCache(maxsize=50000)
 
-        # Track alerts to prevent duplicate alerting
-        self._recent_alerts: Dict[str, float] = {}
-        self._alert_cooldown = 300  # 5 minutes between same alerts
+        # Track alerts to prevent duplicate alerting. Keyed by
+        # (anomaly_type, normalized_principal) — source_ip is intentionally
+        # excluded so a principal hitting many IPs (cf. AWS NAT pools) doesn't
+        # produce one alert per source IP.
+        self._recent_alerts: Dict[Tuple[str, str], float] = {}
+        self._alert_cooldown = max(1, int(self.config.dedup_window_seconds))
+        # Suppression counters: (anomaly_type, normalized_principal) -> int.
+        # Flushed by ``flush_suppression_summary``; the audit_forwarder calls
+        # that on its periodic-stats cadence.
+        self._suppressed_counts: Dict[Tuple[str, str], int] = {}
+        self._suppressed_last_flush_at = time.time()
 
         self._lock = Lock()
 
@@ -233,7 +259,8 @@ class RateTracker:
         if not principal:
             return alerts
 
-        if principal in self.config.whitelist_principals:
+        normalized_principal = _normalize_principal_for_compare(principal)
+        if normalized_principal in self.config.whitelist_principals or principal in self.config.whitelist_principals:
             return alerts
 
         # Track general activity
@@ -419,17 +446,23 @@ class RateTracker:
         )
 
     def _should_alert(self, alert: AnomalyAlert) -> bool:
-        """Check if we should emit this alert (prevent spam)."""
-        # Create a unique key for this alert type
-        key = f"{alert.anomaly_type.value}:{alert.principal}:{alert.source_ip}"
+        """Check if we should emit this alert (prevent spam).
+
+        Dedup keys deliberately exclude source_ip: a single misconfigured
+        service account hitting an AWS NAT pool can otherwise produce a
+        unique key per source IP, defeating the cooldown. Suppressed
+        repeats are counted and surfaced via flush_suppression_summary().
+        """
+        normalized = _normalize_principal_for_compare(alert.principal)
+        key: Tuple[str, str] = (alert.anomaly_type.value, normalized)
 
         with self._lock:
             now = time.time()
 
-            # Check if we recently alerted for this
-            if key in self._recent_alerts:
-                if now - self._recent_alerts[key] < self._alert_cooldown:
-                    return False
+            last = self._recent_alerts.get(key)
+            if last is not None and now - last < self._alert_cooldown:
+                self._suppressed_counts[key] = self._suppressed_counts.get(key, 0) + 1
+                return False
 
             self._recent_alerts[key] = now
 
@@ -440,6 +473,26 @@ class RateTracker:
             }
 
             return True
+
+    def flush_suppression_summary(self) -> List[Tuple[str, str, int]]:
+        """Drain and return suppressed-count tally since the last flush.
+
+        Returns a list of ``(anomaly_type, normalized_principal, count)``
+        triples. The audit_forwarder logs one INFO line per non-zero entry
+        ("X: type suppressed N repeats") and the counters reset.
+        """
+        with self._lock:
+            if not self._suppressed_counts:
+                self._suppressed_last_flush_at = time.time()
+                return []
+            drained = [
+                (anomaly_type, principal, count)
+                for (anomaly_type, principal), count in self._suppressed_counts.items()
+                if count > 0
+            ]
+            self._suppressed_counts.clear()
+            self._suppressed_last_flush_at = time.time()
+            return drained
 
     def get_stats(self) -> Dict[str, Any]:
         """Get current tracking statistics."""

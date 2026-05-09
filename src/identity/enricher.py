@@ -17,6 +17,7 @@ import logging
 import os
 import re
 import threading
+import time
 from dataclasses import dataclass
 from enum import Enum
 from typing import Dict, Optional, Any, List
@@ -87,6 +88,7 @@ class IdentityEnricher:
         api_secret: Optional[str] = None,
         cache_ttl: int = 3600,  # 1 hour
         cache_maxsize: int = 10000,
+        refresh_interval_seconds: int = 55 * 60,  # 55 min — well under TTL
     ):
         self.api_key = api_key or os.getenv("CONFLUENT_CLOUD_API_KEY")
         self.api_secret = api_secret or os.getenv("CONFLUENT_CLOUD_API_SECRET")
@@ -94,13 +96,22 @@ class IdentityEnricher:
 
         # TTL cache for resolved identities
         self._cache: TTLCache = TTLCache(maxsize=cache_maxsize, ttl=cache_ttl)
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
-        # Pre-loaded identity maps (loaded on first resolve)
+        # Pre-loaded identity maps. The hot path (resolve()) NEVER blocks on
+        # populating these — a daemon thread runs the API calls. Until the
+        # first refresh completes, resolve() returns a basic IdentityInfo
+        # with display_name=raw_id; downstream renderers detect that with the
+        # display!=raw_id check and show the raw id in italic-grey.
         self._service_accounts: Dict[str, IdentityInfo] = {}
         self._users: Dict[str, IdentityInfo] = {}
         self._identities_loaded = False
         self._load_lock = threading.Lock()
+        self._refresh_interval_seconds = max(60, int(refresh_interval_seconds))
+        self._refresh_thread: Optional[threading.Thread] = None
+        self._refresh_thread_started = threading.Event()
+        self._last_refresh_at: Optional[float] = None
+        self._last_refresh_error: Optional[str] = None
 
         if self.enabled:
             logger.info("IdentityEnricher initialized with Confluent Cloud API credentials")
@@ -123,7 +134,10 @@ class IdentityEnricher:
         )
 
     def _load_identities(self) -> None:
-        """Load all service accounts and users from Confluent Cloud API."""
+        """Synchronously load identities once. Kept for backwards
+        compatibility (tests + manual ``refresh()`` callers); the runtime
+        path now uses ``start_background_refresh()`` which never blocks the
+        consume loop on the 11 sequential HTTP requests this performs."""
         if self._identities_loaded or not self.enabled:
             return
 
@@ -134,27 +148,135 @@ class IdentityEnricher:
             logger.info("Loading identities from Confluent Cloud API...")
 
             try:
-                with self._get_client() as client:
-                    # Load service accounts
-                    self._load_service_accounts(client)
-
-                    # Load users
-                    self._load_users(client)
-
+                service_accounts, users = self._fetch_all_identities()
+                with self._lock:
+                    self._service_accounts = service_accounts
+                    self._users = users
                 self._identities_loaded = True
+                self._last_refresh_at = time.time()
+                self._last_refresh_error = None
                 logger.info(
                     "Loaded %d service accounts and %d users",
-                    len(self._service_accounts),
-                    len(self._users),
+                    len(service_accounts),
+                    len(users),
                 )
 
             except Exception as e:
                 logger.error("Failed to load identities from Confluent Cloud: %s", e)
-                # Mark as loaded to avoid repeated failures
+                self._last_refresh_error = str(e)
+                # Mark as loaded to avoid repeated failures from lazy callers.
                 self._identities_loaded = True
 
-    def _load_service_accounts(self, client: httpx.Client) -> None:
-        """Load all service accounts with pagination."""
+    def _fetch_all_identities(self) -> tuple[Dict[str, IdentityInfo], Dict[str, IdentityInfo]]:
+        """Fetch all SAs and users from Confluent Cloud into NEW dicts.
+
+        The dicts are returned to the caller for atomic swap; nothing on
+        ``self`` is mutated here. That means a refresh failure midway
+        through cannot leave the live cache half-replaced.
+        """
+        service_accounts: Dict[str, IdentityInfo] = {}
+        users: Dict[str, IdentityInfo] = {}
+        with self._get_client() as client:
+            self._load_service_accounts_into(client, service_accounts)
+            self._load_users_into(client, users)
+        return service_accounts, users
+
+    def start_background_refresh(self, *, initial_load_async: bool = True) -> None:
+        """Kick off the background refresh thread.
+
+        Idempotent — calling this more than once is a no-op. The very
+        first refresh runs INSIDE the daemon thread by default so the
+        forwarder's startup path doesn't pay the 6-8 s identity-load
+        cost. Tests that need synchronous state can call
+        ``start_background_refresh(initial_load_async=False)``.
+        """
+        if not self.enabled:
+            return
+        if self._refresh_thread_started.is_set():
+            return
+        self._refresh_thread_started.set()
+
+        def loop() -> None:
+            # Initial load.
+            try:
+                service_accounts, users = self._fetch_all_identities()
+                with self._lock:
+                    self._service_accounts = service_accounts
+                    self._users = users
+                self._identities_loaded = True
+                self._last_refresh_at = time.time()
+                self._last_refresh_error = None
+                logger.info(
+                    "Identity cache loaded: %d service accounts, %d users",
+                    len(service_accounts),
+                    len(users),
+                )
+            except Exception as exc:
+                self._last_refresh_error = str(exc)
+                logger.warning("Initial identity cache load failed; will retry on schedule: %s", exc)
+                # Mark as loaded so resolve() doesn't fall back to the legacy
+                # blocking lazy-load path.
+                self._identities_loaded = True
+
+            while True:
+                time.sleep(self._refresh_interval_seconds)
+                try:
+                    service_accounts, users = self._fetch_all_identities()
+                    with self._lock:
+                        self._service_accounts = service_accounts
+                        self._users = users
+                        # Drop the per-resolve TTL cache so resolve() returns
+                        # the freshly-fetched names rather than serving stale
+                        # entries until their individual TTL ticks over.
+                        self._cache.clear()
+                    self._last_refresh_at = time.time()
+                    self._last_refresh_error = None
+                    logger.info(
+                        "Identity cache refreshed: %d service accounts, %d users",
+                        len(service_accounts),
+                        len(users),
+                    )
+                except Exception as exc:
+                    self._last_refresh_error = str(exc)
+                    logger.warning("Identity cache refresh failed (keeping old cache): %s", exc)
+
+        if not initial_load_async:
+            # Synchronous initial load for tests; subsequent refreshes still
+            # happen in the daemon.
+            try:
+                service_accounts, users = self._fetch_all_identities()
+                with self._lock:
+                    self._service_accounts = service_accounts
+                    self._users = users
+                self._identities_loaded = True
+                self._last_refresh_at = time.time()
+            except Exception as exc:
+                self._last_refresh_error = str(exc)
+                logger.warning("Synchronous initial identity load failed: %s", exc)
+                self._identities_loaded = True
+
+            def loop_post_initial() -> None:
+                while True:
+                    time.sleep(self._refresh_interval_seconds)
+                    try:
+                        service_accounts, users = self._fetch_all_identities()
+                        with self._lock:
+                            self._service_accounts = service_accounts
+                            self._users = users
+                            self._cache.clear()
+                        self._last_refresh_at = time.time()
+                        self._last_refresh_error = None
+                    except Exception as exc:
+                        self._last_refresh_error = str(exc)
+                        logger.warning("Identity cache refresh failed: %s", exc)
+
+            self._refresh_thread = threading.Thread(target=loop_post_initial, daemon=True, name="auditlens-identity-refresh")
+        else:
+            self._refresh_thread = threading.Thread(target=loop, daemon=True, name="auditlens-identity-refresh")
+        self._refresh_thread.start()
+
+    def _load_service_accounts_into(self, client: httpx.Client, target: Dict[str, IdentityInfo]) -> None:
+        """Load all service accounts with pagination into ``target``."""
         page_token = None
 
         while True:
@@ -180,11 +302,11 @@ class IdentityEnricher:
                         created_at=sa.get("metadata", {}).get("created_at"),
                         raw_data=sa,
                     )
-                    self._service_accounts[sa_id] = info
+                    target[sa_id] = info
 
                     # Also index by resource ID (e.g., "sa-abc123")
                     if sa_id.startswith("sa-"):
-                        self._service_accounts[sa_id] = info
+                        target[sa_id] = info
 
                 # Check for more pages
                 page_token = _extract_page_token(data.get("metadata", {}).get("next"))
@@ -197,8 +319,14 @@ class IdentityEnricher:
                     break
                 raise
 
-    def _load_users(self, client: httpx.Client) -> None:
-        """Load all users with pagination."""
+    # Backwards-compat shims for callers that still reference the old methods
+    # (e.g. older tests). They write into self._service_accounts / self._users
+    # the way the legacy code did.
+    def _load_service_accounts(self, client: httpx.Client) -> None:
+        self._load_service_accounts_into(client, self._service_accounts)
+
+    def _load_users_into(self, client: httpx.Client, target: Dict[str, IdentityInfo]) -> None:
+        """Load all users with pagination into ``target``."""
         page_token = None
 
         while True:
@@ -224,11 +352,11 @@ class IdentityEnricher:
                         created_at=user.get("metadata", {}).get("created_at"),
                         raw_data=user,
                     )
-                    self._users[user_id] = info
+                    target[user_id] = info
 
                     # Also index by prefixed ID (e.g., "User:u-xxxxx")
                     if user_id.startswith("u-"):
-                        self._users[f"User:{user_id}"] = info
+                        target[f"User:{user_id}"] = info
 
                 # Check for more pages
                 page_token = _extract_page_token(data.get("metadata", {}).get("next"))
@@ -240,6 +368,9 @@ class IdentityEnricher:
                     logger.warning("Rate limited loading users, stopping pagination")
                     break
                 raise
+
+    def _load_users(self, client: httpx.Client) -> None:
+        self._load_users_into(client, self._users)
 
     def _normalize_principal_id(self, principal: str) -> str:
         """
@@ -281,11 +412,23 @@ class IdentityEnricher:
         """
         Resolve a principal ID to identity information.
 
+        Hot path; MUST NOT block on network I/O. The identity dicts are
+        populated by the background-refresh thread (see
+        ``start_background_refresh``). If the cache hasn't been primed yet
+        — first ~1 s of process lifetime, or after a refresh failure with
+        no prior successful load — a basic IdentityInfo with
+        ``display_name=raw_id`` is returned and downstream code displays
+        the raw id in the unenriched style.
+
+        Tests that expect the legacy lazy-load behaviour can call
+        ``_load_identities()`` directly before invoking ``resolve()``.
+
         Args:
             principal: The principal ID (e.g., "sa-abc123", "User:u-75rw9o")
 
         Returns:
-            IdentityInfo with resolved details, or a basic IdentityInfo if resolution fails
+            IdentityInfo with resolved details, or a basic IdentityInfo if
+            resolution fails / the cache hasn't been loaded yet.
         """
         if not principal:
             return IdentityInfo(
@@ -294,37 +437,53 @@ class IdentityEnricher:
                 display_name="Unknown",
             )
 
-        # Check cache first
         with self._lock:
-            if principal in self._cache:
-                return self._cache[principal]
+            cached = self._cache.get(principal)
+            if cached is not None:
+                return cached
 
-        # Load identities if not already loaded
+            # Lazy-load fallback for callers (tests, manual scripts) that
+            # construct an enricher and call resolve() without ever invoking
+            # start_background_refresh. The runtime path always primes via
+            # start_background_refresh, so this branch is cold in production
+            # — but keeping it preserves the historical contract.
+            if not self._identities_loaded and not self._refresh_thread_started.is_set():
+                # Release the lock before doing network I/O.
+                pass
+            else:
+                normalized_id, identity_type = self._extract_principal_id(principal)
+                info = None
+                if identity_type == IdentityType.SERVICE_ACCOUNT:
+                    info = self._service_accounts.get(normalized_id)
+                elif identity_type == IdentityType.USER:
+                    info = self._users.get(normalized_id) or self._users.get(principal)
+                if not info:
+                    info = IdentityInfo(
+                        id=normalized_id,
+                        identity_type=identity_type,
+                        display_name=normalized_id,
+                    )
+                self._cache[principal] = info
+                return info
+
+        # Lazy-load fallback path (no background refresher started).
         if not self._identities_loaded:
             self._load_identities()
 
-        # Extract ID and type
         normalized_id, identity_type = self._extract_principal_id(principal)
-
-        # Look up in pre-loaded data
         info = None
         if identity_type == IdentityType.SERVICE_ACCOUNT:
             info = self._service_accounts.get(normalized_id)
         elif identity_type == IdentityType.USER:
             info = self._users.get(normalized_id) or self._users.get(principal)
-
-        # If not found, return basic info
         if not info:
             info = IdentityInfo(
                 id=normalized_id,
                 identity_type=identity_type,
-                display_name=normalized_id,  # Use ID as display name
+                display_name=normalized_id,
             )
-
-        # Cache the result
         with self._lock:
             self._cache[principal] = info
-
         return info
 
     def resolve_display(self, principal: str) -> str:
