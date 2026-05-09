@@ -3172,7 +3172,12 @@ def main():
     # slow PG writes — broker no longer reaps us. Splitting writes by
     # criticality means destructive events land in PG within seconds even
     # when the bulk lane is digesting tens of thousands of authz checks.
-    RECORD_QUEUE_SIZE = max(1, int(os.getenv("RECORD_QUEUE_SIZE", "20")))
+    # Default 10000: previous default of 20 batches saturated within
+    # seconds at any reasonable ingest rate, putting the consumer into
+    # a continuous pause/resume backpressure loop. With BATCH_SIZE=100
+    # this caps buffered events at ~1M (still bounded; per-lane queues
+    # below provide the real shape).
+    RECORD_QUEUE_SIZE = max(1, int(os.getenv("RECORD_QUEUE_SIZE", "10000")))
     record_queue: queue.Queue = queue.Queue(maxsize=RECORD_QUEUE_SIZE)
     metrics.record_queue_capacity = RECORD_QUEUE_SIZE
     consumer_log_state: dict = {}
@@ -3183,17 +3188,25 @@ def main():
     # bulk lane absorbs noise without blocking the producer.
     PRIORITY_QUEUES_ENABLED = ENABLE_DB_WRITER
     if PRIORITY_QUEUES_ENABLED:
+        # ~1 KB per event in steady state: critical 500=0.5MB,
+        # normal 5000=5MB, bulk 50000=50MB, catalog 10000=10MB.
+        # WRITER_*_QUEUE_SIZE wins if set (spec-aligned name); we keep
+        # PRIORITY_QUEUE_*_MAX as a legacy alias so existing deploys
+        # don't need .env edits.
+        def _queue_max(env_primary: str, env_legacy: str, default: int, floor: int) -> int:
+            value = os.getenv(env_primary) or os.getenv(env_legacy) or str(default)
+            return max(floor, int(value))
         critical_queue: queue.Queue = queue.Queue(
-            maxsize=max(100, int(os.getenv("PRIORITY_QUEUE_CRITICAL_MAX", "1000")))
+            maxsize=_queue_max("WRITER_CRITICAL_QUEUE_SIZE", "PRIORITY_QUEUE_CRITICAL_MAX", 500, 100)
         )
         normal_queue: queue.Queue = queue.Queue(
-            maxsize=max(500, int(os.getenv("PRIORITY_QUEUE_NORMAL_MAX", "5000")))
+            maxsize=_queue_max("WRITER_NORMAL_QUEUE_SIZE", "PRIORITY_QUEUE_NORMAL_MAX", 5000, 500)
         )
         bulk_queue: queue.Queue = queue.Queue(
-            maxsize=max(5000, int(os.getenv("PRIORITY_QUEUE_BULK_MAX", "50000")))
+            maxsize=_queue_max("WRITER_BULK_QUEUE_SIZE", "PRIORITY_QUEUE_BULK_MAX", 50000, 5000)
         )
         catalog_queue: queue.Queue = queue.Queue(
-            maxsize=max(1000, int(os.getenv("PRIORITY_QUEUE_CATALOG_MAX", "10000")))
+            maxsize=_queue_max("WRITER_CATALOG_QUEUE_SIZE", "PRIORITY_QUEUE_CATALOG_MAX", 10000, 1000)
         )
     else:
         critical_queue = normal_queue = bulk_queue = catalog_queue = None
