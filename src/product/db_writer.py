@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     Column,
     DateTime,
@@ -26,7 +27,12 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-from src.product.event_normalization import event_fingerprint, normalize_event, parse_event_timestamp
+from src.product.event_normalization import (
+    event_fingerprint,
+    minimal_normalize,
+    normalize_event,
+    parse_event_timestamp,
+)
 from src.product.resource_intelligence import build_resource_catalog_entry
 
 logger = logging.getLogger(__name__)
@@ -106,6 +112,37 @@ audit_events = Table(
     Column("is_routine_noise", Boolean, nullable=False),
     UniqueConstraint("event_fingerprint", name="uq_audit_events_event_fingerprint"),
 )
+
+# Bulk-noise table: routine auth checks and produce/fetch traffic that
+# dominate volume (~83% of events) but never need full enrichment. No
+# event_fingerprint, no UNIQUE constraint, two indexes — INSERT-only.
+# Rebuildable from Kafka topics, so retention is short (7 days default).
+audit_events_noise = Table(
+    "audit_events_noise",
+    metadata,
+    # BigInteger on Postgres (BIGSERIAL); fall back to Integer on SQLite
+    # because only INTEGER PRIMARY KEY aliases ROWID and gives autoincrement.
+    Column(
+        "id",
+        BigInteger().with_variant(Integer(), "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    ),
+    Column("timestamp", DateTime(timezone=True), nullable=False),
+    Column("actor", String(255), nullable=True),
+    Column("action", String(255), nullable=True),
+    Column("result", String(32), nullable=True),
+    Column("resource_name", String(512), nullable=True),
+    Column("source_ip", String(128), nullable=True),
+    Column("environment_id", String(255), nullable=True),
+    Column("cluster_id", String(255), nullable=True),
+    Column("is_denied", Boolean, nullable=False, default=False),
+    Column("ingested_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
+
+Index("idx_noise_timestamp", audit_events_noise.c.timestamp.desc())
+Index("idx_noise_actor", audit_events_noise.c.actor)
+
 
 resource_catalog = Table(
     "resource_catalog",
@@ -306,6 +343,63 @@ class AuditEventDbWriter:
             deferred_catalog_rows=deferred_catalog_rows,
         )
 
+    def write_noise_batch(self, payloads: list[dict[str, Any]]) -> DbWriteResult:
+        """Bulk-noise INSERT path. Skips event_fingerprint, ON CONFLICT,
+        and full normalize_event(). Targets the audit_events_noise table
+        which has 2 indexes only — INSERT cost is dominated by the wire
+        round-trip, not the index updates.
+        """
+        normalize_started = time.perf_counter()
+        rows: list[dict[str, Any]] = []
+        for payload in payloads:
+            try:
+                normalized = minimal_normalize(payload)
+            except Exception as exc:  # pragma: no cover - best-effort minimal path
+                logger.debug("minimal_normalize failed: %s", exc)
+                continue
+            rows.append({
+                "timestamp": parse_event_timestamp(payload),
+                "actor": normalized.get("actor"),
+                "action": normalized.get("action"),
+                "result": normalized.get("result"),
+                "resource_name": normalized.get("resource_name") or None,
+                "source_ip": normalized.get("source_ip"),
+                "environment_id": normalized.get("environment_id"),
+                "cluster_id": normalized.get("cluster_id"),
+                "is_denied": bool(normalized.get("is_denied")),
+            })
+        normalize_ms = (time.perf_counter() - normalize_started) * 1000
+        if not rows:
+            return DbWriteResult(attempted=0, inserted=0, elapsed_ms=0.0, normalize_ms=normalize_ms)
+        started = time.perf_counter()
+        pg_insert_started = time.perf_counter()
+        with self.engine.begin() as conn:
+            result = conn.execute(audit_events_noise.insert(), rows)
+            inserted = int(result.rowcount or 0)
+            if inserted < 0:
+                # Some drivers return -1 for executemany without RETURNING.
+                inserted = len(rows)
+        pg_insert_ms = (time.perf_counter() - pg_insert_started) * 1000
+        return DbWriteResult(
+            attempted=len(rows),
+            inserted=inserted,
+            elapsed_ms=(time.perf_counter() - started) * 1000,
+            normalize_ms=normalize_ms,
+            pg_insert_ms=pg_insert_ms,
+            catalog_upsert_ms=0.0,
+        )
+
+    def cleanup_noise_retention(self, *, retention_days: int | None = None) -> int:
+        """Delete noise rows older than ``retention_days`` (default: same
+        as audit_events). Called from the existing retention sweep."""
+        days = max(1, int(retention_days or self.retention_days))
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                delete(audit_events_noise).where(audit_events_noise.c.timestamp < cutoff)
+            )
+            return int(result.rowcount or 0)
+
     def upsert_catalog(self, resource_rows: list[dict[str, Any]]) -> int:
         """Upsert prepared resource_catalog rows. Used by the async catalog
         writer thread so the hot audit_events INSERT path doesn't pay for it.
@@ -421,6 +515,17 @@ class AuditEventDbWriter:
             count = int(conn.execute(select(func.count()).select_from(audit_events).where(audit_events.c.timestamp < cutoff)).scalar() or 0)
             if not dry_run and count:
                 conn.execute(delete(audit_events).where(audit_events.c.timestamp < cutoff))
+            # The noise table follows the same retention as audit_events.
+            # Best-effort: any deletion error is logged but doesn't fail
+            # the primary cleanup.
+            try:
+                noise_deleted = int(
+                    conn.execute(delete(audit_events_noise).where(audit_events_noise.c.timestamp < cutoff)).rowcount or 0
+                )
+                if noise_deleted:
+                    logger.info("Noise retention cleanup: deleted %d rows older than %s", noise_deleted, cutoff.isoformat())
+            except Exception as exc:  # pragma: no cover - best-effort
+                logger.warning("Noise retention cleanup failed: %s", exc)
         if not dry_run:
             self.last_cleanup_at = datetime.now(timezone.utc).isoformat()
             self.last_cleanup_deleted_count = count

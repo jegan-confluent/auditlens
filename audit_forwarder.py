@@ -2522,6 +2522,42 @@ def initialize_db_writer_if_enabled():
     return db_writer
 
 
+def flush_db_writer_noise_batch(
+    payloads: list[dict],
+    backoff: RuntimeBackoff,
+    log_state: dict,
+    *,
+    label: str = "bulk",
+) -> bool:
+    """Bulk-noise INSERT into audit_events_noise. Skips fingerprint /
+    enrichment / catalog upsert. Writer signature mirrors
+    flush_db_writer_batch so the writer-thread loop can dispatch on lane."""
+    if not ENABLE_DB_WRITER or not payloads:
+        return True
+    try:
+        writer = initialize_db_writer_if_enabled()
+        result = writer.write_noise_batch(payloads)
+        metrics.record_db_write_success(result.attempted)
+        backoff.reset()
+        logger.info(
+            "DB writer batch complete lane=%s table=audit_events_noise attempted=%d inserted=%d "
+            "elapsed_ms=%.1f [normalize=%.0fms pg_insert=%.0fms]",
+            label, result.attempted, result.inserted, result.elapsed_ms,
+            getattr(result, "normalize_ms", 0.0),
+            getattr(result, "pg_insert_ms", 0.0),
+        )
+        return True
+    except Exception as exc:
+        delay = backoff.next_delay()
+        masked_exc = mask_sensitive_text(str(exc))
+        metrics.record_db_write_error(masked_exc, len(payloads))
+        metrics.set_db_writer_state("backoff")
+        if _should_log_repeated_error(log_state, masked_exc):
+            logger.warning("DB noise writer failed; backing off for %.1fs: %s", delay, masked_exc)
+        _sleep_with_shutdown(delay)
+        return False
+
+
 def flush_db_writer_batch(
     payloads: list[dict],
     backoff: RuntimeBackoff,
@@ -3217,6 +3253,9 @@ def main():
         Critical+High methods → critical_queue (small batches, < 0.1s wait).
         Read-only / authentication / authz checks → bulk_queue (huge batches).
         Everything else → normal_queue (medium batches).
+
+        Sets ``_queue_lane`` on the event so the writer thread can pick
+        the right INSERT path (audit_events vs audit_events_noise).
         """
         if not PRIORITY_QUEUES_ENABLED:
             return
@@ -3231,6 +3270,7 @@ def main():
             target, target_name = bulk_queue, "bulk"
         else:
             target, target_name = normal_queue, "normal"
+        enriched_event["_queue_lane"] = target_name
         try:
             target.put_nowait(enriched_event)
         except queue.Full:
@@ -3280,12 +3320,17 @@ def main():
                 batch.append(record)
             setattr(metrics, depth_attr, q.qsize())
             if batch:
-                flush_db_writer_batch(
-                    batch, backoff, log_state,
-                    defer_catalog=True,
-                    catalog_target=catalog_queue,
-                    label=lane,
-                )
+                if lane == "bulk":
+                    # Noise lane → audit_events_noise: minimal columns, no
+                    # fingerprint, no catalog upsert. ~50x cheaper per row.
+                    flush_db_writer_noise_batch(batch, backoff, log_state, label=lane)
+                else:
+                    flush_db_writer_batch(
+                        batch, backoff, log_state,
+                        defer_catalog=True,
+                        catalog_target=catalog_queue,
+                        label=lane,
+                    )
                 setattr(metrics, depth_attr, q.qsize())
             if _shutdown_requested and q.empty() and not batch:
                 return
