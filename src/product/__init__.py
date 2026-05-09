@@ -7,7 +7,7 @@ from .auth import (
     Authenticator,
     Role,
 )
-from .persistence import PersistenceConfig, SQLiteProductStore
+from .persistence import PersistenceConfig, SQLiteProductStore, heal_sqlite_on_startup
 
 
 def __getattr__(name):
@@ -29,4 +29,5 @@ __all__ = [
     "SOURCE_AUDIT_TOPIC",
     "PersistenceConfig",
     "SQLiteProductStore",
+    "heal_sqlite_on_startup",
 ]

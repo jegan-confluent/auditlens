@@ -21,6 +21,123 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+# Hard ceiling on SQLite page count for new connections — 8 GiB at 4 KiB
+# pages. The application-level db_max_bytes is much smaller (1 GiB by
+# default) but we lift the per-connection ceiling so a future VACUUM /
+# rotation has headroom to rebuild the file. Default SQLite
+# max_page_count is effectively unlimited, but some packaged builds have
+# trimmed it; setting it explicitly is cheap insurance.
+_SQLITE_MAX_PAGE_COUNT = 2_097_152
+
+# 50 MB threshold for triggering a startup incremental vacuum. Below
+# this the rebuild cost is not worth the disk reclaim.
+_SQLITE_STARTUP_RECLAIM_THRESHOLD_BYTES = 50 * 1024 * 1024
+
+
+def _apply_connection_pragmas(conn: sqlite3.Connection) -> None:
+    """Settings every SQLite connection in the product store should have.
+
+    auto_vacuum = INCREMENTAL only takes effect when set BEFORE any
+    table is created on a fresh database. On a database that was created
+    with auto_vacuum = NONE this is a silent no-op until a full VACUUM
+    rewrites the file with the new setting. On rotation we always create
+    the new file fresh, so the new file ends up with auto_vacuum = INCREMENTAL.
+
+    temp_store = MEMORY avoids using the container's /tmp tmpfs (capped
+    at ~100 MB) for SQLite scratch, which is what makes a full VACUUM
+    fail with "database or disk is full" on a multi-hundred-MB hot cache.
+    """
+    try:
+        conn.execute(f"PRAGMA max_page_count = {_SQLITE_MAX_PAGE_COUNT}")
+    except Exception as exc:
+        logger.debug("max_page_count pragma failed: %s", exc)
+    try:
+        conn.execute("PRAGMA auto_vacuum = INCREMENTAL")
+    except Exception as exc:
+        logger.debug("auto_vacuum pragma failed: %s", exc)
+    try:
+        conn.execute("PRAGMA temp_store = MEMORY")
+    except Exception as exc:
+        logger.debug("temp_store pragma failed: %s", exc)
+
+
+def heal_sqlite_on_startup(db_path: str) -> Dict[str, Any]:
+    """Best-effort SQLite repair before the store opens its long-lived connection.
+
+    Runs an ``incremental_vacuum`` if a meaningful amount of the file is
+    freelist pages. If that doesn't make progress (most often because the
+    legacy file was created with ``auto_vacuum = NONE``) the file is
+    deleted so the next ``initialize()`` recreates it with the correct
+    pragmas. Postgres is the durable source of truth — losing the SQLite
+    hot cache is recoverable via Kafka replay.
+    """
+    result: Dict[str, Any] = {"action": "noop", "path": db_path}
+    if not db_path or not os.path.exists(db_path):
+        result["action"] = "absent"
+        return result
+    try:
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(f"PRAGMA max_page_count = {_SQLITE_MAX_PAGE_COUNT}")
+            conn.execute("PRAGMA temp_store = MEMORY")
+            page_size = int(conn.execute("PRAGMA page_size").fetchone()[0] or 4096)
+            freelist_before = int(conn.execute("PRAGMA freelist_count").fetchone()[0] or 0)
+            reclaimable_bytes = page_size * freelist_before
+            reclaimable_mb = reclaimable_bytes / 1024 / 1024
+            logger.info(
+                "SQLite startup: reclaimable=%dMB freelist=%d page_size=%d",
+                int(reclaimable_mb), freelist_before, page_size,
+            )
+            result["reclaimable_bytes"] = reclaimable_bytes
+            result["freelist_before"] = freelist_before
+            if reclaimable_bytes < _SQLITE_STARTUP_RECLAIM_THRESHOLD_BYTES:
+                return result
+            # Try to free pages incrementally. On databases created with
+            # auto_vacuum = NONE this returns success but does not actually
+            # shrink the freelist — we detect that case below and recreate.
+            cap = max(1, min(freelist_before, 50_000))
+            conn.execute(f"PRAGMA incremental_vacuum({cap})")
+            conn.commit()
+            freelist_after = int(conn.execute("PRAGMA freelist_count").fetchone()[0] or 0)
+            result["freelist_after"] = freelist_after
+            if freelist_after < freelist_before:
+                logger.info(
+                    "SQLite startup vacuum complete freelist_before=%d freelist_after=%d freed=%d",
+                    freelist_before, freelist_after, freelist_before - freelist_after,
+                )
+                result["action"] = "vacuum"
+                return result
+            logger.warning(
+                "SQLite startup vacuum did not reclaim pages "
+                "(auto_vacuum=NONE on legacy file?); recreating db"
+            )
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    except Exception as exc:
+        logger.warning("SQLite startup heal failed: %s — recreating", exc)
+        result["error"] = str(exc)
+    # Fallback path: drop the file (and sidecars) so initialize() rebuilds
+    # it from scratch with the right pragmas.
+    try:
+        for suffix in ("", "-wal", "-shm", "-journal"):
+            path = f"{db_path}{suffix}"
+            if os.path.exists(path):
+                os.remove(path)
+        logger.warning(
+            "SQLite deleted and will be recreated (Postgres is source of truth) path=%s",
+            db_path,
+        )
+        result["action"] = "recreated"
+    except Exception as remove_exc:
+        logger.error("SQLite deletion failed: %s", remove_exc)
+        result["action"] = "delete_failed"
+        result["delete_error"] = str(remove_exc)
+    return result
+
+
 @dataclass(frozen=True)
 class PersistenceConfig:
     enabled: bool = True
@@ -166,6 +283,11 @@ class SQLiteProductStore:
         self._conn = sqlite3.connect(self.config.db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
+        # auto_vacuum + max_page_count + temp_store=MEMORY must be applied
+        # BEFORE any table exists on a fresh DB — otherwise auto_vacuum is
+        # a silent no-op forever. heal_sqlite_on_startup() recreates the
+        # file when the previous run left auto_vacuum=NONE.
+        _apply_connection_pragmas(self._conn)
         self._conn.execute("PRAGMA synchronous=NORMAL")
         self._create_schema()
         self._record_startup()
@@ -647,6 +769,14 @@ class SQLiteProductStore:
                 self._status["cleanup_status"] = "success"
                 self._status["cleanup_last_error"] = None
                 self._refresh_storage_status()
+                # After non-trivial deletions, hand the released pages back
+                # to the OS proactively so the file size tracks the row
+                # count instead of monotonically growing.
+                if deleted_rows >= 1000:
+                    self._run_incremental_vacuum_unlocked(
+                        max_pages=self._VACUUM_BATCH_PAGES_PER_CLEANUP,
+                        trigger=f"cleanup:{deleted_rows}",
+                    )
                 self._vacuum_if_useful_unlocked()
                 return deleted_rows
             except Exception as exc:
@@ -787,6 +917,10 @@ class SQLiteProductStore:
             new_conn = sqlite3.connect(new_path)
             new_conn.row_factory = sqlite3.Row
             new_conn.execute("PRAGMA journal_mode=DELETE")
+            # Apply pragmas BEFORE creating the schema so auto_vacuum is
+            # active for the new file. The post-rotation file is the
+            # primary fix for any legacy DBs stuck with auto_vacuum=NONE.
+            _apply_connection_pragmas(new_conn)
             new_conn.execute("PRAGMA synchronous=FULL")
             self._create_schema_on(new_conn)
 
@@ -831,6 +965,7 @@ class SQLiteProductStore:
             self._conn = sqlite3.connect(db_path, check_same_thread=False)
             self._conn.row_factory = sqlite3.Row
             self._conn.execute("PRAGMA journal_mode=WAL")
+            _apply_connection_pragmas(self._conn)
             self._conn.execute("PRAGMA synchronous=NORMAL")
             self._status["rows_copied"] = copied_rows
             self._status["last_rotation_time"] = started_at
@@ -1089,14 +1224,41 @@ class SQLiteProductStore:
             self._status["last_checkpoint_status"] = "skipped"
             self._status["last_checkpoint_error"] = str(exc)
 
-    # Auto-vacuum threshold: ~500MB reclaimable. Below this the rebuild cost
-    # (VACUUM rewrites the entire DB file) exceeds the disk-reclaim benefit.
-    _VACUUM_RECLAIM_THRESHOLD_BYTES = 500 * 1024 * 1024
+    # Auto-vacuum threshold: 100 MB reclaimable. With incremental_vacuum
+    # the cost is proportional to freed pages (not file size), so we run
+    # earlier and more often to keep the freelist from accumulating.
+    _VACUUM_RECLAIM_THRESHOLD_BYTES = 100 * 1024 * 1024
+    # Pages freed per cleanup pass. 5000 pages × 4 KB ≈ 20 MB — small
+    # enough to be near-instant, big enough to dominate steady-state churn.
+    _VACUUM_BATCH_PAGES_PER_CLEANUP = 5000
 
     def vacuum(self) -> Dict[str, Any]:
-        """Run a full SQLite VACUUM. Public entry point for /admin/vacuum."""
+        """Run a SQLite incremental vacuum. Public entry point for /admin/vacuum."""
         with self._lock:
             return self._vacuum_unlocked(trigger="manual")
+
+    def _run_incremental_vacuum_unlocked(self, *, max_pages: int, trigger: str) -> None:
+        """Bounded incremental vacuum used as a steady-state cleanup hook.
+
+        Unlike ``_vacuum_unlocked`` which logs and surfaces a structured
+        result, this variant is deliberately quiet — it's called every
+        cleanup cycle and only matters when something visible reclaims.
+        """
+        assert self._conn is not None
+        try:
+            freelist = int(self._conn.execute("PRAGMA freelist_count").fetchone()[0] or 0)
+            if freelist <= 0:
+                return
+            cap = max(1, min(freelist, int(max_pages)))
+            self._conn.execute(f"PRAGMA incremental_vacuum({cap})")
+            self._conn.commit()
+            self._refresh_storage_status()
+            logger.info(
+                "SQLite incremental_vacuum trigger=%s freed_pages<=%d",
+                trigger, cap,
+            )
+        except Exception as exc:
+            logger.debug("incremental_vacuum hook failed trigger=%s: %s", trigger, exc)
 
     def _vacuum_if_useful_unlocked(self) -> None:
         reclaimable = int(self._status.get("sqlite_reclaimable_bytes") or 0)
@@ -1110,36 +1272,53 @@ class SQLiteProductStore:
         self._vacuum_unlocked(trigger=f"auto:{storage_mode}")
 
     def _vacuum_unlocked(self, *, trigger: str) -> Dict[str, Any]:
+        """Incremental VACUUM. Full ``VACUUM`` rebuilds the entire DB into a
+        temp file ~2x the source size, which fails on the container's
+        100 MB ``/tmp`` tmpfs. ``PRAGMA incremental_vacuum`` only frees
+        already-released pages and never needs more than freelist-sized
+        scratch, so it works regardless of tmpfs sizing.
+
+        For legacy databases created with ``auto_vacuum = NONE`` this
+        will silently do nothing — startup heal handles those by
+        recreating the file."""
         assert self._conn is not None
         before_bytes = int(self._status.get("db_file_bytes") or 0)
         before_reclaimable = int(self._status.get("sqlite_reclaimable_bytes") or 0)
+        page_size = int(self._status.get("sqlite_page_size") or 0) or int(
+            self._conn.execute("PRAGMA page_size").fetchone()[0] or 4096
+        )
+        freelist_before = int(self._conn.execute("PRAGMA freelist_count").fetchone()[0] or 0)
         started = time.monotonic()
         try:
-            # Checkpoint first so the WAL doesn't get rewritten as part of VACUUM.
             self._checkpoint_wal_best_effort_unlocked(mode="TRUNCATE")
-            # VACUUM cannot run inside an explicit transaction. The connection
-            # was opened with isolation_level=None for autocommit, but commit()
-            # any pending implicit transaction defensively first.
             self._conn.commit()
-            self._conn.execute("VACUUM")
+            cap = max(1, min(freelist_before, 50_000))
+            self._conn.execute(f"PRAGMA incremental_vacuum({cap})")
+            self._conn.commit()
             duration_ms = int((time.monotonic() - started) * 1000)
+            freelist_after = int(self._conn.execute("PRAGMA freelist_count").fetchone()[0] or 0)
             self._status["last_vacuum_at"] = utc_now_iso()
             self._status["last_vacuum_status"] = "success"
             self._status["last_vacuum_error"] = None
             self._refresh_storage_status()
             after_bytes = int(self._status.get("db_file_bytes") or 0)
             reclaimed = max(0, before_bytes - after_bytes)
+            freed_pages = max(0, freelist_before - freelist_after)
             logger.info(
-                "SQLite VACUUM complete trigger=%s before_bytes=%d after_bytes=%d reclaimed_bytes=%d duration_ms=%d",
-                trigger, before_bytes, after_bytes, reclaimed, duration_ms,
+                "SQLite incremental_vacuum complete trigger=%s freed_pages=%d "
+                "before_bytes=%d after_bytes=%d reclaimed_bytes=%d duration_ms=%d",
+                trigger, freed_pages, before_bytes, after_bytes, reclaimed, duration_ms,
             )
             return {
                 "status": "success",
                 "trigger": trigger,
+                "mode": "incremental",
                 "before_bytes": before_bytes,
                 "after_bytes": after_bytes,
                 "before_reclaimable_bytes": before_reclaimable,
                 "reclaimed_bytes": reclaimed,
+                "freed_pages": freed_pages,
+                "page_size": page_size,
                 "duration_ms": duration_ms,
                 "at": self._status["last_vacuum_at"],
             }
@@ -1148,10 +1327,13 @@ class SQLiteProductStore:
             self._status["last_vacuum_status"] = "failure"
             self._status["last_vacuum_error"] = str(exc)
             self._refresh_storage_status()
-            logger.warning("SQLite VACUUM failed trigger=%s error=%s", trigger, exc)
+            logger.warning(
+                "SQLite incremental_vacuum failed trigger=%s error=%s", trigger, exc
+            )
             return {
                 "status": "failure",
                 "trigger": trigger,
+                "mode": "incremental",
                 "error": str(exc),
                 "at": self._status["last_vacuum_at"],
             }

@@ -68,6 +68,7 @@ from src.product import (
     PersistenceConfig,
     Role,
     SQLiteProductStore,
+    heal_sqlite_on_startup,
 )
 from src.product.db_writer import AuditEventDbWriter
 
@@ -2647,6 +2648,13 @@ def initialize_product_store_or_exit() -> None:
     if product_store is not None:
         return
     try:
+        # Heal the SQLite hot cache before opening the long-lived
+        # connection. Either reclaims accumulated freelist pages via
+        # incremental_vacuum, or — when the file was created with
+        # auto_vacuum=NONE and so cannot reclaim in-place — deletes the
+        # file so initialize() recreates it fresh with the correct
+        # pragmas. Safe because Postgres is the durable source of truth.
+        heal_sqlite_on_startup(PERSISTENCE_CONFIG.db_path)
         product_store = SQLiteProductStore(PERSISTENCE_CONFIG)
         product_store.initialize()
         product_store.enforce_storage_bounds(trigger="startup")
