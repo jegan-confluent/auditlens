@@ -25,7 +25,9 @@ import orjson
 import logging
 import time
 import re
+import queue
 import threading
+from concurrent.futures import ThreadPoolExecutor, Future
 import csv
 import random
 from datetime import datetime, timezone
@@ -473,6 +475,10 @@ class Metrics:
         self.error_count = 0
         self.last_process_time = time.time()
         self.partition_lag = {}
+        # Set by the consumer thread on every poll cycle so /health can show
+        # whether the processor is keeping up with fetched batches.
+        self.record_queue_depth = 0
+        self.record_queue_capacity = 0
         self.last_ingested_event_time = None
         self.last_committed_at = None
         self.offset_commits_total = 0
@@ -785,6 +791,8 @@ class Metrics:
                 "idle_seconds": idle_time,
                 "consumer_lag_total": total_lag,
                 "consumer_lag_by_partition": self.partition_lag,
+                "record_queue_depth": int(self.record_queue_depth),
+                "record_queue_capacity": int(self.record_queue_capacity),
                 "last_ingested_event_time": self.last_ingested_event_time,
                 "last_committed_at": self.last_committed_at,
                 "offset_commits_total": self.offset_commits_total,
@@ -1256,6 +1264,8 @@ class MetricsHandler(BaseHTTPRequestHandler):
             "consumer_lag": metrics_data['consumer_lag_total'],
             "consumer_lag_by_partition": metrics_data['consumer_lag_by_partition'],
             "processing_rate": metrics_data['processing_rate_per_second'],
+            "record_queue_depth": metrics_data.get('record_queue_depth', 0),
+            "record_queue_capacity": metrics_data.get('record_queue_capacity', 0),
             "freshness": {
                 "last_enriched_event_time": snapshot["last_enriched_event_time"],
                 "last_enriched_ingest_at": snapshot["last_enriched_ingest_at"],
@@ -2522,10 +2532,42 @@ def flush_db_writer_batch(payloads: list[dict], backoff: RuntimeBackoff, log_sta
         return False
 
 
-def flush_db_writer_buffer(payloads: list[dict], backoff: RuntimeBackoff, log_state: dict, *, force: bool = False) -> bool:
+def flush_db_writer_buffer(payloads: list[dict], backoff: RuntimeBackoff, log_state: dict, *, force: bool = False, executor: ThreadPoolExecutor | None = None) -> bool:
+    """Flush the in-memory DB write buffer.
+
+    Without an executor: chunk by DB_WRITE_BATCH_SIZE and write sequentially
+    (the historical contract — preserved for any non-thread-pool callers).
+
+    With an executor: when ``force=True`` and the buffer has more than one
+    chunk, split it into chunks and submit each to the executor for parallel
+    execution. Wait for all chunks. The wall-clock time of a buffer flush
+    drops to roughly the time of the slowest chunk, which is the ceiling
+    we hit at one writer per Postgres connection.
+    """
     if not ENABLE_DB_WRITER or not payloads:
         return True
     batch_size = max(1, DB_WRITE_BATCH_SIZE)
+    if executor is not None and force:
+        # Parallel chunk size is configurable independently of the trigger
+        # threshold — when the buffer arrives equal to DB_WRITE_BATCH_SIZE
+        # we still want to split it across multiple workers. Falls back to
+        # DB_WRITE_BATCH_SIZE if not set.
+        parallel_chunk = max(1, int(os.getenv("DB_WRITE_PARALLEL_CHUNK_SIZE", str(batch_size))))
+        if len(payloads) > parallel_chunk:
+            chunks = [payloads[i:i + parallel_chunk] for i in range(0, len(payloads), parallel_chunk)]
+            # Submit copies so the caller's payload mutation doesn't race the workers.
+            futures = [executor.submit(flush_db_writer_batch, list(chunk), backoff, log_state) for chunk in chunks]
+            all_ok = True
+            for fut in futures:
+                try:
+                    ok = fut.result(timeout=180)
+                except Exception as exc:
+                    logger.warning("Parallel DB write chunk raised: %s", mask_sensitive_text(str(exc)))
+                    ok = False
+                all_ok = all_ok and ok
+            if all_ok:
+                del payloads[:]
+            return all_ok
     while payloads and (force or len(payloads) >= batch_size):
         chunk = payloads[:batch_size]
         # Keep the in-memory buffer intact until the DB write returns success.
@@ -3066,295 +3108,424 @@ def main():
     db_last_flush_ts = time.monotonic()
 
     logger.info("Entering processing loop")
-    try:
+
+    # Thread-pool architecture: poll fast on one thread, process on another,
+    # and parallelise the bulk-INSERT phase of each buffer flush across a
+    # ThreadPoolExecutor. Decoupling poll from process lets librdkafka keep
+    # heartbeating during slow PG writes — broker no longer reaps us, no
+    # full rebalance every minute when ingestion is heavy.
+    RECORD_QUEUE_SIZE = max(1, int(os.getenv("RECORD_QUEUE_SIZE", "20")))
+    NUM_DB_WRITERS = max(1, int(os.getenv("DB_WRITER_THREADS", "2")))
+    record_queue: queue.Queue = queue.Queue(maxsize=RECORD_QUEUE_SIZE)
+    metrics.record_queue_capacity = RECORD_QUEUE_SIZE
+    db_executor = ThreadPoolExecutor(max_workers=NUM_DB_WRITERS, thread_name_prefix="db-writer")
+    consumer_log_state: dict = {}
+    consumer_backoff = RuntimeBackoff()
+    db_write_buffer: list = []
+
+    def _consume_thread() -> None:
+        """Thread A: poll Kafka and queue batches. Never processes events."""
+        paused = False
         while not _shutdown_requested:
             try:
-                batch = consumer.consume(num_messages=BATCH_SIZE, timeout=CONSUMER_POLL_TIMEOUT_SECONDS)
-            except Exception as e:
-                delay = loop_backoff.next_delay()
-                masked = mask_sensitive_text(str(e))
+                batch_local = consumer.consume(num_messages=BATCH_SIZE, timeout=CONSUMER_POLL_TIMEOUT_SECONDS)
+            except Exception as exc:
+                delay = consumer_backoff.next_delay()
+                masked = mask_sensitive_text(str(exc))
                 metrics.record_consumer_retry(masked, delay)
-                if _should_log_repeated_error(loop_log_state, masked):
+                if _should_log_repeated_error(consumer_log_state, masked):
                     logger.warning("Kafka consume failed; backing off for %.1fs: %s", delay, masked)
                 _sleep_with_shutdown(delay)
                 continue
-
-            if not batch:
+            consumer_backoff.reset()
+            if not batch_local:
                 metrics.record_poll(0)
-                producer.poll(0)
+                # Drive heartbeats even on idle polls — librdkafka piggy-backs them.
+                consumer.poll(0)
                 if CONSUMER_EMPTY_POLL_SLEEP_SECONDS > 0:
                     _sleep_with_shutdown(CONSUMER_EMPTY_POLL_SLEEP_SECONDS)
-            else:
-                loop_backoff.reset()
-                batch_had_processing_failure = False
-                batch_delivery_errors_before = delivery_errors["count"]
-                db_write_buffer = []
-                # Record in metrics
-                batch_size = len([m for m in batch if m and not m.error()])
-                metrics.record_poll(batch_size)
-                if batch_size > 0:
-                    metrics.record_processed(batch_size)
-                
-                for msg in batch:
-                    if msg is None or msg.error():
-                        if msg and msg.error().code() != KafkaError._PARTITION_EOF:
-                            delay = loop_backoff.next_delay()
-                            masked_err = mask_sensitive_text(str(msg.error()))
-                            metrics.record_consumer_retry(masked_err, delay)
-                            if _should_log_repeated_error(loop_log_state, masked_err):
-                                logger.error("Consume error; backing off for %.1fs: %s", delay, masked_err)
-                            _sleep_with_shutdown(delay)
-                            batch_had_processing_failure = True
-                        continue
+                continue
+            try:
+                record_queue.put(batch_local, timeout=5.0)
+                metrics.record_queue_depth = record_queue.qsize()
+            except queue.Full:
+                if not paused:
                     try:
-                        evt = orjson.loads(msg.value())
-                        safe_produce(producer, AUDIT_RAW_TOPIC, None, orjson.dumps(build_raw_event(evt, msg)))
+                        consumer.pause(consumer.assignment())
+                        paused = True
+                        logger.warning(
+                            "record_queue full (%d/%d) — pausing consumer for backpressure",
+                            record_queue.qsize(), RECORD_QUEUE_SIZE,
+                        )
+                    except Exception as exc:
+                        logger.warning("consumer.pause failed: %s", exc)
+                while record_queue.qsize() > RECORD_QUEUE_SIZE // 2 and not _shutdown_requested:
+                    consumer.poll(0)
+                    _sleep_with_shutdown(0.1)
+                if paused:
+                    try:
+                        consumer.resume(consumer.assignment())
+                    except Exception as exc:
+                        logger.warning("consumer.resume failed: %s", exc)
+                    paused = False
+                    logger.info(
+                        "record_queue drained (%d/%d) — resuming consumer",
+                        record_queue.qsize(), RECORD_QUEUE_SIZE,
+                    )
+                try:
+                    record_queue.put(batch_local, timeout=30.0)
+                    metrics.record_queue_depth = record_queue.qsize()
+                except queue.Full:
+                    logger.error(
+                        "record_queue still full after backpressure — dropping batch of %d",
+                        len(batch_local),
+                    )
+                    metrics.record_error()
+        # Sentinel so the processor exits its loop after the last real batch.
+        try:
+            record_queue.put(None, timeout=10.0)
+        except queue.Full:
+            logger.warning("Failed to enqueue shutdown sentinel; processor may rely on shutdown flag")
 
-                        flat = flatten_audit(evt)
-                        normalized_event = build_normalized_event(flat)
-                        enriched_event = build_enriched_event(flat)
-                        event_key = enriched_event.get('id', '').encode('utf-8') if enriched_event.get('id') else None
+    def _process_thread() -> None:
+        """Thread B: pop batches and run the full per-event pipeline."""
+        nonlocal processed, last_heartbeat, last_lag_ts, db_last_flush_ts
+        while True:
+            try:
+                batch = record_queue.get(timeout=1.0)
+            except queue.Empty:
+                if _shutdown_requested and record_queue.empty():
+                    break
+                # Still run the maintenance ticks even when idle.
+                now = time.time()
+                _run_periodic_maintenance(now)
+                continue
+            metrics.record_queue_depth = record_queue.qsize()
+            if batch is None:
+                # Shutdown sentinel from consumer thread.
+                break
+            loop_backoff.reset()
+            batch_had_processing_failure = False
+            batch_delivery_errors_before = delivery_errors["count"]
+            del db_write_buffer[:]
+            # Track high-water-mark offset per (topic, partition) so we can
+            # explicitly commit once at end of batch. With the consumer thread
+            # split off, librdkafka's auto-offset-store does not propagate
+            # reliably to the commit thread; explicit offsets are mandatory.
+            batch_max_offsets: dict[tuple[str, int], int] = {}
+            # Record in metrics
+            batch_size = len([m for m in batch if m and not m.error()])
+            metrics.record_poll(batch_size)
+            if batch_size > 0:
+                metrics.record_processed(batch_size)
 
-                        if product_store:
-                            persist_safely(
-                                "enriched_event",
-                                product_store.persist_enriched_event,
-                                enriched_event, msg.topic(), msg.partition(), msg.offset(),
-                            )
-                            metrics.record_persistence_success(product_store.health())
-                        if ENABLE_DB_WRITER:
-                            db_write_buffer.append(enriched_event)
-                            flush_due = time.monotonic() - db_last_flush_ts >= DB_WRITE_FLUSH_INTERVAL_SECONDS
-                            if len(db_write_buffer) >= max(1, DB_WRITE_BATCH_SIZE) or flush_due:
-                                if flush_db_writer_buffer(db_write_buffer, db_write_backoff, db_write_log_state, force=flush_due):
-                                    db_last_flush_ts = time.monotonic()
-                                else:
-                                    batch_had_processing_failure = True
+            for msg in batch:
+                if msg is None or msg.error():
+                    if msg and msg.error().code() != KafkaError._PARTITION_EOF:
+                        delay = loop_backoff.next_delay()
+                        masked_err = mask_sensitive_text(str(msg.error()))
+                        metrics.record_consumer_retry(masked_err, delay)
+                        if _should_log_repeated_error(loop_log_state, masked_err):
+                            logger.error("Consume error; backing off for %.1fs: %s", delay, masked_err)
+                        _sleep_with_shutdown(delay)
+                        batch_had_processing_failure = True
+                    continue
+                try:
+                    evt = orjson.loads(msg.value())
+                    safe_produce(producer, AUDIT_RAW_TOPIC, None, orjson.dumps(build_raw_event(evt, msg)))
 
-                        safe_produce(producer, AUDIT_NORMALIZED_TOPIC, event_key, orjson.dumps(normalized_event))
-                        safe_produce(producer, AUDIT_ENRICHED_TOPIC, event_key, orjson.dumps(enriched_event))
-                        api_state.record_enriched_event(enriched_event)
-                        metrics.record_processed(0, enriched_event.get("time"))
-                        record_event_metrics(enriched_event)
-                        record_routing_metrics(AUDIT_ENRICHED_TOPIC, False)
+                    flat = flatten_audit(evt)
+                    normalized_event = build_normalized_event(flat)
+                    enriched_event = build_enriched_event(flat)
+                    event_key = enriched_event.get('id', '').encode('utf-8') if enriched_event.get('id') else None
 
-                        # Track event for anomaly detection
-                        anomalies = anomaly_tracker.track_event(enriched_event)
-                        for anomaly in anomalies:
-                            record_anomaly_metrics(anomaly.anomaly_type.value)
-                            logger.warning(
-                                "ANOMALY DETECTED: %s - %s (principal=%s, source_ip=%s, rate=%.1f, threshold=%d)",
-                                anomaly.severity,
-                                anomaly.anomaly_type.value,
-                                anomaly.principal,
-                                anomaly.source_ip,
-                                anomaly.rate,
-                                anomaly.threshold,
-                            )
-                            if anomaly.anomaly_type.value in {"auth_failure_spike", "rapid_deletions", "api_key_abuse"}:
-                                anomaly_alert = build_anomaly_alert(anomaly)
-                                safe_produce(
-                                    producer,
-                                    AUDIT_ALERTS_TOPIC,
-                                    None,
-                                    orjson.dumps(anomaly_alert),
-                                )
-                                api_state.record_alert(anomaly_alert)
-                                metrics.record_signal(anomaly.anomaly_type.value)
-                                if product_store:
-                                    persist_safely("anomaly_alert", product_store.persist_alert, anomaly_alert)
-                                    metrics.record_persistence_success(product_store.health())
+                    if product_store:
+                        persist_safely(
+                            "enriched_event",
+                            product_store.persist_enriched_event,
+                            enriched_event, msg.topic(), msg.partition(), msg.offset(),
+                        )
+                        metrics.record_persistence_success(product_store.health())
+                    if ENABLE_DB_WRITER:
+                        db_write_buffer.append(enriched_event)
+                        # Don't trigger size-based flushes mid-batch — we
+                        # always force-flush at end-of-batch using the
+                        # executor for parallel chunk inserts.
 
-                        # Send alert for built-in alert rules or CRITICAL events
-                        if webhook_sender.enabled and ENABLE_BUILTIN_ALERTS:
-                            method_name = enriched_event.get('methodName', '')
+                    safe_produce(producer, AUDIT_NORMALIZED_TOPIC, event_key, orjson.dumps(normalized_event))
+                    safe_produce(producer, AUDIT_ENRICHED_TOPIC, event_key, orjson.dumps(enriched_event))
+                    api_state.record_enriched_event(enriched_event)
+                    metrics.record_processed(0, enriched_event.get("time"))
+                    record_event_metrics(enriched_event)
+                    record_routing_metrics(AUDIT_ENRICHED_TOPIC, False)
 
-                            # Check if this method triggers a built-in alert
-                            if method_name in BUILTIN_ALERT_METHODS:
-                                alert_config = BUILTIN_ALERT_METHODS[method_name]
-                                logger.info("Built-in alert triggered: %s - %s",
-                                           method_name, alert_config['message'])
-                                webhook_sender.send_critical_event_alert(enriched_event)
-                            # Also send alert for any CRITICAL event not in built-in rules
-                            elif enriched_event.get('criticality') == 'CRITICAL':
-                                webhook_sender.send_critical_event_alert(enriched_event)
-
-                        if denial_aggregator and denial_aggregator.should_aggregate(enriched_event):
-                            denial_aggregator.add_event(enriched_event)
-
-                        if enriched_event.get("is_high_risk"):
-                            if product_store:
-                                persist_safely(
-                                    "high_risk_event",
-                                    product_store.persist_high_risk_event,
-                                    enriched_event, msg.partition(), msg.offset(),
-                                )
-                                metrics.record_persistence_success(product_store.health())
-                            safe_produce(
-                                producer,
-                                AUDIT_SIGNALS_HIGHRISK_TOPIC,
-                                event_key,
-                                orjson.dumps(enriched_event),
-                            )
-                            metrics.record_signal("high_risk")
-                            record_routing_metrics(AUDIT_SIGNALS_HIGHRISK_TOPIC, False)
-
-                        if should_emit_high_risk_alert(enriched_event):
-                            operator_alert = build_operator_alert(enriched_event)
+                    # Track event for anomaly detection
+                    anomalies = anomaly_tracker.track_event(enriched_event)
+                    for anomaly in anomalies:
+                        record_anomaly_metrics(anomaly.anomaly_type.value)
+                        logger.warning(
+                            "ANOMALY DETECTED: %s - %s (principal=%s, source_ip=%s, rate=%.1f, threshold=%d)",
+                            anomaly.severity,
+                            anomaly.anomaly_type.value,
+                            anomaly.principal,
+                            anomaly.source_ip,
+                            anomaly.rate,
+                            anomaly.threshold,
+                        )
+                        if anomaly.anomaly_type.value in {"auth_failure_spike", "rapid_deletions", "api_key_abuse"}:
+                            anomaly_alert = build_anomaly_alert(anomaly)
                             safe_produce(
                                 producer,
                                 AUDIT_ALERTS_TOPIC,
-                                event_key,
-                                orjson.dumps(operator_alert),
+                                None,
+                                orjson.dumps(anomaly_alert),
                             )
-                            api_state.record_alert(operator_alert)
-                            metrics.record_signal("operator_alert")
+                            api_state.record_alert(anomaly_alert)
+                            metrics.record_signal(anomaly.anomaly_type.value)
                             if product_store:
-                                persist_safely("operator_alert", product_store.persist_alert, operator_alert)
+                                persist_safely("anomaly_alert", product_store.persist_alert, anomaly_alert)
                                 metrics.record_persistence_success(product_store.health())
 
-                        if ENABLE_MULTI_TOPIC_ROUTING and topic_router:
-                            topic_router.route_event(enriched_event)
-                    except orjson.JSONDecodeError as ex:
-                        batch_had_processing_failure = True
-                        metrics.record_parse_error()
-                        logger.exception("Parse failure: %s", ex)
-                        send_to_dlq(
-                            producer,
-                            msg.value(),
-                            str(ex),
-                            msg.topic(),
-                            msg.partition(),
-                            msg.offset()
-                        )
-                    except Exception as ex:
-                        batch_had_processing_failure = True
-                        metrics.record_error()
+                    # Send alert for built-in alert rules or CRITICAL events
+                    if webhook_sender.enabled and ENABLE_BUILTIN_ALERTS:
+                        method_name = enriched_event.get('methodName', '')
+
+                        # Check if this method triggers a built-in alert
+                        if method_name in BUILTIN_ALERT_METHODS:
+                            alert_config = BUILTIN_ALERT_METHODS[method_name]
+                            logger.info("Built-in alert triggered: %s - %s",
+                                       method_name, alert_config['message'])
+                            webhook_sender.send_critical_event_alert(enriched_event)
+                        # Also send alert for any CRITICAL event not in built-in rules
+                        elif enriched_event.get('criticality') == 'CRITICAL':
+                            webhook_sender.send_critical_event_alert(enriched_event)
+
+                    if denial_aggregator and denial_aggregator.should_aggregate(enriched_event):
+                        denial_aggregator.add_event(enriched_event)
+
+                    if enriched_event.get("is_high_risk"):
                         if product_store:
-                            metrics.record_persistence_failure(str(ex))
-                        logger.exception("Process failure: %s", ex)
-                        # Send failed event to DLQ for later reprocessing
-                        send_to_dlq(
+                            persist_safely(
+                                "high_risk_event",
+                                product_store.persist_high_risk_event,
+                                enriched_event, msg.partition(), msg.offset(),
+                            )
+                            metrics.record_persistence_success(product_store.health())
+                        safe_produce(
                             producer,
-                            msg.value(),
-                            str(ex),
-                            msg.topic(),
-                            msg.partition(),
-                            msg.offset()
+                            AUDIT_SIGNALS_HIGHRISK_TOPIC,
+                            event_key,
+                            orjson.dumps(enriched_event),
                         )
+                        metrics.record_signal("high_risk")
+                        record_routing_metrics(AUDIT_SIGNALS_HIGHRISK_TOPIC, False)
 
-                if ENABLE_DB_WRITER and db_write_buffer:
-                    if flush_db_writer_buffer(db_write_buffer, db_write_backoff, db_write_log_state, force=True):
-                        db_last_flush_ts = time.monotonic()
-                    else:
-                        batch_had_processing_failure = True
+                    if should_emit_high_risk_alert(enriched_event):
+                        operator_alert = build_operator_alert(enriched_event)
+                        safe_produce(
+                            producer,
+                            AUDIT_ALERTS_TOPIC,
+                            event_key,
+                            orjson.dumps(operator_alert),
+                        )
+                        api_state.record_alert(operator_alert)
+                        metrics.record_signal("operator_alert")
+                        if product_store:
+                            persist_safely("operator_alert", product_store.persist_alert, operator_alert)
+                            metrics.record_persistence_success(product_store.health())
 
-                # Flush producer to ensure ALL messages are delivered before committing offsets
-                # This is critical for at-least-once delivery guarantee
-                remaining = producer.flush(timeout=30)
+                    if ENABLE_MULTI_TOPIC_ROUTING and topic_router:
+                        topic_router.route_event(enriched_event)
 
-                should_commit, commit_details = evaluate_batch_commit(
-                    remaining,
-                    batch_delivery_errors_before,
-                    delivery_errors["count"],
-                    batch_had_processing_failure,
-                )
+                    # Track this message's offset for the end-of-batch commit.
+                    key = (msg.topic(), msg.partition())
+                    if msg.offset() > batch_max_offsets.get(key, -1):
+                        batch_max_offsets[key] = msg.offset()
+                except orjson.JSONDecodeError as ex:
+                    batch_had_processing_failure = True
+                    metrics.record_parse_error()
+                    logger.exception("Parse failure: %s", ex)
+                    send_to_dlq(
+                        producer,
+                        msg.value(),
+                        str(ex),
+                        msg.topic(),
+                        msg.partition(),
+                        msg.offset()
+                    )
+                except Exception as ex:
+                    batch_had_processing_failure = True
+                    metrics.record_error()
+                    if product_store:
+                        metrics.record_persistence_failure(str(ex))
+                    logger.exception("Process failure: %s", ex)
+                    # Send failed event to DLQ for later reprocessing
+                    send_to_dlq(
+                        producer,
+                        msg.value(),
+                        str(ex),
+                        msg.topic(),
+                        msg.partition(),
+                        msg.offset()
+                    )
 
-                if not should_commit:
-                    # Some messages failed to deliver - do NOT commit offsets
-                    # These events will be reprocessed on restart
-                    logger.error("Batch not committed: %s", commit_details)
-                    metrics.record_commit_failure()
+            # End-of-batch DB flush — parallel chunks via the db_executor.
+            if ENABLE_DB_WRITER and db_write_buffer:
+                if flush_db_writer_buffer(
+                    db_write_buffer, db_write_backoff, db_write_log_state,
+                    force=True, executor=db_executor,
+                ):
+                    db_last_flush_ts = time.monotonic()
                 else:
-                    # All messages delivered - safe to commit offsets
-                    try:
-                        consumer.commit(asynchronous=False)  # Synchronous commit for durability
-                        metrics.record_commit_success()
-                        logger.debug("Batch committed: %d events", batch_size)
-                    except Exception as e:
-                        logger.error("Failed to commit offsets: %s", e)
-                        metrics.record_commit_failure()
+                    batch_had_processing_failure = True
 
-                processed += batch_size
-                if processed >= 1000 and processed % 1000 < batch_size:
-                    elapsed = time.time() - start_ts
-                    logger.info("Processed %d msgs in %.1f s (%.1f msg/s)",
-                                processed, elapsed, processed / elapsed)
-                if CONSUMER_BATCH_SLEEP_SECONDS > 0:
-                    _sleep_with_shutdown(CONSUMER_BATCH_SLEEP_SECONDS)
+            # Flush producer to ensure ALL messages are delivered before committing offsets
+            # This is critical for at-least-once delivery guarantee
+            remaining = producer.flush(timeout=30)
+
+            should_commit, commit_details = evaluate_batch_commit(
+                remaining,
+                batch_delivery_errors_before,
+                delivery_errors["count"],
+                batch_had_processing_failure,
+            )
+
+            if not should_commit:
+                # Some messages failed to deliver - do NOT commit offsets
+                # These events will be reprocessed on restart
+                logger.error("Batch not committed: %s", commit_details)
+                metrics.record_commit_failure()
+            elif not batch_max_offsets:
+                # No successfully-processed messages in this batch (everything
+                # was a parse error / consume error). Nothing to commit.
+                metrics.record_commit_success()
+            else:
+                # All messages delivered - safe to commit offsets.
+                # Build explicit TopicPartitions: librdkafka's auto-offset-store
+                # is unreliable when consume() and commit() run in different
+                # threads. Commit offset = max processed + 1 per partition.
+                offsets_to_commit = [
+                    TopicPartition(t, p, offset + 1)
+                    for (t, p), offset in batch_max_offsets.items()
+                ]
+                try:
+                    consumer.commit(offsets=offsets_to_commit, asynchronous=False)
+                    metrics.record_commit_success()
+                    logger.debug("Batch committed: %d events across %d partitions",
+                                 batch_size, len(offsets_to_commit))
+                except Exception as e:
+                    logger.error("Failed to commit offsets: %s", e)
+                    metrics.record_commit_failure()
+
+            processed += batch_size
+            if processed >= 1000 and processed % 1000 < batch_size:
+                elapsed = time.time() - start_ts
+                logger.info("Processed %d msgs in %.1f s (%.1f msg/s)",
+                            processed, elapsed, processed / elapsed)
+            if CONSUMER_BATCH_SLEEP_SECONDS > 0:
+                _sleep_with_shutdown(CONSUMER_BATCH_SLEEP_SECONDS)
 
             now = time.time()
-            # heartbeat
-            if now - last_heartbeat >= 30:
-                logger.info("Forwarder is alive at %s. Processed: %d, Errors: %d, Delivery failures: %d, DLQ: %d sent/%d failed",
-                           time.ctime(), metrics.processed_total, metrics.error_count, delivery_errors["count"],
-                           dlq_stats["sent"], dlq_stats["failed"])
-                if delivery_errors["last_error"]:
-                    # delivery_errors["last_error"] is already pre-masked at
-                    # capture time (see delivery_callback) but we re-mask on
-                    # the way out as defence-in-depth.
+            _run_periodic_maintenance(now)
+
+    def _run_periodic_maintenance(now: float) -> None:
+        """Heartbeat + 60 s tick. Runs from the processor thread (or its idle
+        path when the queue is empty) so we don't need a third thread."""
+        nonlocal last_heartbeat, last_lag_ts
+        if now - last_heartbeat >= 30:
+            logger.info(
+                "Forwarder is alive at %s. Processed: %d, Errors: %d, Delivery failures: %d, "
+                "DLQ: %d sent/%d failed, queue=%d/%d",
+                time.ctime(), metrics.processed_total, metrics.error_count, delivery_errors["count"],
+                dlq_stats["sent"], dlq_stats["failed"],
+                record_queue.qsize(), RECORD_QUEUE_SIZE,
+            )
+            if delivery_errors["last_error"]:
+                logger.info(
+                    "Last delivery error: %s",
+                    mask_sensitive_text(delivery_errors["last_error"]),
+                )
+            if ENABLE_MULTI_TOPIC_ROUTING and topic_router:
+                stats = topic_router.get_stats()
+                if stats.get('low_dropped', 0) > 0:
                     logger.info(
-                        "Last delivery error: %s",
-                        mask_sensitive_text(delivery_errors["last_error"]),
+                        "Routing stats - LOW dropped: %d (%.1f%% of total), CRITICAL: %d, "
+                        "HIGH: %d, MEDIUM: %d, LOW routed: %d",
+                        stats['low_dropped'],
+                        stats['low_dropped'] / max(stats['total_events'], 1) * 100,
+                        stats['critical_routed'], stats['high_routed'],
+                        stats['medium_routed'], stats['low_routed'],
                     )
-                # Log routing stats if multi-topic routing is enabled
-                if ENABLE_MULTI_TOPIC_ROUTING and topic_router:
-                    stats = topic_router.get_stats()
-                    if stats.get('low_dropped', 0) > 0:
-                        logger.info("Routing stats - LOW dropped: %d (%.1f%% of total), CRITICAL: %d, HIGH: %d, MEDIUM: %d, LOW routed: %d",
-                                   stats['low_dropped'],
-                                   stats['low_dropped'] / max(stats['total_events'], 1) * 100,
-                                   stats['critical_routed'], stats['high_routed'],
-                                   stats['medium_routed'], stats['low_routed'])
-                # Log aggregator stats if denial aggregation is enabled
-                if denial_aggregator:
-                    agg_stats = denial_aggregator.get_stats()
-                    if agg_stats.get('events_aggregated', 0) > 0:
-                        logger.info("Aggregator stats - aggregated: %d, alerts: %d (HIGH: %d, MEDIUM: %d), pending: %d",
-                                   agg_stats['events_aggregated'], agg_stats['alerts_produced'],
-                                   agg_stats['high_alerts'], agg_stats['medium_alerts'],
-                                   agg_stats['pending_denials'])
-                last_heartbeat = now
+            if denial_aggregator:
+                agg_stats = denial_aggregator.get_stats()
+                if agg_stats.get('events_aggregated', 0) > 0:
+                    logger.info(
+                        "Aggregator stats - aggregated: %d, alerts: %d (HIGH: %d, MEDIUM: %d), pending: %d",
+                        agg_stats['events_aggregated'], agg_stats['alerts_produced'],
+                        agg_stats['high_alerts'], agg_stats['medium_alerts'],
+                        agg_stats['pending_denials'],
+                    )
+            last_heartbeat = now
 
-            # Periodic maintenance tick (lag polling itself is now sourced
-            # from rdkafka stats — see make_rdkafka_stats_callback).
-            if now - last_lag_ts >= 60:
-                # Periodic cleanup of rate tracker to prevent memory leak
-                anomaly_tracker.cleanup()
-                tracker_stats = anomaly_tracker.get_stats()
-                logger.debug("Rate tracker cleanup: %d principals, %d IPs tracked",
-                            tracker_stats.get('tracked_principals', 0),
-                            tracker_stats.get('tracked_ips', 0))
-
-                # Surface anomaly-suppression tally so operators can see how
-                # noisy each (principal, type) pair was without per-event log
-                # spam. Drains the counter inside the tracker.
+        if now - last_lag_ts >= 60:
+            anomaly_tracker.cleanup()
+            tracker_stats = anomaly_tracker.get_stats()
+            logger.debug(
+                "Rate tracker cleanup: %d principals, %d IPs tracked",
+                tracker_stats.get('tracked_principals', 0),
+                tracker_stats.get('tracked_ips', 0),
+            )
+            try:
+                summary = anomaly_tracker.flush_suppression_summary()
+                for anomaly_type, principal, count in summary:
+                    logger.info(
+                        "%s: %s suppressed %d repeats in last %ds",
+                        principal or "<unknown>", anomaly_type, count,
+                        anomaly_tracker.config.dedup_window_seconds,
+                    )
+            except AttributeError:
+                pass  # older RateTracker without the helper
+            if product_store:
                 try:
-                    summary = anomaly_tracker.flush_suppression_summary()
-                    for anomaly_type, principal, count in summary:
-                        logger.info(
-                            "%s: %s suppressed %d repeats in last %ds",
-                            principal or "<unknown>", anomaly_type, count,
-                            anomaly_tracker.config.dedup_window_seconds,
-                        )
-                except AttributeError:
-                    pass  # older RateTracker without the helper
+                    product_store.cleanup_expired()
+                    product_store.checkpoint_wal(mode="PASSIVE")
+                    metrics.record_persistence_success(product_store.health())
+                except Exception as exc:
+                    metrics.record_persistence_failure(str(exc))
+                    logger.warning("Persistence maintenance failed: %s", exc)
+            last_lag_ts = now
 
-                if product_store:
-                    try:
-                        product_store.cleanup_expired()
-                        product_store.checkpoint_wal(mode="PASSIVE")
-                        metrics.record_persistence_success(product_store.health())
-                    except Exception as exc:
-                        metrics.record_persistence_failure(str(exc))
-                        logger.warning("Persistence maintenance failed: %s", exc)
+    consumer_thread = threading.Thread(target=_consume_thread, name="kafka-consumer")
+    processor_thread = threading.Thread(target=_process_thread, name="event-processor")
+    consumer_thread.start()
+    processor_thread.start()
+    logger.info(
+        "Thread pool started: 1 consumer, 1 processor, %d db writers (record_queue capacity=%d)",
+        NUM_DB_WRITERS, RECORD_QUEUE_SIZE,
+    )
 
-                last_lag_ts = now
-
+    try:
+        # Main thread blocks here until shutdown is requested. The actual
+        # work happens in consumer_thread + processor_thread.
+        while not _shutdown_requested:
+            time.sleep(0.5)
     except KeyboardInterrupt:
         logger.info("Interrupted by user (KeyboardInterrupt)")
     finally:
         logger.info("Shutting down gracefully...")
+
+        # Wait for the consumer thread to drain its current poll and signal
+        # the processor via the queue sentinel.
+        consumer_thread.join(timeout=30)
+        if consumer_thread.is_alive():
+            logger.warning("kafka-consumer thread did not exit within 30s")
+        # Wait for the processor to drain in-flight DB writes.
+        processor_thread.join(timeout=120)
+        if processor_thread.is_alive():
+            logger.warning("event-processor thread did not exit within 120s")
+        # Stop the parallel-write executor (waits for any worker still inside
+        # AuditEventDbWriter.write_batch).
+        db_executor.shutdown(wait=True)
 
         # Shutdown denial aggregator FIRST (flushes pending alerts before producer)
         if denial_aggregator:
@@ -3367,19 +3538,25 @@ def main():
         if storage_monitor_thread:
             storage_monitor_thread.join(timeout=5)
 
-        # Flush producer and commit final offsets
+        # Flush producer. The processor thread has already committed offsets
+        # for every batch it finished, so shutdown commit is purely defensive
+        # — typically there is nothing left in librdkafka's offset store at
+        # this point and commit() will return _NO_OFFSET (harmless).
         remaining = producer.flush(timeout=30)
         if remaining > 0:
             logger.warning("Could not flush %d messages during shutdown", remaining)
         else:
-            # Only commit if all messages were delivered
             try:
                 consumer.commit(asynchronous=False)
                 metrics.record_commit_success()
                 logger.info("Final offset commit successful")
             except Exception as e:
-                logger.error("Failed to commit offsets during shutdown: %s", e)
-                metrics.record_commit_failure()
+                msg_str = str(e)
+                if "No offset stored" in msg_str or "_NO_OFFSET" in msg_str:
+                    logger.info("No pending offsets to commit at shutdown (processor already committed)")
+                else:
+                    logger.error("Failed to commit offsets during shutdown: %s", e)
+                    metrics.record_commit_failure()
 
         consumer.close()
         logger.info("Shutdown complete")
