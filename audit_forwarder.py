@@ -50,6 +50,13 @@ from src.metrics.audit_events import (
     record_schema_registry_failure,
 )
 from src.classification import calculate_criticality, CriticalityLevel
+from src.classification.methods import (
+    CRITICAL_METHODS,
+    HIGH_METHODS,
+    READ_ONLY_METHODS,
+    AUTHENTICATION_METHODS,
+    AUTHORIZATION_CHECK_METHODS,
+)
 from src.anomaly import RateTracker, RateTrackerConfig
 from src.routing import TopicRouter, RouterConfig
 from src.alerting import get_webhook_sender
@@ -479,6 +486,13 @@ class Metrics:
         # whether the processor is keeping up with fetched batches.
         self.record_queue_depth = 0
         self.record_queue_capacity = 0
+        # Priority-queue depths (between processor and async DB writers).
+        # Updated by writer threads + by the processor on enqueue. Surfaced
+        # via /health so operators can see which lane is backing up.
+        self.critical_queue_depth = 0
+        self.normal_queue_depth = 0
+        self.bulk_queue_depth = 0
+        self.catalog_queue_depth = 0
         self.last_ingested_event_time = None
         self.last_committed_at = None
         self.offset_commits_total = 0
@@ -793,6 +807,12 @@ class Metrics:
                 "consumer_lag_by_partition": self.partition_lag,
                 "record_queue_depth": int(self.record_queue_depth),
                 "record_queue_capacity": int(self.record_queue_capacity),
+                "priority_queue_depths": {
+                    "critical": int(self.critical_queue_depth),
+                    "normal": int(self.normal_queue_depth),
+                    "bulk": int(self.bulk_queue_depth),
+                    "catalog": int(self.catalog_queue_depth),
+                },
                 "last_ingested_event_time": self.last_ingested_event_time,
                 "last_committed_at": self.last_committed_at,
                 "offset_commits_total": self.offset_commits_total,
@@ -1266,6 +1286,9 @@ class MetricsHandler(BaseHTTPRequestHandler):
             "processing_rate": metrics_data['processing_rate_per_second'],
             "record_queue_depth": metrics_data.get('record_queue_depth', 0),
             "record_queue_capacity": metrics_data.get('record_queue_capacity', 0),
+            "queues": metrics_data.get("priority_queue_depths", {
+                "critical": 0, "normal": 0, "bulk": 0, "catalog": 0,
+            }),
             "freshness": {
                 "last_enriched_event_time": snapshot["last_enriched_event_time"],
                 "last_enriched_ingest_at": snapshot["last_enriched_ingest_at"],
@@ -2498,20 +2521,34 @@ def initialize_db_writer_if_enabled():
     return db_writer
 
 
-def flush_db_writer_batch(payloads: list[dict], backoff: RuntimeBackoff, log_state: dict) -> bool:
+def flush_db_writer_batch(
+    payloads: list[dict],
+    backoff: RuntimeBackoff,
+    log_state: dict,
+    *,
+    defer_catalog: bool = False,
+    catalog_target: "queue.Queue | None" = None,
+    label: str = "",
+) -> bool:
     if not ENABLE_DB_WRITER or not payloads:
         return True
     try:
         writer = initialize_db_writer_if_enabled()
-        result = writer.write_batch(payloads)
+        # Pass defer_catalog only when set so older test doubles whose
+        # write_batch signature predates the kwarg keep working.
+        if defer_catalog:
+            result = writer.write_batch(payloads, defer_catalog=True)
+        else:
+            result = writer.write_batch(payloads)
         metrics.record_db_write_success(result.attempted)
         cleanup = writer.cleanup_retention_if_due()
         if cleanup:
             metrics.record_db_retention_cleanup(cleanup)
         backoff.reset()
         logger.info(
-            "DB writer batch complete attempted=%d inserted=%d elapsed_ms=%.1f "
+            "DB writer batch complete%s attempted=%d inserted=%d elapsed_ms=%.1f "
             "[normalize=%.0fms pg_insert=%.0fms catalog_upsert=%.0fms]",
+            f" lane={label}" if label else "",
             result.attempted,
             result.inserted,
             result.elapsed_ms,
@@ -2519,6 +2556,16 @@ def flush_db_writer_batch(payloads: list[dict], backoff: RuntimeBackoff, log_sta
             getattr(result, "pg_insert_ms", 0.0),
             getattr(result, "catalog_upsert_ms", 0.0),
         )
+        if defer_catalog and catalog_target is not None:
+            for row in result.deferred_catalog_rows or []:
+                try:
+                    catalog_target.put_nowait(row)
+                except queue.Full:
+                    # Catalog rows are derived state — losing one here is
+                    # harmless because the next event for the same resource
+                    # will re-derive it. We just lose the last_seen_at update.
+                    metrics.record_db_write_error("catalog_queue full", 0)
+                    break
         return True
     except Exception as exc:
         delay = backoff.next_delay()
@@ -3109,19 +3156,151 @@ def main():
 
     logger.info("Entering processing loop")
 
-    # Thread-pool architecture: poll fast on one thread, process on another,
-    # and parallelise the bulk-INSERT phase of each buffer flush across a
-    # ThreadPoolExecutor. Decoupling poll from process lets librdkafka keep
-    # heartbeating during slow PG writes — broker no longer reaps us, no
-    # full rebalance every minute when ingestion is heavy.
+    # Thread-pool architecture with priority lanes:
+    #   consumer thread → record_queue → processor thread → priority routing →
+    #     critical/normal/bulk writer threads → audit_events INSERT
+    #     catalog writer thread ← deferred catalog rows from each writer
+    # Decoupling poll from process lets librdkafka keep heartbeating during
+    # slow PG writes — broker no longer reaps us. Splitting writes by
+    # criticality means destructive events land in PG within seconds even
+    # when the bulk lane is digesting tens of thousands of authz checks.
     RECORD_QUEUE_SIZE = max(1, int(os.getenv("RECORD_QUEUE_SIZE", "20")))
-    NUM_DB_WRITERS = max(1, int(os.getenv("DB_WRITER_THREADS", "2")))
     record_queue: queue.Queue = queue.Queue(maxsize=RECORD_QUEUE_SIZE)
     metrics.record_queue_capacity = RECORD_QUEUE_SIZE
-    db_executor = ThreadPoolExecutor(max_workers=NUM_DB_WRITERS, thread_name_prefix="db-writer")
     consumer_log_state: dict = {}
     consumer_backoff = RuntimeBackoff()
-    db_write_buffer: list = []
+
+    # Priority routing — only used when DB writer is enabled. Sized so the
+    # critical lane stays small (drains fast), normal lane is moderate, and
+    # bulk lane absorbs noise without blocking the producer.
+    PRIORITY_QUEUES_ENABLED = ENABLE_DB_WRITER
+    if PRIORITY_QUEUES_ENABLED:
+        critical_queue: queue.Queue = queue.Queue(
+            maxsize=max(100, int(os.getenv("PRIORITY_QUEUE_CRITICAL_MAX", "1000")))
+        )
+        normal_queue: queue.Queue = queue.Queue(
+            maxsize=max(500, int(os.getenv("PRIORITY_QUEUE_NORMAL_MAX", "5000")))
+        )
+        bulk_queue: queue.Queue = queue.Queue(
+            maxsize=max(5000, int(os.getenv("PRIORITY_QUEUE_BULK_MAX", "50000")))
+        )
+        catalog_queue: queue.Queue = queue.Queue(
+            maxsize=max(1000, int(os.getenv("PRIORITY_QUEUE_CATALOG_MAX", "10000")))
+        )
+    else:
+        critical_queue = normal_queue = bulk_queue = catalog_queue = None
+
+    def _route_to_queue(enriched_event: dict) -> None:
+        """Fast routing — pick the priority lane based on methodName.
+
+        Critical+High methods → critical_queue (small batches, < 0.1s wait).
+        Read-only / authentication / authz checks → bulk_queue (huge batches).
+        Everything else → normal_queue (medium batches).
+        """
+        if not PRIORITY_QUEUES_ENABLED:
+            return
+        method = enriched_event.get("methodName") or enriched_event.get("method") or ""
+        if method in CRITICAL_METHODS or method in HIGH_METHODS:
+            target, target_name = critical_queue, "critical"
+        elif (
+            method in READ_ONLY_METHODS
+            or method in AUTHENTICATION_METHODS
+            or method in AUTHORIZATION_CHECK_METHODS
+        ):
+            target, target_name = bulk_queue, "bulk"
+        else:
+            target, target_name = normal_queue, "normal"
+        try:
+            target.put_nowait(enriched_event)
+        except queue.Full:
+            # Block briefly to apply back-pressure to the processor thread.
+            # If this saturates, the upstream record_queue fills and the
+            # consumer thread pauses Kafka — the existing back-pressure path.
+            try:
+                target.put(enriched_event, timeout=5.0)
+            except queue.Full:
+                metrics.record_db_write_error(f"{target_name}_queue full", 1)
+                logger.warning(
+                    "priority queue %s full — dropping event method=%s",
+                    target_name, method,
+                )
+
+    def _refresh_queue_depths() -> None:
+        if not PRIORITY_QUEUES_ENABLED:
+            return
+        metrics.critical_queue_depth = critical_queue.qsize()
+        metrics.normal_queue_depth = normal_queue.qsize()
+        metrics.bulk_queue_depth = bulk_queue.qsize()
+        metrics.catalog_queue_depth = catalog_queue.qsize()
+
+    def _writer_loop(q: queue.Queue, batch_size: int, max_wait: float, lane: str, depth_attr: str) -> None:
+        """Generic writer: drain ``q`` into Postgres in batches.
+
+        Wait at most ``max_wait`` seconds for ``batch_size`` records. Critical
+        writer wakes early to prioritise latency; bulk writer waits longer to
+        prioritise throughput. Catalog upsert is deferred to the catalog
+        writer so this hot path is dominated by audit_events INSERT only.
+        """
+        log_state: dict = {}
+        backoff = RuntimeBackoff(maximum=DB_WRITE_BACKOFF_MAX_SECONDS)
+        while True:
+            batch: list[dict] = []
+            deadline = time.monotonic() + max_wait
+            while len(batch) < batch_size:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                try:
+                    record = q.get(timeout=min(remaining, 0.1))
+                except queue.Empty:
+                    if _shutdown_requested and q.empty():
+                        break
+                    continue
+                batch.append(record)
+            setattr(metrics, depth_attr, q.qsize())
+            if batch:
+                flush_db_writer_batch(
+                    batch, backoff, log_state,
+                    defer_catalog=True,
+                    catalog_target=catalog_queue,
+                    label=lane,
+                )
+                setattr(metrics, depth_attr, q.qsize())
+            if _shutdown_requested and q.empty() and not batch:
+                return
+
+    def _catalog_writer_loop() -> None:
+        """Drain catalog_queue → resource_catalog upsert.
+
+        Catalog rows describe the same resource on most events, so even a
+        500-row batch typically collapses to a small number of distinct
+        resource_ids. Running this off-thread cuts ~300ms from every
+        audit_events INSERT batch on the critical / normal lanes.
+        """
+        log_state: dict = {}
+        while True:
+            try:
+                first = catalog_queue.get(timeout=10.0)
+            except queue.Empty:
+                if _shutdown_requested and catalog_queue.empty():
+                    return
+                continue
+            rows: list[dict] = [first]
+            while len(rows) < 500:
+                try:
+                    rows.append(catalog_queue.get_nowait())
+                except queue.Empty:
+                    break
+            metrics.catalog_queue_depth = catalog_queue.qsize()
+            try:
+                writer = initialize_db_writer_if_enabled()
+                if writer is not None:
+                    writer.upsert_catalog(rows)
+            except Exception as exc:
+                masked = mask_sensitive_text(str(exc))
+                metrics.record_db_write_error(f"catalog upsert failed: {masked}", 0)
+                if _should_log_repeated_error(log_state, masked):
+                    logger.warning("catalog_upsert failed: %s", masked)
 
     def _consume_thread() -> None:
         """Thread A: poll Kafka and queue batches. Never processes events."""
@@ -3207,7 +3386,6 @@ def main():
             loop_backoff.reset()
             batch_had_processing_failure = False
             batch_delivery_errors_before = delivery_errors["count"]
-            del db_write_buffer[:]
             # Track high-water-mark offset per (topic, partition) so we can
             # explicitly commit once at end of batch. With the consumer thread
             # split off, librdkafka's auto-offset-store does not propagate
@@ -3247,10 +3425,14 @@ def main():
                         )
                         metrics.record_persistence_success(product_store.health())
                     if ENABLE_DB_WRITER:
-                        db_write_buffer.append(enriched_event)
-                        # Don't trigger size-based flushes mid-batch — we
-                        # always force-flush at end-of-batch using the
-                        # executor for parallel chunk inserts.
+                        # Route into the priority lane based on methodName
+                        # (critical / normal / bulk). Writer threads drain
+                        # each queue into Postgres asynchronously; we no
+                        # longer block this batch on the DB write. Events
+                        # remain durable in the audit Kafka topics, so a
+                        # crash between offset-commit and async-write is
+                        # recoverable via replay.
+                        _route_to_queue(enriched_event)
 
                     safe_produce(producer, AUDIT_NORMALIZED_TOPIC, event_key, orjson.dumps(normalized_event))
                     safe_produce(producer, AUDIT_ENRICHED_TOPIC, event_key, orjson.dumps(enriched_event))
@@ -3369,19 +3551,16 @@ def main():
                         msg.offset()
                     )
 
-            # End-of-batch DB flush — parallel chunks via the db_executor.
-            if ENABLE_DB_WRITER and db_write_buffer:
-                if flush_db_writer_buffer(
-                    db_write_buffer, db_write_backoff, db_write_log_state,
-                    force=True, executor=db_executor,
-                ):
-                    db_last_flush_ts = time.monotonic()
-                else:
-                    batch_had_processing_failure = True
+            # End-of-batch DB write is now async — events were routed into
+            # priority lanes earlier in this batch. The producer flush below
+            # is what gates offset commit; PG durability is rebuilt from
+            # Kafka topics on replay if a writer thread crashes.
+            db_last_flush_ts = time.monotonic()
 
             # Flush producer to ensure ALL messages are delivered before committing offsets
             # This is critical for at-least-once delivery guarantee
             remaining = producer.flush(timeout=30)
+            _refresh_queue_depths()
 
             should_commit, commit_details = evaluate_batch_commit(
                 remaining,
@@ -3433,12 +3612,15 @@ def main():
         path when the queue is empty) so we don't need a third thread."""
         nonlocal last_heartbeat, last_lag_ts
         if now - last_heartbeat >= 30:
+            _refresh_queue_depths()
             logger.info(
                 "Forwarder is alive at %s. Processed: %d, Errors: %d, Delivery failures: %d, "
-                "DLQ: %d sent/%d failed, queue=%d/%d",
+                "DLQ: %d sent/%d failed, queue=%d/%d, lanes critical=%d normal=%d bulk=%d catalog=%d",
                 time.ctime(), metrics.processed_total, metrics.error_count, delivery_errors["count"],
                 dlq_stats["sent"], dlq_stats["failed"],
                 record_queue.qsize(), RECORD_QUEUE_SIZE,
+                metrics.critical_queue_depth, metrics.normal_queue_depth,
+                metrics.bulk_queue_depth, metrics.catalog_queue_depth,
             )
             if delivery_errors["last_error"]:
                 logger.info(
@@ -3499,9 +3681,62 @@ def main():
     processor_thread = threading.Thread(target=_process_thread, name="event-processor")
     consumer_thread.start()
     processor_thread.start()
+
+    writer_threads: list[threading.Thread] = []
+    if PRIORITY_QUEUES_ENABLED:
+        # Three writer lanes — sized so the critical lane drains in seconds
+        # (small batches, no wait), the bulk lane absorbs noise efficiently
+        # (large batches, multi-second wait), and the normal lane sits in
+        # between. Per-lane tuning is exposed via env vars but the defaults
+        # match the freshness SLA documented in docs/RETENTION_POLICY.md.
+        critical_writer = threading.Thread(
+            target=_writer_loop,
+            args=(
+                critical_queue,
+                max(1, int(os.getenv("WRITER_CRITICAL_BATCH", "25"))),
+                max(0.05, float(os.getenv("WRITER_CRITICAL_WAIT", "0.1"))),
+                "critical",
+                "critical_queue_depth",
+            ),
+            name="writer-critical",
+            daemon=False,
+        )
+        normal_writer = threading.Thread(
+            target=_writer_loop,
+            args=(
+                normal_queue,
+                max(1, int(os.getenv("WRITER_NORMAL_BATCH", "200"))),
+                max(0.1, float(os.getenv("WRITER_NORMAL_WAIT", "1.0"))),
+                "normal",
+                "normal_queue_depth",
+            ),
+            name="writer-normal",
+            daemon=False,
+        )
+        bulk_writer = threading.Thread(
+            target=_writer_loop,
+            args=(
+                bulk_queue,
+                max(1, int(os.getenv("WRITER_BULK_BATCH", "1000"))),
+                max(0.5, float(os.getenv("WRITER_BULK_WAIT", "5.0"))),
+                "bulk",
+                "bulk_queue_depth",
+            ),
+            name="writer-bulk",
+            daemon=False,
+        )
+        catalog_writer = threading.Thread(
+            target=_catalog_writer_loop,
+            name="writer-catalog",
+            daemon=False,
+        )
+        for t in (critical_writer, normal_writer, bulk_writer, catalog_writer):
+            t.start()
+            writer_threads.append(t)
+
     logger.info(
-        "Thread pool started: 1 consumer, 1 processor, %d db writers (record_queue capacity=%d)",
-        NUM_DB_WRITERS, RECORD_QUEUE_SIZE,
+        "Thread pool started: 1 consumer, 1 processor, %d priority writers (record_queue capacity=%d)",
+        len(writer_threads), RECORD_QUEUE_SIZE,
     )
 
     try:
@@ -3523,9 +3758,14 @@ def main():
         processor_thread.join(timeout=120)
         if processor_thread.is_alive():
             logger.warning("event-processor thread did not exit within 120s")
-        # Stop the parallel-write executor (waits for any worker still inside
-        # AuditEventDbWriter.write_batch).
-        db_executor.shutdown(wait=True)
+        # Drain priority writer threads. Each writer flushes any partial
+        # batch it has buffered before exiting (loop checks _shutdown_requested
+        # after every batch). Critical drains first because its queue is
+        # smallest and we want destructive events landed before exit.
+        for t in writer_threads:
+            t.join(timeout=120)
+            if t.is_alive():
+                logger.warning("%s did not exit within 120s", t.name)
 
         # Shutdown denial aggregator FIRST (flushes pending alerts before producer)
         if denial_aggregator:

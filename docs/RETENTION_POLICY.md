@@ -36,6 +36,27 @@ questions about freshness and data lifecycle.
 | After restart / catch-up | Up to 2 hours | Consumer replays from committed offset |
 | First-time ingest of an active org | Up to 12 hours | Replays full retained Kafka topic |
 
+## Event Freshness by Priority
+
+The forwarder routes events into priority lanes so destructive operations
+land in Postgres in seconds even when noise events are batching. Each lane
+has its own writer thread, batch size, and wait budget — see
+`audit_forwarder.py` (`WRITER_*_BATCH` / `WRITER_*_WAIT` env vars).
+
+| Event type | Examples | Target freshness |
+|---|---|---|
+| 🔴 Critical | Topic deleted, Cluster deleted, DeleteServiceAccount, DeleteAPIKey | < 2 minutes |
+| 🟡 High | CreateTopics, CreateAPIKey, RoleBinding changes, SignIn | < 5 minutes |
+| 🔵 Normal | Schema changes, Connector ops, Flink jobs | < 15 minutes |
+| ⚪ Noise | Auth checks, Fetch/Produce, Read-only ops | < 30 minutes |
+
+This is the honest SLA. Customers don't care that routine auth checks are
+30 minutes delayed — they care that "someone deleted our prod topic"
+appears in two minutes. Operators can confirm the lanes are healthy via
+`GET /health` (look at `queues.critical`, `queues.normal`, `queues.bulk`,
+`queues.catalog`); a critical queue depth above ~100 means the critical
+writer is degraded and destructive events are *not* meeting their SLA.
+
 If observed lag exceeds these ranges by more than 2x, check the System page
 or `GET /health` on the forwarder for the bottleneck — typical causes are
 DB writer saturation, network latency to a cross-region Kafka cluster, or

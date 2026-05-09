@@ -42,6 +42,10 @@ class DbWriteResult:
     normalize_ms: float = 0.0
     pg_insert_ms: float = 0.0
     catalog_upsert_ms: float = 0.0
+    # When write_batch is called with defer_catalog=True, the caller is given
+    # the prepared catalog rows so they can be queued for an out-of-band
+    # upsert thread instead of paying for the upsert in the hot path.
+    deferred_catalog_rows: list = None
 
 
 metadata = MetaData()
@@ -239,7 +243,16 @@ class AuditEventDbWriter:
             **normalized,
         }
 
-    def write_batch(self, payloads: list[dict[str, Any]]) -> DbWriteResult:
+    def write_batch(self, payloads: list[dict[str, Any]], *, defer_catalog: bool = False) -> DbWriteResult:
+        """Insert a batch of audit events.
+
+        If ``defer_catalog`` is True the catalog upsert is skipped and the
+        prepared catalog rows are returned on the result via
+        ``deferred_catalog_rows`` so the caller can queue them for a
+        background ``upsert_catalog`` call. This keeps ``write_batch``'s hot
+        path — building rows + the audit_events INSERT — independent of the
+        catalog upsert latency.
+        """
         normalize_started = time.perf_counter()
         rows = [self._row(payload) for payload in payloads]
         resource_rows = []
@@ -270,66 +283,19 @@ class AuditEventDbWriter:
             result = conn.execute(statement)
             inserted = len(result.fetchall()) if self.mode == "postgres" else int(result.rowcount or 0)
         pg_insert_ms = (time.perf_counter() - pg_insert_started) * 1000
-        catalog_upsert_started = time.perf_counter()
-        if resource_rows:
+
+        catalog_upsert_ms = 0.0
+        deferred_catalog_rows = None
+        if defer_catalog:
+            deferred_catalog_rows = resource_rows or []
+        elif resource_rows:
+            catalog_upsert_started = time.perf_counter()
             try:
-                with self.engine.begin() as conn:
-                    if self.mode == "postgres":
-                        stmt = postgres_insert(resource_catalog).values(resource_rows)
-                        excluded = stmt.excluded
-                        resource_statement = (
-                            stmt
-                            .on_conflict_do_update(
-                                index_elements=["resource_id"],
-                                set_={
-                                    "resource_type": func.coalesce(func.nullif(excluded.resource_type, "unknown"), resource_catalog.c.resource_type),
-                                    "resource_name": func.coalesce(func.nullif(excluded.resource_name, "-"), resource_catalog.c.resource_name),
-                                    "display_name": func.coalesce(func.nullif(excluded.display_name, "Unknown"), resource_catalog.c.display_name),
-                                    "cluster_id": func.coalesce(excluded.cluster_id, resource_catalog.c.cluster_id),
-                                    "cluster_name": func.coalesce(func.nullif(excluded.cluster_name, "Unknown"), resource_catalog.c.cluster_name),
-                                    "environment_id": func.coalesce(excluded.environment_id, resource_catalog.c.environment_id),
-                                    "environment_name": func.coalesce(func.nullif(excluded.environment_name, "Unknown"), resource_catalog.c.environment_name),
-                                    "parent_resource": func.coalesce(func.nullif(excluded.parent_resource, "unknown"), resource_catalog.c.parent_resource),
-                                    "resource_scope": func.coalesce(func.nullif(excluded.resource_scope, "unknown"), resource_catalog.c.resource_scope),
-                                    "resource_criticality": func.coalesce(func.nullif(excluded.resource_criticality, "unknown"), resource_catalog.c.resource_criticality),
-                                    "blast_radius_hint": func.coalesce(func.nullif(excluded.blast_radius_hint, "unknown"), resource_catalog.c.blast_radius_hint),
-                                    "production_hint": func.coalesce(func.nullif(excluded.production_hint, "unknown"), resource_catalog.c.production_hint),
-                                    "source": func.coalesce(func.nullif(excluded.source, "fallback"), resource_catalog.c.source),
-                                    "metadata_json": excluded.metadata_json,
-                                    "last_seen_at": excluded.last_seen_at,
-                                },
-                            )
-                        )
-                    else:
-                        stmt = sqlite_insert(resource_catalog).values(resource_rows)
-                        excluded = stmt.excluded
-                        resource_statement = (
-                            stmt
-                            .on_conflict_do_update(
-                                index_elements=["resource_id"],
-                                set_={
-                                    "resource_type": func.coalesce(func.nullif(excluded.resource_type, "unknown"), resource_catalog.c.resource_type),
-                                    "resource_name": func.coalesce(func.nullif(excluded.resource_name, "-"), resource_catalog.c.resource_name),
-                                    "display_name": func.coalesce(func.nullif(excluded.display_name, "Unknown"), resource_catalog.c.display_name),
-                                    "cluster_id": func.coalesce(excluded.cluster_id, resource_catalog.c.cluster_id),
-                                    "cluster_name": func.coalesce(func.nullif(excluded.cluster_name, "Unknown"), resource_catalog.c.cluster_name),
-                                    "environment_id": func.coalesce(excluded.environment_id, resource_catalog.c.environment_id),
-                                    "environment_name": func.coalesce(func.nullif(excluded.environment_name, "Unknown"), resource_catalog.c.environment_name),
-                                    "parent_resource": func.coalesce(func.nullif(excluded.parent_resource, "unknown"), resource_catalog.c.parent_resource),
-                                    "resource_scope": func.coalesce(func.nullif(excluded.resource_scope, "unknown"), resource_catalog.c.resource_scope),
-                                    "resource_criticality": func.coalesce(func.nullif(excluded.resource_criticality, "unknown"), resource_catalog.c.resource_criticality),
-                                    "blast_radius_hint": func.coalesce(func.nullif(excluded.blast_radius_hint, "unknown"), resource_catalog.c.blast_radius_hint),
-                                    "production_hint": func.coalesce(func.nullif(excluded.production_hint, "unknown"), resource_catalog.c.production_hint),
-                                    "source": func.coalesce(func.nullif(excluded.source, "fallback"), resource_catalog.c.source),
-                                    "metadata_json": excluded.metadata_json,
-                                    "last_seen_at": excluded.last_seen_at,
-                                },
-                            )
-                        )
-                    conn.execute(resource_statement)
+                self._upsert_catalog_rows(resource_rows)
             except Exception as exc:  # pragma: no cover - best-effort enrichment
                 logger.debug("resource catalog write failed: %s", exc)
-        catalog_upsert_ms = (time.perf_counter() - catalog_upsert_started) * 1000
+            catalog_upsert_ms = (time.perf_counter() - catalog_upsert_started) * 1000
+
         return DbWriteResult(
             attempted=len(rows),
             inserted=inserted,
@@ -337,7 +303,73 @@ class AuditEventDbWriter:
             normalize_ms=normalize_ms,
             pg_insert_ms=pg_insert_ms,
             catalog_upsert_ms=catalog_upsert_ms,
+            deferred_catalog_rows=deferred_catalog_rows,
         )
+
+    def upsert_catalog(self, resource_rows: list[dict[str, Any]]) -> int:
+        """Upsert prepared resource_catalog rows. Used by the async catalog
+        writer thread so the hot audit_events INSERT path doesn't pay for it.
+        Returns the number of rows submitted."""
+        if not resource_rows:
+            return 0
+        self._upsert_catalog_rows(resource_rows)
+        return len(resource_rows)
+
+    def _upsert_catalog_rows(self, resource_rows: list[dict[str, Any]]) -> None:
+        with self.engine.begin() as conn:
+            if self.mode == "postgres":
+                stmt = postgres_insert(resource_catalog).values(resource_rows)
+                excluded = stmt.excluded
+                resource_statement = (
+                    stmt
+                    .on_conflict_do_update(
+                        index_elements=["resource_id"],
+                        set_={
+                            "resource_type": func.coalesce(func.nullif(excluded.resource_type, "unknown"), resource_catalog.c.resource_type),
+                            "resource_name": func.coalesce(func.nullif(excluded.resource_name, "-"), resource_catalog.c.resource_name),
+                            "display_name": func.coalesce(func.nullif(excluded.display_name, "Unknown"), resource_catalog.c.display_name),
+                            "cluster_id": func.coalesce(excluded.cluster_id, resource_catalog.c.cluster_id),
+                            "cluster_name": func.coalesce(func.nullif(excluded.cluster_name, "Unknown"), resource_catalog.c.cluster_name),
+                            "environment_id": func.coalesce(excluded.environment_id, resource_catalog.c.environment_id),
+                            "environment_name": func.coalesce(func.nullif(excluded.environment_name, "Unknown"), resource_catalog.c.environment_name),
+                            "parent_resource": func.coalesce(func.nullif(excluded.parent_resource, "unknown"), resource_catalog.c.parent_resource),
+                            "resource_scope": func.coalesce(func.nullif(excluded.resource_scope, "unknown"), resource_catalog.c.resource_scope),
+                            "resource_criticality": func.coalesce(func.nullif(excluded.resource_criticality, "unknown"), resource_catalog.c.resource_criticality),
+                            "blast_radius_hint": func.coalesce(func.nullif(excluded.blast_radius_hint, "unknown"), resource_catalog.c.blast_radius_hint),
+                            "production_hint": func.coalesce(func.nullif(excluded.production_hint, "unknown"), resource_catalog.c.production_hint),
+                            "source": func.coalesce(func.nullif(excluded.source, "fallback"), resource_catalog.c.source),
+                            "metadata_json": excluded.metadata_json,
+                            "last_seen_at": excluded.last_seen_at,
+                        },
+                    )
+                )
+            else:
+                stmt = sqlite_insert(resource_catalog).values(resource_rows)
+                excluded = stmt.excluded
+                resource_statement = (
+                    stmt
+                    .on_conflict_do_update(
+                        index_elements=["resource_id"],
+                        set_={
+                            "resource_type": func.coalesce(func.nullif(excluded.resource_type, "unknown"), resource_catalog.c.resource_type),
+                            "resource_name": func.coalesce(func.nullif(excluded.resource_name, "-"), resource_catalog.c.resource_name),
+                            "display_name": func.coalesce(func.nullif(excluded.display_name, "Unknown"), resource_catalog.c.display_name),
+                            "cluster_id": func.coalesce(excluded.cluster_id, resource_catalog.c.cluster_id),
+                            "cluster_name": func.coalesce(func.nullif(excluded.cluster_name, "Unknown"), resource_catalog.c.cluster_name),
+                            "environment_id": func.coalesce(excluded.environment_id, resource_catalog.c.environment_id),
+                            "environment_name": func.coalesce(func.nullif(excluded.environment_name, "Unknown"), resource_catalog.c.environment_name),
+                            "parent_resource": func.coalesce(func.nullif(excluded.parent_resource, "unknown"), resource_catalog.c.parent_resource),
+                            "resource_scope": func.coalesce(func.nullif(excluded.resource_scope, "unknown"), resource_catalog.c.resource_scope),
+                            "resource_criticality": func.coalesce(func.nullif(excluded.resource_criticality, "unknown"), resource_catalog.c.resource_criticality),
+                            "blast_radius_hint": func.coalesce(func.nullif(excluded.blast_radius_hint, "unknown"), resource_catalog.c.blast_radius_hint),
+                            "production_hint": func.coalesce(func.nullif(excluded.production_hint, "unknown"), resource_catalog.c.production_hint),
+                            "source": func.coalesce(func.nullif(excluded.source, "fallback"), resource_catalog.c.source),
+                            "metadata_json": excluded.metadata_json,
+                            "last_seen_at": excluded.last_seen_at,
+                        },
+                    )
+                )
+            conn.execute(resource_statement)
 
     def cleanup_retention(self, *, dry_run: bool = False, retention_days: int | None = None) -> dict[str, Any]:
         days = max(1, int(retention_days or self.retention_days))
