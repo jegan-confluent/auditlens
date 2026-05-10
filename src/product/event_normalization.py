@@ -43,72 +43,216 @@ def is_bulk_noise(method_name: str | None) -> bool:
     return str(method_name).lower() in BULK_NOISE_METHODS
 
 
-def minimal_normalize(event: dict[str, Any]) -> dict[str, Any]:
-    """Fast path for bulk-noise events. Skips IAM lookup, decision
-    snapshot, resource intelligence, and signal cascade — produces only
-    the columns the noise table actually stores. Target: < 1ms per event.
-    """
-    method = event.get('methodName') or event.get('method') or event.get('action') or ''
-    data = event.get('data') if isinstance(event.get('data'), dict) else {}
-    auth_info = data.get('authenticationInfo') if isinstance(data, dict) else None
-    if not isinstance(auth_info, dict):
-        auth_info = {}
-    authz_info = data.get('authorizationInfo') if isinstance(data, dict) else None
-    if not isinstance(authz_info, dict):
-        authz_info = {}
+# Columns physically stored in audit_events_noise (migration 0007). The
+# noise table is deliberately lean — every column is paid for on every
+# INSERT — so minimal_normalize returns *exactly* these fields. Decision
+# fields (signal_type, signal_reason, etc.) are constants for noise rows
+# and are hardcoded by the API layer when it serves /events?show_noise=true
+# and /summary/methods, so we don't waste a column storing them.
+NOISE_TABLE_FIELDS: tuple[str, ...] = (
+    "timestamp",
+    "actor",
+    "action",
+    "result",
+    "resource_name",
+    "source_ip",
+    "environment_id",
+    "cluster_id",
+    "is_denied",
+)
 
-    actor = (
-        auth_info.get('principal')
-        or event.get('user_display')
-        or event.get('user')
-        or event.get('principal')
-        or event.get('subject')
-        or event.get('actor')
-        or 'unknown'
+
+def _principal_to_scalar(value: Any) -> str:
+    """Reduce a CloudEvents principal object to a scalar string id.
+
+    Mirrors audit_forwarder._to_scalar but lives here so event_normalization
+    has no upstream import. Returns '' if no recognizable id can be found.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        for key in ("confluentServiceAccount", "confluentUser", "identityPool", "group"):
+            inner = value.get(key)
+            if isinstance(inner, dict):
+                rid = inner.get("resourceId")
+                if rid:
+                    return str(rid).strip()
+        # Top-level resourceId on principal itself
+        rid = value.get("resourceId")
+        if rid:
+            return str(rid).strip()
+    return ""
+
+
+def _client_ip_from_data(data: dict[str, Any]) -> str:
+    """Best-effort client IP extraction from CloudEvents data block.
+
+    Checks the three known nesting paths (matches audit_forwarder._extract_client_ip)
+    without raising on shape surprises.
+    """
+    if not isinstance(data, dict):
+        return ""
+    candidates = (
+        data.get("clientAddress"),
+        (data.get("requestMetadata") or {}).get("clientAddress")
+        if isinstance(data.get("requestMetadata"), dict) else None,
+        (data.get("authorizationInfo") or {}).get("requestMetadata", {}).get("clientAddress")
+        if isinstance(data.get("authorizationInfo"), dict)
+        and isinstance(data["authorizationInfo"].get("requestMetadata"), dict)
+        else None,
     )
-    resource = (
-        event.get('resource_name')
-        or event.get('resourceName')
-        or event.get('authzResourceName')
-        or (data.get('resourceName') if isinstance(data, dict) else None)
-        or ''
+    for addr in candidates:
+        if isinstance(addr, list) and addr:
+            first = addr[0]
+            if isinstance(first, dict):
+                ip = first.get("ip") or first.get("address")
+                if ip:
+                    return str(ip).strip()
+        elif isinstance(addr, dict):
+            ip = addr.get("ip") or addr.get("address")
+            if ip:
+                return str(ip).strip()
+    return ""
+
+
+def _extract_crn_segment(text: Any, marker: str) -> str:
+    """Pull the value after `marker=` from a CRN-shaped string. Returns ''
+    if the input is not a CRN or the marker is absent."""
+    if not isinstance(text, str) or not text:
+        return ""
+    pattern = rf"{re.escape(marker)}=([^/]+)"
+    match = re.search(pattern, text)
+    return match.group(1).strip() if match else ""
+
+
+def minimal_normalize(event: dict[str, Any]) -> dict[str, Any]:
+    """Fast path for bulk-noise events.
+
+    Returns *exactly* the columns physically stored in audit_events_noise:
+    timestamp, actor, action, result, resource_name, source_ip,
+    environment_id, cluster_id, is_denied. Skips IAM enrichment, decision
+    snapshot, resource intelligence, and signal cascade. Target: < 1ms
+    per event.
+
+    Robust to two input shapes:
+      - Raw CloudEvents from Kafka (data.methodName, data.authenticationInfo, …)
+      - Flat dicts produced by flatten_audit (methodName at top level)
+
+    Never raises — every extraction step uses .get with a safe default and
+    is wrapped against shape surprises. On a fully malformed input, returns
+    sentinel values (action='', actor='unknown', etc.) so the row can still
+    be inserted.
+    """
+    if not isinstance(event, dict):
+        event = {}
+    data = event.get("data") if isinstance(event.get("data"), dict) else {}
+    auth_info = data.get("authenticationInfo") if isinstance(data.get("authenticationInfo"), dict) else {}
+    authz_info = data.get("authorizationInfo") if isinstance(data.get("authorizationInfo"), dict) else {}
+
+    # action / methodName: nested first (raw CloudEvents), then flat fallback.
+    action = (
+        data.get("methodName")
+        or event.get("methodName")
+        or event.get("method")
+        or event.get("action")
+        or ""
     )
-    granted = authz_info.get('granted')
+
+    # actor: principal extraction handles both dict-shaped principals (raw)
+    # and pre-scalarized strings (flat dicts post flatten_audit).
+    principal_raw = auth_info.get("principal")
+    actor = _principal_to_scalar(principal_raw) or str(
+        event.get("principal")
+        or event.get("principal_raw")
+        or event.get("actor")
+        or event.get("user_display")
+        or event.get("user")
+        or "unknown"
+    ).strip()
+    if not actor:
+        actor = "unknown"
+
+    # is_denied: authorizationInfo.granted is the canonical signal; fall
+    # back to top-level granted (set by flatten_audit) and the explicit
+    # is_denied flag. None means "no opinion" → not denied.
+    granted = authz_info.get("granted")
     if granted is None:
-        granted = event.get('granted')
-    granted_bool = True if granted is None else bool(granted)
-    is_failure_flag = bool(event.get('is_failure'))
+        granted = event.get("granted")
+    is_denied = bool(event.get("is_denied")) or granted is False
+
+    # result: 'Success' / 'Failure'. Failure when denied OR when
+    # data.result.status / top-level resultStatus carries a fail/error
+    # marker. Match the conservative substring check used elsewhere.
+    result_status = ""
+    raw_result = data.get("result") if isinstance(data.get("result"), dict) else None
+    if raw_result is not None:
+        result_status = str(raw_result.get("status") or "")
+    if not result_status:
+        result_status = str(event.get("resultStatus") or event.get("result") or "")
+    result_lower = result_status.lower()
+    is_failure_flag = (
+        bool(event.get("is_failure"))
+        or is_denied
+        or any(marker in result_lower for marker in ("fail", "error", "denied", "not_found", "404"))
+    )
+    result = "Failure" if is_failure_flag else "Success"
+
+    # resource_name: nested first, fall back to flattened top-level fields.
+    resource_name = (
+        data.get("resourceName")
+        or authz_info.get("resourceName")
+        or event.get("resourceName")
+        or event.get("resource_name")
+        or event.get("authzResourceName")
+        or ""
+    )
+
+    # source IP: top-level (post flatten_audit's _extract_client_ip) wins;
+    # otherwise dig into data.{requestMetadata,authorizationInfo}.clientAddress.
+    source_ip = (
+        event.get("clientIp")
+        or event.get("source_ip")
+        or _client_ip_from_data(data)
+    )
+
+    # environment_id / cluster_id: prefer pre-extracted top-level values
+    # (set by flatten_audit), otherwise re-parse the CRN sources we have.
+    environment_id = (
+        event.get("environment_id")
+        or event.get("environmentId")
+        or _extract_crn_segment(event.get("source"), "environment")
+        or _extract_crn_segment(event.get("subject"), "environment")
+        or _extract_crn_segment(data.get("resourceName"), "environment")
+        or ""
+    )
+    cluster_id = (
+        event.get("cluster_id")
+        or event.get("clusterId")
+    )
+    if not cluster_id:
+        for crn_source in (event.get("source"), event.get("subject"), data.get("resourceName")):
+            for marker in ("kafka", "schema-registry", "ksqldb", "flink"):
+                cluster_id = _extract_crn_segment(crn_source, marker)
+                if cluster_id:
+                    break
+            if cluster_id:
+                break
+    cluster_id = cluster_id or ""
+
+    timestamp = parse_event_timestamp(event)
 
     return {
-        'action': method,
-        'normalized_action': 'Auth/Access check',
-        'action_category': 'Security',
-        'signal_type': 'noise',
-        'signal_reason': 'auth_noise',
-        'result': 'Success' if granted_bool and not is_failure_flag else 'Failure',
-        'is_routine_noise': True,
-        'is_denied': not granted_bool,
-        'is_failure': is_failure_flag or not granted_bool,
-        'actor': str(actor),
-        'actor_id': None,
-        'actor_display_name': str(actor),
-        'actor_email': None,
-        'actor_type': 'unknown',
-        'actor_source': 'minimal',
-        'actor_confidence': 'none',
-        'actor_enriched_at': None,
-        'resource_name': str(resource),
-        'resource_display': str(resource),
-        'resource_type': 'unknown',
-        'cluster_id': event.get('cluster_id') or event.get('clusterId') or None,
-        'source_ip': event.get('source_ip') or event.get('clientIp') or None,
-        'environment_id': event.get('environment_id') or event.get('environmentId') or None,
-        'summary': f"{actor} auth check",
-        'event_title': 'Routine auth check',
-        'event_summary': 'Routine authentication or authorization check',
-        'risk_level': 'low',
-        'impact_type': 'none',
-        'change_type': 'none',
+        "timestamp": timestamp,
+        "actor": str(actor)[:255],
+        "action": str(action)[:255] if action else "",
+        "result": result,
+        "resource_name": str(resource_name)[:512] if resource_name else None,
+        "source_ip": str(source_ip)[:128] if source_ip else None,
+        "environment_id": str(environment_id)[:255] if environment_id else None,
+        "cluster_id": str(cluster_id)[:255] if cluster_id else None,
+        "is_denied": is_denied,
     }
 
 

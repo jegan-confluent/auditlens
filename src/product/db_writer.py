@@ -415,16 +415,18 @@ class AuditEventDbWriter:
             except Exception as exc:  # pragma: no cover - best-effort minimal path
                 logger.debug("minimal_normalize failed: %s", exc)
                 continue
+            # minimal_normalize returns exactly the audit_events_noise
+            # column set; pass it straight through.
             rows.append({
-                "timestamp": parse_event_timestamp(payload),
-                "actor": normalized.get("actor"),
-                "action": normalized.get("action"),
-                "result": normalized.get("result"),
-                "resource_name": normalized.get("resource_name") or None,
-                "source_ip": normalized.get("source_ip"),
-                "environment_id": normalized.get("environment_id"),
-                "cluster_id": normalized.get("cluster_id"),
-                "is_denied": bool(normalized.get("is_denied")),
+                "timestamp": normalized["timestamp"],
+                "actor": normalized["actor"],
+                "action": normalized["action"],
+                "result": normalized["result"],
+                "resource_name": normalized["resource_name"],
+                "source_ip": normalized["source_ip"],
+                "environment_id": normalized["environment_id"],
+                "cluster_id": normalized["cluster_id"],
+                "is_denied": normalized["is_denied"],
             })
         normalize_ms = (time.perf_counter() - normalize_started) * 1000
         if not rows:
