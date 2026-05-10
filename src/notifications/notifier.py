@@ -17,12 +17,90 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import yaml
 
 
 logger = logging.getLogger(__name__)
+
+
+def _read_version() -> str:
+    candidate = Path(__file__).resolve().parents[2] / "VERSION"
+    try:
+        return candidate.read_text(encoding="utf-8").strip() or "0.0.0"
+    except OSError:
+        return "0.0.0"
+
+
+_AUDITLENS_VERSION = _read_version()
+
+
+_SIGNAL_EMOJI = {
+    "action_required": "🔴",
+    "attention": "🟡",
+    "informational": "🟢",
+    "noise": "⚪",
+}
+
+
+def _safe(value: Any, default: str = "—") -> str:
+    if value is None:
+        return default
+    text = str(value).strip()
+    return text or default
+
+
+def _resource_display(event: dict) -> str:
+    for key in ("resource_display", "resource_display_short"):
+        value = event.get(key)
+        if value:
+            return str(value)
+    name = event.get("resource_name") or ""
+    rtype = event.get("resource_type") or ""
+    if rtype and name:
+        return f"{rtype}/{name}"
+    return _safe(name or rtype)
+
+
+def _actor_display(event: dict) -> str:
+    return _safe(event.get("actor_display_name") or event.get("actor"))
+
+
+def _cluster_display(event: dict) -> str:
+    name = event.get("cluster_name")
+    cid = event.get("cluster_id")
+    if name and cid:
+        return f"{name} ({cid})"
+    return _safe(name or cid)
+
+
+def _environment_display(event: dict) -> str:
+    name = event.get("environment_name")
+    eid = event.get("environment_id")
+    if name and eid:
+        return f"{name} ({eid})"
+    return _safe(name or eid)
+
+
+def _format_timestamp(value: Any) -> str:
+    """Render an ISO/epoch timestamp as 'May 10, 2026 14:32 UTC' for humans."""
+    if not value:
+        return "—"
+    text = str(value)
+    try:
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return str(value)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    return dt.strftime("%b %-d, %Y %H:%M UTC")
 
 
 DEDUP_WINDOW_SECONDS = 300
@@ -341,13 +419,165 @@ class AuditLensNotifier:
         return self._post_json(destination.webhook_url, self._format_webhook(event))
 
     def _format_slack(self, event: dict) -> dict:
-        # Placeholder — Fix 3 replaces with Block Kit payload.
-        return {"text": str(event.get("event_title") or event.get("action") or "audit event")}
+        signal_type = (event.get("signal_type") or "informational").lower()
+        emoji = _SIGNAL_EMOJI.get(signal_type, "🟢")
+        title = _safe(event.get("event_title") or event.get("action"), default="Audit event")
+        header_text = f"{emoji} {signal_type.upper()} — {title}"
+
+        action = _safe(event.get("action") or event.get("methodName"))
+        actor = _actor_display(event)
+        resource = _resource_display(event)
+        cluster = _cluster_display(event)
+        environment = _environment_display(event)
+        result_raw = _safe(event.get("result"))
+        risk = _safe(event.get("risk_level"))
+        time_str = _format_timestamp(event.get("timestamp"))
+
+        is_failure = result_raw.lower() in {"failure", "denied", "fail", "failed", "deny"}
+        result_text = f"*{result_raw}*" if is_failure else result_raw
+
+        fields = [
+            {"type": "mrkdwn", "text": f"*Action:*\n{action}"},
+            {"type": "mrkdwn", "text": f"*Actor:*\n{actor}"},
+            {"type": "mrkdwn", "text": f"*Resource:*\n{resource}"},
+            {"type": "mrkdwn", "text": f"*Cluster:*\n{cluster}"},
+            {"type": "mrkdwn", "text": f"*Environment:*\n{environment}"},
+            {"type": "mrkdwn", "text": f"*Result:*\n{result_text}"},
+            {"type": "mrkdwn", "text": f"*Risk:*\n{risk}"},
+            {"type": "mrkdwn", "text": f"*Time:*\n{time_str}"},
+        ]
+
+        blocks: list[dict] = [
+            {
+                "type": "header",
+                "text": {"type": "plain_text", "text": header_text[:150], "emoji": True},
+            },
+            {"type": "section", "fields": fields},
+        ]
+
+        summary = event.get("event_summary")
+        if summary:
+            blocks.append(
+                {
+                    "type": "context",
+                    "elements": [{"type": "mrkdwn", "text": str(summary)}],
+                }
+            )
+
+        recommended = event.get("recommended_action")
+        if recommended:
+            blocks.append(
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"⚡ {recommended}",
+                    },
+                }
+            )
+
+        return {"blocks": blocks, "text": header_text}
 
     def _format_teams(self, event: dict) -> dict:
-        # Placeholder — Fix 3 replaces with Adaptive Card payload.
-        return {"text": str(event.get("event_title") or event.get("action") or "audit event")}
+        signal_type = (event.get("signal_type") or "informational").lower()
+        emoji = _SIGNAL_EMOJI.get(signal_type, "🟢")
+        title = _safe(event.get("event_title") or event.get("action"), default="Audit event")
+
+        if signal_type == "action_required":
+            color = "attention"
+        elif signal_type == "attention":
+            color = "warning"
+        else:
+            color = "default"
+
+        facts = [
+            {"title": "Action", "value": _safe(event.get("action") or event.get("methodName"))},
+            {"title": "Actor", "value": _actor_display(event)},
+            {"title": "Resource", "value": _resource_display(event)},
+            {"title": "Cluster", "value": _cluster_display(event)},
+            {"title": "Environment", "value": _environment_display(event)},
+            {"title": "Result", "value": _safe(event.get("result"))},
+            {"title": "Risk", "value": _safe(event.get("risk_level"))},
+            {"title": "Time", "value": _format_timestamp(event.get("timestamp"))},
+        ]
+
+        body: list[dict] = [
+            {
+                "type": "TextBlock",
+                "size": "Large",
+                "weight": "Bolder",
+                "color": color,
+                "text": f"{emoji} {signal_type.upper()} — {title}",
+                "wrap": True,
+            },
+            {"type": "FactSet", "facts": facts},
+        ]
+
+        summary = event.get("event_summary")
+        if summary:
+            body.append(
+                {
+                    "type": "TextBlock",
+                    "text": str(summary),
+                    "wrap": True,
+                    "isSubtle": True,
+                }
+            )
+
+        recommended = event.get("recommended_action")
+        if recommended:
+            body.append(
+                {
+                    "type": "TextBlock",
+                    "text": f"⚡ {recommended}",
+                    "wrap": True,
+                    "weight": "Bolder",
+                    "color": color,
+                }
+            )
+
+        adaptive_card = {
+            "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+            "type": "AdaptiveCard",
+            "version": "1.4",
+            "body": body,
+        }
+
+        return {
+            "type": "message",
+            "attachments": [
+                {
+                    "contentType": "application/vnd.microsoft.card.adaptive",
+                    "content": adaptive_card,
+                }
+            ],
+        }
 
     def _format_webhook(self, event: dict) -> dict:
-        # Placeholder — Fix 3 replaces with structured webhook payload.
-        return {"alert_type": "audit_event"}
+        resource_value = event.get("resource_display") or event.get("resource_display_short")
+        if not resource_value:
+            rtype = event.get("resource_type") or ""
+            rname = event.get("resource_name") or ""
+            resource_value = f"{rtype}/{rname}" if (rtype and rname) else (rname or rtype or "")
+
+        return {
+            "alert_type": "audit_event",
+            "signal_type": event.get("signal_type") or "",
+            "event_title": event.get("event_title") or event.get("action") or "",
+            "event_summary": event.get("event_summary") or "",
+            "action": event.get("action") or event.get("methodName") or "",
+            "actor": event.get("actor_display_name") or event.get("actor") or "",
+            "actor_id": event.get("actor") or event.get("actor_id") or "",
+            "resource": resource_value,
+            "resource_type": event.get("resource_type") or "",
+            "cluster_id": event.get("cluster_id") or "",
+            "cluster_name": event.get("cluster_name") or "",
+            "environment_id": event.get("environment_id") or "",
+            "environment_name": event.get("environment_name") or "",
+            "result": event.get("result") or "",
+            "risk_level": event.get("risk_level") or "",
+            "recommended_action": event.get("recommended_action") or "",
+            "timestamp": event.get("timestamp") or "",
+            "event_fingerprint": event.get("event_fingerprint") or "",
+            "auditlens_version": _AUDITLENS_VERSION,
+        }
