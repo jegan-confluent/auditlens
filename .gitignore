@@ -9,6 +9,7 @@
 .env
 .env.*
 notifications.yml
+actor_mappings.yml
 schema-watcher/.env.example
 install.local.yaml
 install.*.local.yaml

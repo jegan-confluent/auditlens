@@ -73,6 +73,7 @@ from src.product import (
 from src.product.db_writer import AuditEventDbWriter
 from src.product.event_normalization import BULK_NOISE_METHODS, parse_event_timestamp
 from src.product.event_intelligence import decision_snapshot
+from src.product.actor_enrichment import get_actor_mapping_file
 from src.notifications.notifier import AuditLensNotifier
 
 # ──────────── graceful shutdown handler ────────────
@@ -3382,6 +3383,24 @@ def main():
             logger.info("Built-in alerts disabled (set SLACK_WEBHOOK to enable)")
     else:
         logger.info("Webhook alerting disabled (no configuration)")
+
+    # Phase 5: actor_mappings.yml manual overrides — primed at startup so
+    # the count appears in the boot log. The file is gracefully optional;
+    # missing file means no overrides (logged below).
+    try:
+        mapping_file = get_actor_mapping_file()
+        mapping_count = mapping_file.count()
+        if mapping_count:
+            logger.info(
+                "Actor mappings: %d entries loaded from actor_mappings.yml",
+                mapping_count,
+            )
+        else:
+            logger.info(
+                "Actor mappings: no actor_mappings.yml found — manual overrides disabled"
+            )
+    except Exception as exc:
+        logger.warning("Actor mappings init failed (%s) — continuing", exc)
 
     # Initialize the configurable notification layer (slack/teams/webhook).
     # Failure here must not crash the forwarder — the legacy SLACK_WEBHOOK

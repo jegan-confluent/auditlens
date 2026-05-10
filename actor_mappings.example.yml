@@ -1,0 +1,18 @@
+# AuditLens Actor Mappings
+# Map principal IDs to human-readable names. These overrides take
+# priority over the Confluent IAM API resolution and over any name
+# embedded in the audit event itself.
+#
+# Use this file for principals the IAM API will never resolve:
+#   - Deleted service accounts (events still reference the old ID)
+#   - Third-party integrations whose API names are cryptic
+#     (e.g. sa-8nwyn7 = "Datadog")
+#   - Internal automation IDs
+#
+# Format: principal_id: display_name
+
+mappings:
+  sa-8nwyn7:    "Datadog Monitor"
+  sa-38rprrm:   "Chargeback Handler"
+  sa-7y6xj82:   "Canary SA (Confluent internal)"
+  u-xxxxx:      "Former Employee - John Smith"

@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -9,12 +10,14 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from src.identity.enricher import IdentityEnricher as ConfluentIdentityEnricher
 
 logger = logging.getLogger("auditlens.product.actor_enrichment")
 
 ACTOR_TYPES = {"user", "service_account", "api_key", "unknown"}
-ACTOR_SOURCES = {"manual", "confluent_api", "metrics", "audit_event", "fallback"}
+ACTOR_SOURCES = {"manual", "manual_mapping", "confluent_api", "metrics", "audit_event", "fallback"}
 CONFIDENCE_LEVELS = {"high", "medium", "low"}
 UNKNOWN_DISPLAY_LABELS = {"unknown actor", "unknown user", "unknown service account", "unknown principal"}
 PRINCIPAL_PREFIXES = ("user:", "u-", "sa-", "api-key-", "apikey", "pool-", "org-", "lkc-", "env-")
@@ -274,6 +277,119 @@ def _normalize_raw_actor(actor: str, subject: str = "") -> str:
     return raw
 
 
+class ActorMappingFile:
+    """Optional manual override for principal-ID → display-name resolution.
+
+    Reads a YAML file on construction, then re-reads on mtime change so
+    operators can edit `actor_mappings.yml` without restarting services.
+    Schema:
+        mappings:
+          sa-xxxx: "Datadog Monitor"
+          u-xxxxx: "Former Employee - John"
+
+    Thread-safe reads. Never raises — bad YAML logs WARNING and returns
+    empty mappings, so callers can treat `get(...) is None` as "no
+    override" without paranoid try/except blocks.
+    """
+
+    def __init__(self, path: str = "actor_mappings.yml") -> None:
+        self._path = path
+        self._mappings: dict[str, str] = {}
+        self._mtime: float = 0.0
+        self._lock = threading.Lock()
+        self._load()
+
+    def get(self, principal_id: str) -> str | None:
+        if not principal_id:
+            return None
+        self._reload_if_changed()
+        with self._lock:
+            return self._mappings.get(principal_id)
+
+    def count(self) -> int:
+        with self._lock:
+            return len(self._mappings)
+
+    def _load(self) -> None:
+        if not os.path.isfile(self._path):
+            with self._lock:
+                self._mappings = {}
+                self._mtime = 0.0
+            return
+        try:
+            mtime = os.path.getmtime(self._path)
+            with open(self._path, "r", encoding="utf-8") as fh:
+                raw = yaml.safe_load(fh)
+        except (yaml.YAMLError, OSError) as exc:
+            logger.warning(
+                "actor_mappings.yml load failed (%s) — manual overrides disabled",
+                exc,
+            )
+            with self._lock:
+                self._mappings = {}
+                self._mtime = 0.0
+            return
+
+        mappings: dict[str, str] = {}
+        if isinstance(raw, dict):
+            entries = raw.get("mappings") or {}
+            if isinstance(entries, dict):
+                for key, value in entries.items():
+                    if isinstance(key, str) and isinstance(value, str):
+                        key_clean = key.strip()
+                        value_clean = value.strip()
+                        if key_clean and value_clean:
+                            mappings[key_clean] = value_clean
+            elif entries:
+                logger.warning(
+                    "actor_mappings.yml: 'mappings' must be a mapping — ignoring",
+                )
+        with self._lock:
+            self._mappings = mappings
+            self._mtime = mtime
+
+    def _reload_if_changed(self) -> None:
+        try:
+            mtime = os.path.getmtime(self._path)
+        except OSError:
+            # File may have been deleted; clear in-memory copy on next miss.
+            with self._lock:
+                if self._mtime != 0.0:
+                    self._mappings = {}
+                    self._mtime = 0.0
+            return
+        if mtime != self._mtime:
+            self._load()
+
+
+@lru_cache(maxsize=1)
+def _actor_mapping_file() -> ActorMappingFile:
+    return ActorMappingFile(
+        path=os.getenv("ACTOR_MAPPINGS_FILE", "actor_mappings.yml"),
+    )
+
+
+def get_actor_mapping_file() -> ActorMappingFile:
+    """Public accessor used by audit_forwarder.py and the backfill job."""
+    return _actor_mapping_file()
+
+
+def _lookup_actor_mapping_override(raw: str, subject_type: str = "") -> dict[str, str] | None:
+    if not raw:
+        return None
+    override = _actor_mapping_file().get(raw)
+    if not override:
+        return None
+    return {
+        "actor_id": raw,
+        "actor_display_name": override,
+        "actor_email": None,
+        "actor_type": infer_actor_type(raw, subject_type),
+        "actor_source": "manual_mapping",
+        "actor_confidence": "high",
+    }
+
+
 def _fallback_identity(raw: str, subject_type: str = "") -> dict[str, str | None]:
     actor_type = infer_actor_type(raw, subject_type)
     # Phase 5: never substitute a "Unknown X" placeholder for the display
@@ -302,7 +418,11 @@ def enrich_actor(actor: str, subject: str = "", subject_type: str = "") -> dict[
 
     identity: dict[str, str] | None = None
     try:
-        if "manual" in config.sources:
+        # Phase 5: actor_mappings.yml takes priority over every other
+        # resolution path so operators can override deleted/cryptic SAs
+        # without editing Python or restarting services.
+        identity = _lookup_actor_mapping_override(raw, subject_type)
+        if identity is None and "manual" in config.sources:
             identity = _identity_map().get(raw)
         if identity is None and "confluent_api" in config.sources:
             identity = _lookup_confluent_principal(raw, config)
@@ -339,6 +459,7 @@ def clear_actor_enrichment_cache() -> None:
     _CACHE.clear()
     _identity_map.cache_clear()
     _confluent_identity_enricher.cache_clear()
+    _actor_mapping_file.cache_clear()
 
 
 def looks_like_ip(value: str | None) -> bool:
