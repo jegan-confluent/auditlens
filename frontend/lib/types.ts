@@ -125,6 +125,17 @@ export type FilterOptions = {
   actors: string[];
 };
 
+export type PipelineStatus = "healthy" | "degraded" | "stalled" | "unknown";
+
+export type PipelineLag = {
+  kafka_consumer_lag_messages: number | null;
+  db_latest_event_at: string | null;
+  forwarder_last_write_at: string | null;
+  db_behind_seconds: number | null;
+  replay_recommended: boolean;
+  status: PipelineStatus;
+};
+
 export type SystemStatus = {
   consumer_state: string;
   last_successful_poll?: string | null;
@@ -145,6 +156,8 @@ export type SystemStatus = {
   storage_usage: Record<string, unknown>;
   database_mode: string;
   db_health?: Record<string, unknown>;
+  pipeline_lag?: PipelineLag | null;
+  pipeline_status?: PipelineStatus;
 };
 
 // Shape of GET /system/forwarder-health (proxies the forwarder's /health).

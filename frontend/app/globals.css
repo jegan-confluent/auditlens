@@ -1509,3 +1509,69 @@ pre {
   gap: 4px;
 }
 .system-retention-warning { color: var(--warn); margin-top: 4px; }
+
+/* Phase 2 Fix 3 — pipeline lag banner. Mounts at the top of /system. */
+.pipeline-banner {
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 8px;
+  padding: 12px 16px;
+  margin-bottom: 16px;
+  background: var(--panel);
+  box-shadow: 0 6px 18px rgba(16, 24, 40, 0.04);
+}
+.pipeline-banner-degraded {
+  border-left: 4px solid var(--warn);
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+.pipeline-banner-stalled {
+  border-left: 4px solid var(--danger);
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+.pipeline-banner-unknown {
+  border-left: 4px solid var(--muted);
+  background: #f3f4f6;
+  color: var(--muted);
+}
+.pipeline-banner-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  font-size: 15px;
+}
+.pipeline-banner-dismiss {
+  border: 1px solid currentColor;
+  background: transparent;
+  color: inherit;
+  padding: 2px 8px;
+  font-size: 12px;
+  cursor: pointer;
+  border-radius: 4px;
+}
+.pipeline-banner-dismiss:hover { opacity: 0.8; }
+.pipeline-banner-detail {
+  margin: 8px 0 0 0;
+  padding: 0 0 0 18px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.pipeline-banner-replay {
+  margin-top: 8px;
+  font-size: 13px;
+}
+.pipeline-banner-replay summary {
+  cursor: pointer;
+  color: inherit;
+}
+.pipeline-banner-cmd {
+  margin: 6px 0 0 0;
+  padding: 8px 12px;
+  background: rgba(0, 0, 0, 0.04);
+  color: #1f2937;
+  border-radius: 4px;
+  font-size: 12.5px;
+  overflow-x: auto;
+  white-space: pre;
+}

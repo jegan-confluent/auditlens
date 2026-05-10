@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import ErrorState from "../../components/ErrorState";
 import LoadingState from "../../components/LoadingState";
+import PipelineLagBanner from "../../components/PipelineLagBanner";
 import { getForwarderHealth, getReadinessStatus, isAbortError, runForwarderVacuum } from "../../lib/api";
 import type { ReadinessSnapshot } from "../../lib/api";
 import type { ForwarderHealth, VacuumResult } from "../../lib/types";
@@ -153,6 +154,8 @@ export default function SystemPage() {
   return (
     <main className="page system-page">
       <h1 className="system-title">System</h1>
+
+      <PipelineLagBanner />
 
       <section className="system-status-cards">
         <div className={`system-status-card ${apiOk ? "ok" : "critical"}`}>
