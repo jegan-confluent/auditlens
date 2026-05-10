@@ -48,7 +48,7 @@ function displayResource(event: AuditEvent) {
   return event.resource_display_short || event.resource_display || event.resource_type || "Unknown";
 }
 
-type ActorDisplay = { primary: string; secondary: string; isServiceAccount: boolean; unenriched: boolean };
+type ActorDisplay = { primary: string; secondary: string; isServiceAccount: boolean; unenriched: boolean; isPlatform: boolean };
 
 // True only when actor_display_name holds a real human-readable name —
 // distinct from the raw id and not one of the Unknown* placeholders. Some
@@ -59,31 +59,48 @@ type ActorDisplay = { primary: string; secondary: string; isServiceAccount: bool
 function isEnrichedDisplay(display: string, raw: string): boolean {
   if (!display) return false;
   if (display === raw) return false;
+  if (display.startsWith("{") || display.startsWith("[")) return false;
   return !UNKNOWN_PRINCIPAL_LABELS.has(display.toLowerCase());
 }
 
+// Confluent's internal externalAccount actors arrive as raw JSON blobs in
+// display_name (e.g. {"externalAccount":{"subject":"Confluent"}}). Anything
+// starting with { or [ is one of these — relabel to a friendly platform tag.
+function looksLikeJsonActor(value: string): boolean {
+  return value.startsWith("{") || value.startsWith("[");
+}
+
 function displayActor(event: AuditEvent): ActorDisplay {
-  const isSA = isServiceAccount(event);
   const display = (event.actor_display_name || event.subject || event.actor || "").trim();
   const raw = (event.actor_raw_id || event.subject || event.actor || "").trim();
   const email = (event.actor_email || "").trim();
+
+  // JSON-shaped display (Confluent platform externalAccount) wins before any
+  // other classification — both display and the would-be primary are unreadable.
+  if (looksLikeJsonActor(display) || looksLikeJsonActor(raw)) {
+    return { primary: "Confluent (platform)", secondary: "", isServiceAccount: false, unenriched: false, isPlatform: true };
+  }
+
+  const isSA = isServiceAccount(event);
   const enriched = isEnrichedDisplay(display, raw);
 
-  if (isSA) {
-    const primary = enriched ? display : (raw || "Unknown service account");
-    const secondary = enriched && raw && raw !== primary ? raw : "";
-    return { primary, secondary, isServiceAccount: true, unenriched: !enriched };
-  }
-  // Human users: email is the most recognisable identifier — promote it.
-  if (email) {
-    const secondary = enriched && display !== email ? display : (raw && raw !== email ? raw : "");
-    return { primary: email, secondary, isServiceAccount: false, unenriched: false };
-  }
-  // No email — use the enriched display only when it's actually a name.
+  // Pick the most informative primary label, then add raw as secondary only
+  // when it adds something (i.e. it's not the same string already shown).
+  let primary: string;
+  let unenriched: boolean;
   if (enriched) {
-    return { primary: display, secondary: raw && raw !== display ? raw : "", isServiceAccount: false, unenriched: false };
+    primary = display;
+    unenriched = false;
+  } else if (email) {
+    primary = email;
+    unenriched = false;
+  } else {
+    primary = raw || (isSA ? "Unknown service account" : "Unknown principal");
+    unenriched = true;
   }
-  return { primary: raw || "Unknown principal", secondary: "", isServiceAccount: false, unenriched: true };
+  const secondary = raw && raw !== primary ? raw : "";
+
+  return { primary, secondary, isServiceAccount: isSA, unenriched, isPlatform: false };
 }
 
 // Best label for prose contexts (the plain-English sentence in the table).
@@ -95,6 +112,7 @@ function bestSentenceLabel(event: AuditEvent): string {
   const display = (event.actor_display_name || "").trim();
   const raw = (event.actor_raw_id || event.subject || event.actor || "").trim();
   const email = (event.actor_email || "").trim();
+  if (looksLikeJsonActor(display) || looksLikeJsonActor(raw)) return "Confluent (platform)";
   if (isEnrichedDisplay(display, raw)) return display;
   if (email) return email;
   return raw || event.actor || "Unknown actor";
