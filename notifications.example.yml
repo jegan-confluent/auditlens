@@ -1,0 +1,50 @@
+# AuditLens Notification Configuration
+# Copy from notifications.example.yml and fill in your webhook URLs.
+# The actual notifications.yml is gitignored.
+#
+# Each destination is independent: separate filters, separate channel.
+# enabled: false skips the destination entirely (no HTTP call).
+#
+# Filter precedence (all must match — AND logic):
+#   - signal_type        REQUIRED, at least one value
+#   - min_risk_level     informational < low < medium < high < critical
+#   - action_category    if set, event action_category must be in list
+#   - exclude_actions    never alert if event.action is in this list
+#
+# Risk-level ordering: informational=0, low=1, medium=2, high=3, critical=4
+# min_risk_level: high  → only events with risk_level >= high pass.
+
+destinations:
+  - name: "security-alerts"          # human label for logs
+    type: slack                      # slack | teams | webhook
+    webhook_url: "https://hooks.slack.com/services/REPLACE_ME"
+    enabled: true
+    filters:
+      signal_type:
+        - action_required
+      # Optional additional filters:
+      # min_risk_level: high
+      # action_category:
+      #   - Delete
+      #   - Security
+      # exclude_actions:
+      #   - mds.Authorize
+      #   - GetStatement
+
+  - name: "ops-channel"
+    type: teams
+    webhook_url: "https://company.webhook.office.com/REPLACE_ME"
+    enabled: true
+    filters:
+      signal_type:
+        - action_required
+        - attention
+      min_risk_level: medium
+
+  - name: "audit-webhook"
+    type: webhook                    # generic HTTP POST
+    webhook_url: "https://your-siem.company.com/ingest"
+    enabled: false
+    filters:
+      signal_type:
+        - action_required

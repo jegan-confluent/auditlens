@@ -8,6 +8,7 @@
 .secret
 .env
 .env.*
+notifications.yml
 schema-watcher/.env.example
 install.local.yaml
 install.*.local.yaml
