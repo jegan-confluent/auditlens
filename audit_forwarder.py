@@ -71,6 +71,7 @@ from src.product import (
     heal_sqlite_on_startup,
 )
 from src.product.db_writer import AuditEventDbWriter
+from src.product.event_normalization import BULK_NOISE_METHODS
 
 # ──────────── graceful shutdown handler ────────────
 _shutdown_requested = False
@@ -287,6 +288,16 @@ DB_WRITE_BACKOFF_MAX_SECONDS = float(os.getenv("DB_WRITE_BACKOFF_MAX_SECONDS", "
 DB_WRITE_FLUSH_INTERVAL_SECONDS = float(os.getenv("DB_WRITE_FLUSH_INTERVAL_SECONDS", "2.0"))
 EVENT_RETENTION_DAYS = int(os.getenv("EVENT_RETENTION_DAYS", "7"))
 DB_RETENTION_CLEANUP_INTERVAL_SECONDS = float(os.getenv("DB_RETENTION_CLEANUP_INTERVAL_SECONDS", "3600.0"))
+# Short-circuit bulk-noise events (mds.Authorize, kafka.Fetch, kafka.Produce, …)
+# at the consume point — they go straight to the bulk writer, bypassing
+# flatten_audit, the seven canonical Kafka produces, anomaly tracking, and
+# the SQLite hot cache. Saves the processor thread from doing ~83% of its
+# work. Disable for debugging if the full pipeline is needed for every event.
+ENABLE_NOISE_SHORT_CIRCUIT = os.getenv("ENABLE_NOISE_SHORT_CIRCUIT", "true").lower() == "true"
+# How long the processor will wait for the bulk writer to persist
+# short-circuited noise events before declining to commit. Bulk writes
+# normally complete in tens of milliseconds — this is a defensive ceiling.
+NOISE_PERSIST_WAIT_TIMEOUT_SECONDS = float(os.getenv("NOISE_PERSIST_WAIT_TIMEOUT_SECONDS", "60.0"))
 
 AUTH_CONFIG = AuthConfig.from_env()
 authenticator = Authenticator(AUTH_CONFIG)
@@ -295,6 +306,103 @@ product_store = None
 db_writer = None
 storage_monitor_stop = threading.Event()
 storage_monitor_thread = None
+
+
+# ──────────── noise persistence barrier ────────────
+# When ENABLE_NOISE_SHORT_CIRCUIT is on, the consumer thread routes
+# bulk-noise events directly to the bulk writer, bypassing the processor.
+# Those events never reach a Kafka topic, so the only durable home is
+# audit_events_noise. To preserve at-least-once: the processor MUST NOT
+# commit a partition's offset past a short-circuited noise offset until
+# the bulk writer has persisted it.
+#
+# The bulk writer publishes the highest offset persisted per (topic,
+# partition) into _noise_persisted_offsets and notify_all() on the CV.
+# The processor, after producer.flush(), waits on this CV until every
+# (topic, partition) it short-circuited has caught up. On timeout the
+# processor declines to commit, and the events will be re-consumed on
+# restart — no silent loss.
+_noise_persisted_offsets: dict[tuple[str, int], int] = {}
+_noise_persisted_lock = threading.Lock()
+_noise_persisted_cv = threading.Condition(_noise_persisted_lock)
+
+
+def _record_noise_persisted(items: list) -> None:
+    """Mark per-(topic, partition) max persisted offset for short-circuited
+    noise events that were just successfully INSERTed into audit_events_noise.
+    Wakes processor-thread waiters on the condition variable.
+    """
+    if not items:
+        return
+    updated = False
+    with _noise_persisted_cv:
+        for item in items:
+            if not isinstance(item, dict) or not item.get("_short_circuit"):
+                continue
+            topic = item.get("_topic")
+            partition = item.get("_partition")
+            offset = item.get("_offset")
+            if topic is None or partition is None or offset is None:
+                continue
+            key = (topic, partition)
+            current = _noise_persisted_offsets.get(key, -1)
+            if offset > current:
+                _noise_persisted_offsets[key] = offset
+                updated = True
+        if updated:
+            _noise_persisted_cv.notify_all()
+
+
+def _await_noise_persisted(
+    required: dict[tuple[str, int], int],
+    *,
+    timeout: float = NOISE_PERSIST_WAIT_TIMEOUT_SECONDS,
+) -> bool:
+    """Block until every (topic, partition) in ``required`` has been
+    persisted up to (>=) its required offset. Returns True if all caught
+    up; False on timeout. Empty ``required`` returns True immediately.
+    """
+    if not required:
+        return True
+    deadline = time.monotonic() + max(0.0, timeout)
+    with _noise_persisted_cv:
+        while True:
+            if all(_noise_persisted_offsets.get(k, -1) >= v for k, v in required.items()):
+                return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            _noise_persisted_cv.wait(remaining)
+
+
+def _try_short_circuit_noise(msg) -> dict | None:
+    """Decode a raw Kafka record and return the parsed dict iff it's a
+    bulk-noise method. Returns None on any failure or non-noise event,
+    so the caller falls back to the full processor path.
+
+    Never raises — wrapped in try/except so a malformed payload at the
+    consume point can never crash the consumer thread.
+    """
+    try:
+        value = msg.value()
+        if value is None:
+            return None
+        payload = orjson.loads(value)
+        if not isinstance(payload, dict):
+            return None
+        method = ""
+        data = payload.get("data") if isinstance(payload.get("data"), dict) else None
+        if data is not None:
+            method = data.get("methodName") or ""
+        if not method:
+            method = payload.get("methodName") or payload.get("method") or ""
+        if not isinstance(method, str) or not method:
+            return None
+        if method.lower() not in BULK_NOISE_METHODS:
+            return None
+        return payload
+    except Exception:
+        return None  # Any decode/shape error → full path
 
 # Built-in alert rules (auto-enabled if SLACK_WEBHOOK is set)
 # These are critical events that should trigger immediate alerts
@@ -494,6 +602,15 @@ class Metrics:
         self.normal_queue_depth = 0
         self.bulk_queue_depth = 0
         self.catalog_queue_depth = 0
+        # Count of events the consumer thread routed straight to the bulk
+        # writer without entering the processor. Useful to confirm the
+        # short-circuit is firing in production. Incremented atomically
+        # under self.lock by record_noise_short_circuited().
+        self.noise_short_circuited_total = 0
+        # Count of batches where the bulk writer didn't persist all
+        # short-circuited noise offsets in time (we did NOT commit;
+        # restart will replay). High value signals bulk lane backpressure.
+        self.noise_persist_wait_timeouts_total = 0
         self.last_ingested_event_time = None
         self.last_committed_at = None
         self.offset_commits_total = 0
@@ -655,6 +772,14 @@ class Metrics:
             self.consumer_state = state
             self.backoff_seconds = backoff_seconds
 
+    def record_noise_short_circuited(self, count: int = 1):
+        with self.lock:
+            self.noise_short_circuited_total += int(count)
+
+    def record_noise_persist_wait_timeout(self):
+        with self.lock:
+            self.noise_persist_wait_timeouts_total += 1
+
     def record_db_write_success(self, batch_size: int):
         with self.lock:
             self.db_write_success_total += 1
@@ -814,6 +939,8 @@ class Metrics:
                     "bulk": int(self.bulk_queue_depth),
                     "catalog": int(self.catalog_queue_depth),
                 },
+                "noise_short_circuited_total": int(self.noise_short_circuited_total),
+                "noise_persist_wait_timeouts_total": int(self.noise_persist_wait_timeouts_total),
                 "last_ingested_event_time": self.last_ingested_event_time,
                 "last_committed_at": self.last_committed_at,
                 "offset_commits_total": self.offset_commits_total,
@@ -1290,6 +1417,8 @@ class MetricsHandler(BaseHTTPRequestHandler):
             "queues": metrics_data.get("priority_queue_depths", {
                 "critical": 0, "normal": 0, "bulk": 0, "catalog": 0,
             }),
+            "noise_short_circuited_total": metrics_data.get("noise_short_circuited_total", 0),
+            "noise_persist_wait_timeouts_total": metrics_data.get("noise_persist_wait_timeouts_total", 0),
             "freshness": {
                 "last_enriched_event_time": snapshot["last_enriched_event_time"],
                 "last_enriched_ingest_at": snapshot["last_enriched_ingest_at"],
@@ -3323,7 +3452,13 @@ def main():
                 if lane == "bulk":
                     # Noise lane → audit_events_noise: minimal columns, no
                     # fingerprint, no catalog upsert. ~50x cheaper per row.
-                    flush_db_writer_noise_batch(batch, backoff, log_state, label=lane)
+                    if flush_db_writer_noise_batch(batch, backoff, log_state, label=lane):
+                        # Ack short-circuited noise offsets so the processor
+                        # thread can include them in the next commit. Items
+                        # without _short_circuit (those routed here from the
+                        # processor's own _route_to_queue path) are skipped
+                        # silently — their offsets ride on batch_max_offsets.
+                        _record_noise_persisted(batch)
                 else:
                     flush_db_writer_batch(
                         batch, backoff, log_state,
@@ -3368,8 +3503,60 @@ def main():
                 if _should_log_repeated_error(log_state, masked):
                     logger.warning("catalog_upsert failed: %s", masked)
 
+    short_circuit_active = ENABLE_NOISE_SHORT_CIRCUIT and PRIORITY_QUEUES_ENABLED
+
+    def _split_noise(batch_local):
+        """Split a Kafka consume() result into (non_noise_msgs, noise_offsets).
+
+        Noise events are routed directly to bulk_queue (carrying their
+        topic/partition/offset metadata) and never enter record_queue.
+        Returns the messages the processor must still handle plus a per-
+        (topic, partition) max-offset map so the processor can include
+        those offsets in the commit set after the bulk writer persists them.
+
+        When short_circuit_active is False, returns the original batch
+        unchanged with an empty noise_offsets map (no behavior change).
+        """
+        if not short_circuit_active:
+            return list(batch_local), {}
+        non_noise: list = []
+        noise_offsets: dict[tuple[str, int], int] = {}
+        short_circuited = 0
+        for msg in batch_local:
+            if msg is None or msg.error():
+                non_noise.append(msg)
+                continue
+            payload = _try_short_circuit_noise(msg)
+            if payload is None:
+                non_noise.append(msg)
+                continue
+            # Tag the payload with the offset metadata the bulk writer
+            # uses to ack persistence. These underscore-prefixed keys are
+            # ignored by minimal_normalize / write_noise_batch.
+            payload["_short_circuit"] = True
+            payload["_topic"] = msg.topic()
+            payload["_partition"] = msg.partition()
+            payload["_offset"] = msg.offset()
+            try:
+                bulk_queue.put(payload, timeout=5.0)
+            except queue.Full:
+                # Bulk lane is saturated; fall back to the full path so
+                # the event still reaches durable storage. The
+                # processor will route it to bulk_queue itself after
+                # flatten_audit (slower, but correct).
+                non_noise.append(msg)
+                continue
+            short_circuited += 1
+            key = (msg.topic(), msg.partition())
+            current = noise_offsets.get(key, -1)
+            if msg.offset() > current:
+                noise_offsets[key] = msg.offset()
+        if short_circuited:
+            metrics.record_noise_short_circuited(short_circuited)
+        return non_noise, noise_offsets
+
     def _consume_thread() -> None:
-        """Thread A: poll Kafka and queue batches. Never processes events."""
+        """Thread A: poll Kafka, short-circuit bulk noise, queue the rest."""
         paused = False
         while not _shutdown_requested:
             try:
@@ -3390,8 +3577,10 @@ def main():
                 if CONSUMER_EMPTY_POLL_SLEEP_SECONDS > 0:
                     _sleep_with_shutdown(CONSUMER_EMPTY_POLL_SLEEP_SECONDS)
                 continue
+            non_noise_msgs, noise_offsets = _split_noise(batch_local)
+            envelope = (non_noise_msgs, noise_offsets)
             try:
-                record_queue.put(batch_local, timeout=5.0)
+                record_queue.put(envelope, timeout=5.0)
                 metrics.record_queue_depth = record_queue.qsize()
             except queue.Full:
                 if not paused:
@@ -3418,12 +3607,12 @@ def main():
                         record_queue.qsize(), RECORD_QUEUE_SIZE,
                     )
                 try:
-                    record_queue.put(batch_local, timeout=30.0)
+                    record_queue.put(envelope, timeout=30.0)
                     metrics.record_queue_depth = record_queue.qsize()
                 except queue.Full:
                     logger.error(
                         "record_queue still full after backpressure — dropping batch of %d",
-                        len(batch_local),
+                        len(non_noise_msgs),
                     )
                     metrics.record_error()
         # Sentinel so the processor exits its loop after the last real batch.
@@ -3437,7 +3626,7 @@ def main():
         nonlocal processed, last_heartbeat, last_lag_ts, db_last_flush_ts
         while True:
             try:
-                batch = record_queue.get(timeout=1.0)
+                envelope = record_queue.get(timeout=1.0)
             except queue.Empty:
                 if _shutdown_requested and record_queue.empty():
                     break
@@ -3446,9 +3635,19 @@ def main():
                 _run_periodic_maintenance(now)
                 continue
             metrics.record_queue_depth = record_queue.qsize()
-            if batch is None:
+            if envelope is None:
                 # Shutdown sentinel from consumer thread.
                 break
+            # Consumer thread now sends an envelope: (non_noise_msgs,
+            # noise_offsets). The noise_offsets dict carries the offsets
+            # of events the consumer short-circuited directly to bulk_queue
+            # — we must wait for the bulk writer to persist them before we
+            # commit those offsets. A bare list (legacy / defensive)
+            # unpacks to an empty noise_offsets map.
+            if isinstance(envelope, tuple) and len(envelope) == 2:
+                batch, noise_offsets = envelope
+            else:
+                batch, noise_offsets = envelope, {}
             loop_backoff.reset()
             batch_had_processing_failure = False
             batch_delivery_errors_before = delivery_errors["count"]
@@ -3635,32 +3834,63 @@ def main():
                 batch_had_processing_failure,
             )
 
-            if not should_commit:
-                # Some messages failed to deliver - do NOT commit offsets
-                # These events will be reprocessed on restart
-                logger.error("Batch not committed: %s", commit_details)
+            # Merge offsets from noise events the consumer short-circuited.
+            # These never reached a Kafka topic, so the only at-least-once
+            # gate is "the bulk writer has actually INSERTed them". We block
+            # here until that's true — and refuse to commit on timeout so a
+            # restart will replay any unpersisted noise.
+            noise_persisted_ok = True
+            if noise_offsets:
+                noise_persisted_ok = _await_noise_persisted(noise_offsets)
+                if not noise_persisted_ok:
+                    metrics.record_noise_persist_wait_timeout()
+                    logger.warning(
+                        "Noise persistence wait timed out after %.1fs — declining commit; "
+                        "%d short-circuited events across %d partitions will replay on restart",
+                        NOISE_PERSIST_WAIT_TIMEOUT_SECONDS,
+                        sum(1 for _ in noise_offsets),
+                        len(noise_offsets),
+                    )
+
+            if not should_commit or not noise_persisted_ok:
+                # Some messages failed to deliver, or short-circuited noise
+                # didn't land in PG in time. Either way: do NOT commit
+                # offsets — restart will replay everything in this batch.
+                if not should_commit:
+                    logger.error("Batch not committed: %s", commit_details)
                 metrics.record_commit_failure()
-            elif not batch_max_offsets:
-                # No successfully-processed messages in this batch (everything
-                # was a parse error / consume error). Nothing to commit.
-                metrics.record_commit_success()
             else:
-                # All messages delivered - safe to commit offsets.
-                # Build explicit TopicPartitions: librdkafka's auto-offset-store
-                # is unreliable when consume() and commit() run in different
-                # threads. Commit offset = max processed + 1 per partition.
-                offsets_to_commit = [
-                    TopicPartition(t, p, offset + 1)
-                    for (t, p), offset in batch_max_offsets.items()
-                ]
-                try:
-                    consumer.commit(offsets=offsets_to_commit, asynchronous=False)
+                # Combine processor and short-circuit offsets into a single
+                # per-partition high-watermark for the commit.
+                merged_offsets = dict(batch_max_offsets)
+                for key, offset in noise_offsets.items():
+                    if offset > merged_offsets.get(key, -1):
+                        merged_offsets[key] = offset
+
+                if not merged_offsets:
+                    # No successfully-processed messages in this batch (everything
+                    # was a parse error / consume error). Nothing to commit.
                     metrics.record_commit_success()
-                    logger.debug("Batch committed: %d events across %d partitions",
-                                 batch_size, len(offsets_to_commit))
-                except Exception as e:
-                    logger.error("Failed to commit offsets: %s", e)
-                    metrics.record_commit_failure()
+                else:
+                    # All messages delivered (and any short-circuited noise
+                    # is durable). Build explicit TopicPartitions:
+                    # librdkafka's auto-offset-store is unreliable when
+                    # consume() and commit() run in different threads.
+                    # Commit offset = max processed + 1 per partition.
+                    offsets_to_commit = [
+                        TopicPartition(t, p, offset + 1)
+                        for (t, p), offset in merged_offsets.items()
+                    ]
+                    try:
+                        consumer.commit(offsets=offsets_to_commit, asynchronous=False)
+                        metrics.record_commit_success()
+                        logger.debug(
+                            "Batch committed: %d events across %d partitions (noise offsets included)",
+                            batch_size, len(offsets_to_commit),
+                        )
+                    except Exception as e:
+                        logger.error("Failed to commit offsets: %s", e)
+                        metrics.record_commit_failure()
 
             processed += batch_size
             if processed >= 1000 and processed % 1000 < batch_size:
@@ -3804,6 +4034,20 @@ def main():
         "Thread pool started: 1 consumer, 1 processor, %d priority writers (record_queue capacity=%d)",
         len(writer_threads), RECORD_QUEUE_SIZE,
     )
+    if short_circuit_active:
+        logger.info(
+            "Noise short-circuit: ENABLED — bulk noise bypasses processor thread "
+            "(persist barrier %.0fs, methods=%d)",
+            NOISE_PERSIST_WAIT_TIMEOUT_SECONDS,
+            len(BULK_NOISE_METHODS),
+        )
+    else:
+        reason = (
+            "ENABLE_NOISE_SHORT_CIRCUIT=false"
+            if not ENABLE_NOISE_SHORT_CIRCUIT
+            else "DB writer disabled"
+        )
+        logger.info("Noise short-circuit: DISABLED (%s)", reason)
 
     try:
         # Main thread blocks here until shutdown is requested. The actual
