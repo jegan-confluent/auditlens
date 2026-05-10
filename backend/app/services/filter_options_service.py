@@ -156,6 +156,10 @@ def _build_filter_options(db: Session) -> dict[str, list[str]]:
         "action_categories": _safe_top_n(db, AuditEvent.action_category, label="action_category"),
         "results": _safe_top_n(db, AuditEvent.result, label="result"),
         "actors": _safe_top_n(db, AuditEvent.actor, label="actor"),
+        # AuditEvent.environment_name is a hybrid property layered over the
+        # _environment_name column; we go through the column directly so the
+        # GROUP BY pushes down rather than triggering Python-side resolution.
+        "environments": _safe_top_n(db, AuditEvent._environment_name, label="environment_name"),
     }
 
 

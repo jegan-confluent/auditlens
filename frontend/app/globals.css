@@ -222,6 +222,36 @@ a {
   margin-bottom: 10px;
 }
 
+.actor-search {
+  position: relative;
+  display: block;
+}
+
+.actor-search input {
+  width: 100%;
+  padding-right: 28px;
+}
+
+.actor-search-clear {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  padding: 0 6px;
+  min-height: 0;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 16px;
+  font-weight: 700;
+  cursor: pointer;
+  line-height: 1;
+}
+
+.actor-search-clear:hover {
+  color: var(--text);
+}
+
 .quick-filter-row {
   display: flex;
   flex-wrap: wrap;

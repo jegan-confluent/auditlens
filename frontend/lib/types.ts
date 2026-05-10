@@ -123,6 +123,7 @@ export type FilterOptions = {
   action_categories: string[];
   results: string[];
   actors: string[];
+  environments: string[];
 };
 
 export type PipelineStatus = "healthy" | "degraded" | "stalled" | "unknown";

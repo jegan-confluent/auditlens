@@ -1,8 +1,11 @@
 "use client";
 
+import { useEffect, useRef, useState } from "react";
 import type { FilterOptions } from "../lib/types";
 import { activeFilterLabels, applyQuickFilter, type EventFilters } from "../lib/eventFilters";
 export { activeFilterLabels, defaultFilters, type EventFilters } from "../lib/eventFilters";
+
+const ACTOR_DEBOUNCE_MS = 300;
 
 const quickFilters: Array<{ label: string; patch: Partial<EventFilters> }> = [
   { label: "Needs Attention 🔴", patch: { mode: "decision", signal: "action_required,attention", hide_noise: "true", time_window: "24h" } },
@@ -50,6 +53,34 @@ export default function FilterBar({ filters, options, onChange, onReset }: {
   const apply = (patch: Partial<EventFilters>) => onChange(applyQuickFilter(filters, patch));
   const activeLabels = activeFilterLabels(filters);
 
+  // Debounced actor search: keep an internal draft so each keystroke doesn't
+  // refetch /events. The committed `filters.actor` still drives the URL /
+  // chips / param plumbing; we just delay the publish by ACTOR_DEBOUNCE_MS.
+  const [actorDraft, setActorDraft] = useState(filters.actor);
+  const actorTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Keep the draft in sync when the parent resets filters (e.g. "Clear all"
+  // button or a quick-filter chip that wipes actor). Compare values rather
+  // than refs so we don't fight the user's own typing.
+  useEffect(() => {
+    setActorDraft(filters.actor);
+  }, [filters.actor]);
+
+  const commitActor = (value: string) => {
+    if (actorTimer.current) clearTimeout(actorTimer.current);
+    actorTimer.current = setTimeout(() => {
+      onChange({ ...filters, actor: value });
+    }, ACTOR_DEBOUNCE_MS);
+  };
+  const onActorInput = (value: string) => {
+    setActorDraft(value);
+    commitActor(value);
+  };
+  const onActorClear = () => {
+    if (actorTimer.current) clearTimeout(actorTimer.current);
+    setActorDraft("");
+    onChange({ ...filters, actor: "" });
+  };
+
   return (
     <section className="filter-panel">
       <div className="quick-filter-row" aria-label="Quick filters">
@@ -84,12 +115,25 @@ export default function FilterBar({ filters, options, onChange, onReset }: {
         </select>
         <input value={filters.resource} onChange={(event) => update("resource", event.target.value)} placeholder="Resource text" aria-label="Resource search" />
         <input value={filters.cluster_name} onChange={(event) => update("cluster_name", event.target.value)} placeholder="Cluster" aria-label="Cluster filter" />
-        <input value={filters.environment_name} onChange={(event) => update("environment_name", event.target.value)} placeholder="Environment" aria-label="Environment filter" />
+        <select value={filters.environment_name} onChange={(event) => update("environment_name", event.target.value)} aria-label="Environment filter">
+          <option value="">All environments</option>
+          {(options?.environments || []).map((value) => <option key={value} value={value}>{value}</option>)}
+        </select>
         <select value={filters.action_category} onChange={(event) => update("action_category", event.target.value)} aria-label="Action category">
           <option value="">All actions</option>
           {(options?.action_categories || []).map((value) => <option key={value} value={value}>{value}</option>)}
         </select>
-        <input value={filters.actor} onChange={(event) => update("actor", event.target.value)} placeholder="Actor" aria-label="Actor filter" />
+        <span className="actor-search">
+          <input
+            value={actorDraft}
+            onChange={(event) => onActorInput(event.target.value)}
+            placeholder="Filter by actor name or ID..."
+            aria-label="Actor filter"
+          />
+          {actorDraft ? (
+            <button type="button" className="actor-search-clear" aria-label="Clear actor filter" onClick={onActorClear}>×</button>
+          ) : null}
+        </span>
         <select value={filters.result} onChange={(event) => update("result", event.target.value)} aria-label="Result">
           {RESULT_OPTIONS.map((option) => (
             <option key={option.value} value={option.value}>{option.label}</option>

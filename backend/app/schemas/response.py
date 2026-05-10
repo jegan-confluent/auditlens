@@ -30,6 +30,7 @@ class FilterOptionsResponse(BaseModel):
     action_categories: list[str]
     results: list[str]
     actors: list[str]
+    environments: list[str] = []
 
 
 class NoiseSummaryEntry(BaseModel):
