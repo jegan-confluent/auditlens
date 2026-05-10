@@ -1,14 +1,19 @@
+import logging
 import os
 import threading
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
 from sqlalchemy import text
+from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from backend.app.core.config import get_settings
 from backend.app.db.database import check_db_health_session
+
+logger = logging.getLogger("auditlens.backend.system")
 
 
 # How long to trust a cached forwarder health snapshot before re-fetching.
@@ -123,6 +128,175 @@ def reset_forwarder_health_cache() -> None:
     _forwarder_health_cache.reset()
 
 
+# ────────────────────────── DB latest-event cache ──────────────────────
+# `MAX(timestamp) FROM audit_events` is index-eligible
+# (idx_audit_events_timestamp_desc) but at high write rate it still
+# costs a few ms — and /system/status gets polled every 30 s by the
+# frontend banner. Cache for 10 s so the route stays fast and the DB
+# isn't repeatedly probed.
+DB_LATEST_EVENT_TTL_SECONDS = 10.0
+DB_LATEST_EVENT_TIMEOUT_MS = 3_000
+
+
+class _DbLatestEventCache:
+    """Caches `MAX(timestamp) FROM audit_events` per engine."""
+
+    def __init__(self, ttl_seconds: float = DB_LATEST_EVENT_TTL_SECONDS) -> None:
+        self._ttl = ttl_seconds
+        self._lock = threading.Lock()
+        # value is (datetime | None) — None means "query attempted but no
+        # rows / failed" so the next request stays cached for the TTL.
+        self._snapshots: dict[int, tuple[float, datetime | None]] = {}
+
+    def reset(self) -> None:
+        with self._lock:
+            self._snapshots.clear()
+
+    def get(self, db: Session) -> datetime | None:
+        bind = db.get_bind()
+        key = id(bind)
+        now = time.monotonic()
+        with self._lock:
+            snapshot = self._snapshots.get(key)
+            if snapshot is not None and (now - snapshot[0]) < self._ttl:
+                return snapshot[1]
+        latest = self._fetch_now(db)
+        with self._lock:
+            self._snapshots[key] = (time.monotonic(), latest)
+        return latest
+
+    @staticmethod
+    def _fetch_now(db: Session) -> datetime | None:
+        """Run MAX(timestamp) with a tight statement_timeout. Any failure
+        returns None; the route never 500s on this lookup.
+
+        Uses the ORM column reference (not raw SQL) so SQLAlchemy
+        type-decodes the SQLite string column back to a Python datetime
+        — raw `text()` returns strings on SQLite.
+        """
+        # Local import keeps the system_service module importable in test
+        # contexts that don't load the full ORM (e.g. classifier-only tests).
+        from sqlalchemy import func, select
+
+        from backend.app.db.models import AuditEvent
+
+        try:
+            if db.get_bind().dialect.name == "postgresql":
+                db.execute(text(f"SET LOCAL statement_timeout = {DB_LATEST_EVENT_TIMEOUT_MS}"))
+            result = db.execute(select(func.max(AuditEvent.timestamp))).scalar_one_or_none()
+        except (OperationalError, SQLAlchemyError) as exc:
+            db.rollback()
+            logger.warning(
+                "/system/status MAX(timestamp) failed: %s",
+                exc.__class__.__name__,
+            )
+            return None
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("/system/status MAX(timestamp) unexpected error: %s", exc)
+            return None
+        if result is None:
+            return None
+        if isinstance(result, datetime):
+            if result.tzinfo is None:
+                return result.replace(tzinfo=timezone.utc)
+            return result.astimezone(timezone.utc)
+        # Some dialects/drivers return ISO strings even through the ORM.
+        if isinstance(result, str):
+            try:
+                parsed = datetime.fromisoformat(result.replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                return parsed.astimezone(timezone.utc)
+            except ValueError:
+                return None
+        return None
+
+
+_db_latest_event_cache = _DbLatestEventCache()
+
+
+def reset_db_latest_event_cache() -> None:
+    """Drop the cached MAX(timestamp). Used by tests + admin tooling."""
+    _db_latest_event_cache.reset()
+
+
+# ────────────────────────────── pipeline lag ───────────────────────────
+def _classify_pipeline_status(
+    *,
+    db_behind_seconds: int | None,
+    consumer_lag: int | None,
+    db_latest_event_at: datetime | None,
+) -> str:
+    """healthy < 60s & < 100k lag; stalled > 300s OR > 1M OR unknown DB
+    timestamp; degraded otherwise."""
+    if db_latest_event_at is None:
+        return "stalled"
+    if db_behind_seconds is None:
+        return "stalled"
+    if db_behind_seconds > 300 or (consumer_lag is not None and consumer_lag > 1_000_000):
+        return "stalled"
+    if (
+        db_behind_seconds < 60
+        and (consumer_lag is None or consumer_lag < 100_000)
+    ):
+        return "healthy"
+    return "degraded"
+
+
+def _to_iso_z(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def get_pipeline_lag(db: Session) -> dict[str, Any]:
+    """Assemble the /system/status pipeline_lag block.
+
+    Reads the 5-second-cached forwarder /health snapshot and the 10-second-
+    cached DB MAX(timestamp). On forwarder unreachable the consumer-side
+    fields are None and the status falls to "unknown" (per spec).
+    """
+    forwarder = _forwarder_health_cache.get()
+    forwarder_unreachable = bool(
+        forwarder.get("last_error")
+        and forwarder.get("consumer_state") == "unknown"
+    )
+    consumer_lag = forwarder.get("consumer_lag")
+    forwarder_last_write_at = forwarder.get("db_last_successful_write")
+
+    db_latest = _db_latest_event_cache.get(db)
+    db_behind_seconds: int | None = None
+    if db_latest is not None:
+        delta = (datetime.now(timezone.utc) - db_latest).total_seconds()
+        db_behind_seconds = int(max(0, delta))
+
+    if forwarder_unreachable:
+        status = "unknown"
+    else:
+        status = _classify_pipeline_status(
+            db_behind_seconds=db_behind_seconds,
+            consumer_lag=consumer_lag if isinstance(consumer_lag, int) else None,
+            db_latest_event_at=db_latest,
+        )
+
+    replay_recommended = (
+        consumer_lag == 0
+        and db_behind_seconds is not None
+        and db_behind_seconds > 300
+    )
+
+    return {
+        "kafka_consumer_lag_messages": consumer_lag if isinstance(consumer_lag, int) else None,
+        "db_latest_event_at": _to_iso_z(db_latest),
+        "forwarder_last_write_at": forwarder_last_write_at,
+        "db_behind_seconds": db_behind_seconds,
+        "replay_recommended": bool(replay_recommended),
+        "status": status,
+    }
+
+
 def get_storage_usage(db: Session) -> dict[str, Any]:
     settings = get_settings()
     if settings.database_mode == "sqlite":
@@ -159,4 +333,20 @@ def get_system_status(db: Session) -> dict[str, Any]:
         status["db_health"] = check_db_health_session(db)
     except Exception as exc:
         status["db_health"] = {"can_connect": False, "can_query": False, "error": str(exc)}
+    # Pipeline lag is best-effort — wrapped so a transient DB hiccup
+    # can never 500 the status route. Falls back to status="unknown".
+    try:
+        pipeline = get_pipeline_lag(db)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("pipeline_lag assembly failed: %s", exc)
+        pipeline = {
+            "kafka_consumer_lag_messages": None,
+            "db_latest_event_at": None,
+            "forwarder_last_write_at": None,
+            "db_behind_seconds": None,
+            "replay_recommended": False,
+            "status": "unknown",
+        }
+    status["pipeline_lag"] = pipeline
+    status["pipeline_status"] = pipeline.get("status", "unknown")
     return status

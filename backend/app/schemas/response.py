@@ -112,6 +112,20 @@ class EventListNoiseResponse(BaseModel):
     source: Literal["noise_table"] = "noise_table"
 
 
+class PipelineLag(BaseModel):
+    """End-to-end ingestion lag, combining the consumer-side view from the
+    forwarder /health endpoint with the DB-side `MAX(timestamp)` from
+    Postgres. `status` is the operator-facing single signal that drives
+    the System-page banner.
+    """
+    kafka_consumer_lag_messages: int | None = None
+    db_latest_event_at: str | None = None
+    forwarder_last_write_at: str | None = None
+    db_behind_seconds: int | None = None
+    replay_recommended: bool = False
+    status: Literal["healthy", "degraded", "stalled", "unknown"] = "unknown"
+
+
 class SystemStatusResponse(BaseModel):
     consumer_state: str
     last_successful_poll: str | None
@@ -132,3 +146,5 @@ class SystemStatusResponse(BaseModel):
     storage_usage: dict[str, Any]
     database_mode: str
     db_health: dict[str, Any] | None = None
+    pipeline_lag: PipelineLag | None = None
+    pipeline_status: Literal["healthy", "degraded", "stalled", "unknown"] = "unknown"
