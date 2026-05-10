@@ -1,14 +1,21 @@
 import json
 import logging
+import threading
 from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from time import sleep
 from typing import Any
 
-from sqlalchemy import or_, select, tuple_
+from sqlalchemy import or_, select, text, tuple_
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, load_only, sessionmaker
 
 from backend.app.db.models import AuditEvent
+from src.product.actor_enrichment import (
+    clear_actor_enrichment_cache,
+    enrich_actor,
+    wait_for_iam_cache_ready,
+)
 from src.product.event_normalization import normalize_event
 from src.product.resource_intelligence import extract_resource_context
 from src.product.source_enrichment import extract_source_info
@@ -699,4 +706,261 @@ def backfill_resource_intelligence_from_raw_payload(
         "invalid_json": invalid_json,
         "dry_run": dry_run,
         "force": force,
+    }
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Phase 5: Backfill of legacy "Unknown user/SA/principal" rows.
+# Older forwarder builds wrote those placeholders into actor_display_name
+# before the raw-ID fallback existed. This job re-resolves them via the
+# enrichment chain (actor_mappings.yml → IAM cache → audit-event name →
+# raw actor ID), updates the row, and records progress for the admin
+# status endpoint.
+# ──────────────────────────────────────────────────────────────────────
+
+_UNKNOWN_DISPLAY_NAMES = (
+    "Unknown user",
+    "Unknown service account",
+    "Unknown principal",
+    "Unknown actor",
+)
+_ACTOR_BACKFILL_BATCH_SIZE = 500
+_ACTOR_BACKFILL_PROGRESS_LOG_EVERY = 10000
+_ACTOR_BACKFILL_BATCH_SLEEP_MS = 10
+_ACTOR_BACKFILL_STATEMENT_TIMEOUT_MS = 5000
+
+_actor_backfill_lock = threading.Lock()
+_actor_backfill_state: dict[str, Any] = {
+    "status": "idle",  # idle | running | complete | error
+    "started_at": None,
+    "completed_at": None,
+    "dry_run": None,
+    "progress": {
+        "scanned": 0,
+        "updated": 0,
+        "skipped": 0,
+        "errors": 0,
+    },
+    "error": None,
+}
+
+
+def get_actor_backfill_status() -> dict[str, Any]:
+    """Snapshot of the current/last actor-display-name backfill run."""
+    with _actor_backfill_lock:
+        return {
+            "status": _actor_backfill_state["status"],
+            "started_at": _actor_backfill_state["started_at"],
+            "completed_at": _actor_backfill_state["completed_at"],
+            "dry_run": _actor_backfill_state["dry_run"],
+            "progress": dict(_actor_backfill_state["progress"]),
+            "error": _actor_backfill_state["error"],
+        }
+
+
+def start_actor_display_name_backfill(engine: Engine, *, dry_run: bool) -> dict[str, Any]:
+    """Spawn a single-flight backfill thread; return current state."""
+    with _actor_backfill_lock:
+        if _actor_backfill_state["status"] == "running":
+            return {
+                "status": "running",
+                "started_at": _actor_backfill_state["started_at"],
+                "dry_run": _actor_backfill_state["dry_run"],
+                "progress": dict(_actor_backfill_state["progress"]),
+            }
+        _actor_backfill_state["status"] = "running"
+        _actor_backfill_state["started_at"] = datetime.now(timezone.utc).isoformat()
+        _actor_backfill_state["completed_at"] = None
+        _actor_backfill_state["dry_run"] = bool(dry_run)
+        _actor_backfill_state["progress"] = {
+            "scanned": 0,
+            "updated": 0,
+            "skipped": 0,
+            "errors": 0,
+        }
+        _actor_backfill_state["error"] = None
+
+    thread = threading.Thread(
+        target=_actor_display_name_backfill_thread,
+        args=(engine, bool(dry_run)),
+        name="actor-display-name-backfill",
+        daemon=True,
+    )
+    thread.start()
+    return {"status": "started", "dry_run": bool(dry_run)}
+
+
+def _actor_display_name_backfill_thread(engine: Engine, dry_run: bool) -> None:
+    factory = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+    try:
+        with factory() as db:
+            result = backfill_actor_display_names(db, dry_run=dry_run)
+        with _actor_backfill_lock:
+            _actor_backfill_state["status"] = "complete"
+            _actor_backfill_state["completed_at"] = datetime.now(timezone.utc).isoformat()
+            _actor_backfill_state["progress"] = {
+                "scanned": result.get("scanned", 0),
+                "updated": result.get("updated", 0),
+                "skipped": result.get("skipped", 0),
+                "errors": result.get("errors", 0),
+            }
+    except Exception as exc:
+        logger.exception("actor-display-name backfill failed: %s", exc)
+        with _actor_backfill_lock:
+            _actor_backfill_state["status"] = "error"
+            _actor_backfill_state["completed_at"] = datetime.now(timezone.utc).isoformat()
+            _actor_backfill_state["error"] = str(exc)
+
+
+def _resolve_actor_display_name(event: AuditEvent) -> dict[str, str | None] | None:
+    """Try mapping → IAM → audit-event name → raw ID via enrich_actor.
+
+    Returns an updates dict with the new display_name/source/confidence,
+    or None if the resolution gave back the same placeholder we started
+    with (don't burn an UPDATE on a no-op).
+    """
+    raw_actor = event.actor or ""
+    enriched = enrich_actor(raw_actor, event.subject or "", event.subject_type or "")
+    new_name = (enriched.get("actor_display_name") or "").strip()
+    if not new_name:
+        # No mapping, no IAM hit, no event-derived name, no raw ID —
+        # surface the raw actor field instead so the row stops looking
+        # like it has an unknown placeholder.
+        new_name = raw_actor or ""
+    if not new_name or new_name in _UNKNOWN_DISPLAY_NAMES:
+        # Genuinely nothing to update with — but still mark the source
+        # as "fallback" so downstream filters know enrichment ran.
+        return None
+    return {
+        "actor_display_name": new_name,
+        "actor_source": enriched.get("actor_source") or "fallback",
+        "actor_confidence": enriched.get("actor_confidence") or "low",
+    }
+
+
+def backfill_actor_display_names(
+    db: Session,
+    *,
+    dry_run: bool = True,
+    iam_cache_wait_seconds: float = 30.0,
+) -> dict[str, Any]:
+    """Re-resolve rows where actor_display_name is a legacy "Unknown X".
+
+    Cursor-based, batched on id ASC. Idempotent — once a row's display
+    name is no longer in the placeholder set, subsequent runs skip it.
+    """
+    # Drop any cached enrichment results from prior runs so freshly-loaded
+    # actor_mappings.yml takes effect mid-process.
+    clear_actor_enrichment_cache()
+    if not wait_for_iam_cache_ready(iam_cache_wait_seconds):
+        logger.warning(
+            "actor backfill: IAM cache not ready after %.0fs — proceeding with mappings + raw-ID fallback only",
+            iam_cache_wait_seconds,
+        )
+
+    is_postgres = db.get_bind().dialect.name == "postgresql"
+
+    scanned = 0
+    updated = 0
+    skipped = 0
+    errors = 0
+    last_id: int | None = None
+
+    while True:
+        if is_postgres:
+            db.execute(
+                text(
+                    f"SET LOCAL statement_timeout = {_ACTOR_BACKFILL_STATEMENT_TIMEOUT_MS}"
+                )
+            )
+        query = (
+            select(AuditEvent)
+            .where(AuditEvent._actor_display_name.in_(_UNKNOWN_DISPLAY_NAMES))
+            .order_by(AuditEvent.id.asc())
+            .limit(_ACTOR_BACKFILL_BATCH_SIZE)
+        )
+        if last_id is not None:
+            query = query.where(AuditEvent.id > last_id)
+        batch = db.scalars(query).all()
+        if not batch:
+            break
+
+        for event in batch:
+            scanned += 1
+            last_id = event.id
+            try:
+                updates = _resolve_actor_display_name(event)
+            except Exception as exc:
+                errors += 1
+                logger.debug(
+                    "actor backfill resolve failed for event_id=%s: %s",
+                    event.id,
+                    exc,
+                )
+                continue
+            if not updates:
+                skipped += 1
+                continue
+            if dry_run:
+                updated += 1
+                continue
+            try:
+                event._actor_display_name = updates["actor_display_name"]
+                event._actor_source = updates["actor_source"]
+                event._actor_confidence = updates["actor_confidence"]
+                updated += 1
+            except Exception as exc:
+                errors += 1
+                logger.debug(
+                    "actor backfill assign failed for event_id=%s: %s",
+                    event.id,
+                    exc,
+                )
+
+        with _actor_backfill_lock:
+            _actor_backfill_state["progress"] = {
+                "scanned": scanned,
+                "updated": updated,
+                "skipped": skipped,
+                "errors": errors,
+            }
+
+        if not dry_run:
+            try:
+                db.commit()
+            except Exception as exc:
+                errors += 1
+                logger.warning("actor backfill commit failed: %s", exc)
+                db.rollback()
+
+        if scanned and scanned % _ACTOR_BACKFILL_PROGRESS_LOG_EVERY < _ACTOR_BACKFILL_BATCH_SIZE:
+            logger.info(
+                "Backfill actor display names: %d/? rows scanned, %d updated, %d skipped, %d errors (dry_run=%s)",
+                scanned,
+                updated,
+                skipped,
+                errors,
+                dry_run,
+            )
+
+        if len(batch) < _ACTOR_BACKFILL_BATCH_SIZE:
+            break
+
+        if _ACTOR_BACKFILL_BATCH_SLEEP_MS > 0:
+            sleep(_ACTOR_BACKFILL_BATCH_SLEEP_MS / 1000.0)
+
+    logger.info(
+        "Backfill actor display names complete: scanned=%d updated=%d skipped=%d errors=%d dry_run=%s",
+        scanned,
+        updated,
+        skipped,
+        errors,
+        dry_run,
+    )
+    return {
+        "scanned": scanned,
+        "updated": updated,
+        "skipped": skipped,
+        "errors": errors,
+        "dry_run": dry_run,
     }

@@ -1,8 +1,13 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from backend.app.core.config import get_settings
 from backend.app.db.database import get_db
+from backend.app.services.backfill_service import (
+    get_actor_backfill_status,
+    start_actor_display_name_backfill,
+)
 from backend.app.services.event_service import cleanup_retention
 from src.product.auth import AuthConfig, Authenticator, Role
 
@@ -22,6 +27,10 @@ def require_admin(request: Request) -> None:
     raise HTTPException(status_code=403, detail="admin role required")
 
 
+class ActorBackfillRequest(BaseModel):
+    dry_run: bool = False
+
+
 @router.post("/admin/retention/cleanup")
 def retention_cleanup(
     dry_run: bool = Query(default=True),
@@ -31,3 +40,22 @@ def retention_cleanup(
 ) -> dict:
     days = retention_days or get_settings().event_retention_days
     return cleanup_retention(db, days, dry_run=dry_run)
+
+
+@router.post("/admin/backfill/actor-display-names")
+def backfill_actor_display_names_endpoint(
+    payload: ActorBackfillRequest = Body(default_factory=ActorBackfillRequest),
+    _: None = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Re-resolve legacy 'Unknown user/SA/principal' rows. Async — returns
+    immediately. Single-flight: a second POST while a job is running
+    returns the in-flight job's state instead of starting a duplicate."""
+    return start_actor_display_name_backfill(db.get_bind(), dry_run=payload.dry_run)
+
+
+@router.get("/admin/backfill/actor-display-names/status")
+def backfill_actor_display_names_status(
+    _: None = Depends(require_admin),
+) -> dict:
+    return get_actor_backfill_status()

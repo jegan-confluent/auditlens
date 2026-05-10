@@ -374,6 +374,24 @@ def get_actor_mapping_file() -> ActorMappingFile:
     return _actor_mapping_file()
 
 
+def wait_for_iam_cache_ready(timeout_seconds: float = 30.0) -> bool:
+    """Block until the Confluent IAM cache has completed its first refresh.
+
+    Returns True when the cache is ready or no enricher is configured
+    (nothing to wait for); False on timeout. Used by the actor backfill
+    job so it doesn't run against a half-warm cache.
+    """
+    enricher = _confluent_identity_enricher()
+    if enricher is None:
+        return True
+    deadline = time.monotonic() + max(0.0, timeout_seconds)
+    while time.monotonic() < deadline:
+        if getattr(enricher, "_last_refresh_at", None) is not None:
+            return True
+        time.sleep(0.5)
+    return getattr(enricher, "_last_refresh_at", None) is not None
+
+
 def _lookup_actor_mapping_override(raw: str, subject_type: str = "") -> dict[str, str] | None:
     if not raw:
         return None
