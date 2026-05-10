@@ -211,6 +211,46 @@ def test_summary_methods_returns_empty_when_table_missing(noise_client_no_table)
     assert "kafka.Fetch" not in actions  # noise-only methods absent
 
 
+def test_summary_methods_postgres_branch_applies_recent_sample(noise_client, monkeypatch):
+    """When the dialect is Postgres, _query_signal_methods must aggregate
+    over the most-recent METHODS_RECENT_SAMPLE rows (subquery + LIMIT)
+    rather than the entire audit_events table — this is the fix that
+    keeps the route from timing out at production scale.
+
+    We don't have a Postgres in CI, but the SQL we emit is portable
+    enough that we can flip _is_postgres to True and verify the
+    subquery LIMIT actually bounds the output set.
+    """
+    from backend.app.services import noise_service
+    # Force the Postgres branch.
+    monkeypatch.setattr(noise_service, "_is_postgres", lambda db: True)
+    # Tighten the recent-sample to a tiny number so we can prove the
+    # window applies — the SEED_EVENTS fixture has more rows than this.
+    monkeypatch.setattr(noise_service, "METHODS_RECENT_SAMPLE", 2)
+    noise_service.clear_method_distribution_cache()
+
+    body = noise_client.get("/summary/methods").json()
+    # Sum of signal-side counts must be <= the recent-sample window.
+    signal_count_total = sum(
+        m["count"] for m in body["methods"] if m["table"] == "signal"
+    )
+    assert signal_count_total <= 2
+
+
+def test_summary_methods_sqlite_branch_full_table_aggregation(noise_client):
+    """SQLite path must keep returning the full-table aggregation —
+    that's the contract the existing test fixtures rely on."""
+    from backend.app.services import noise_service
+
+    noise_service.clear_method_distribution_cache()
+    body = noise_client.get("/summary/methods").json()
+    # The SEED_EVENTS fixture seeds many distinct actions; with the
+    # full-table query at least a couple should land in the signal
+    # bucket. (Don't pin a specific count — fixtures evolve.)
+    signal_actions = [m for m in body["methods"] if m["table"] == "signal"]
+    assert len(signal_actions) >= 1, "SQLite branch returned no signal-side methods"
+
+
 # ───────────────────── /summary?include_noise=true ─────────────────────
 
 

@@ -276,6 +276,14 @@ def get_noise_summary(db: Session, *, retention_days: int) -> dict[str, Any] | N
 # ─────────────────────────── /summary/methods ──────────────────────────
 METHODS_TTL_SECONDS = 60
 METHODS_LIMIT_PER_TABLE = 200
+# Aggregate over the most-recent N audit_events rows on Postgres rather
+# than the entire table. At production scale (10M+ rows) a full GROUP BY
+# action exhausts the 10s statement_timeout and the route degrades to
+# noise-only. 50_000 is the same window FILTER_OPTIONS_RECENT_SAMPLE uses
+# in filter_options_service — wide enough that any method seen in the
+# last few hours is represented; bounded enough that the scan stays
+# under ~1 s warm.
+METHODS_RECENT_SAMPLE = 50_000
 
 _methods_cache: TTLCache[int, dict[str, Any]] = TTLCache(maxsize=8, ttl=METHODS_TTL_SECONDS)
 _methods_cache_lock = threading.Lock()
@@ -290,19 +298,53 @@ def _query_signal_methods(db: Session) -> list[dict[str, Any]]:
     from backend.app.db.models import AuditEvent
 
     _apply_pg_timeout(db, METHODS_TIMEOUT_MS)
-    query = (
-        select(
-            AuditEvent.action.label("action"),
-            func.count().label("count"),
-            func.max(AuditEvent._signal_type).label("signal_type"),
-            func.max(AuditEvent.timestamp).label("last_seen"),
+
+    if _is_postgres(db):
+        # Recent-sample subquery — mirror of filter_options_service. The
+        # outer aggregation runs over the top-N rows by timestamp instead
+        # of the entire table. ORDER BY timestamp DESC + LIMIT is index-
+        # eligible (idx_audit_events_timestamp_desc) so the subquery
+        # itself is constant-time relative to table size.
+        sub = (
+            select(
+                AuditEvent.action.label("value"),
+                AuditEvent._signal_type.label("st"),
+                AuditEvent.timestamp.label("ts"),
+            )
+            .where(AuditEvent.action.isnot(None))
+            .where(AuditEvent.action != "")
+            .order_by(AuditEvent.timestamp.desc())
+            .limit(METHODS_RECENT_SAMPLE)
+            .subquery()
         )
-        .where(AuditEvent.action.isnot(None))
-        .where(AuditEvent.action != "")
-        .group_by(AuditEvent.action)
-        .order_by(func.count().desc())
-        .limit(METHODS_LIMIT_PER_TABLE)
-    )
+        query = (
+            select(
+                sub.c.value.label("action"),
+                func.count().label("count"),
+                func.max(sub.c.st).label("signal_type"),
+                func.max(sub.c.ts).label("last_seen"),
+            )
+            .group_by(sub.c.value)
+            .order_by(func.count().desc())
+            .limit(METHODS_LIMIT_PER_TABLE)
+        )
+    else:
+        # SQLite (demo + tests) — small datasets, full-table GROUP BY
+        # is cheap. Keeps existing test fixtures honest.
+        query = (
+            select(
+                AuditEvent.action.label("action"),
+                func.count().label("count"),
+                func.max(AuditEvent._signal_type).label("signal_type"),
+                func.max(AuditEvent.timestamp).label("last_seen"),
+            )
+            .where(AuditEvent.action.isnot(None))
+            .where(AuditEvent.action != "")
+            .group_by(AuditEvent.action)
+            .order_by(func.count().desc())
+            .limit(METHODS_LIMIT_PER_TABLE)
+        )
+
     try:
         rows = db.execute(query).all()
     except (OperationalError, SQLAlchemyError) as exc:
