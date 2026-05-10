@@ -276,10 +276,14 @@ def _normalize_raw_actor(actor: str, subject: str = "") -> str:
 
 def _fallback_identity(raw: str, subject_type: str = "") -> dict[str, str | None]:
     actor_type = infer_actor_type(raw, subject_type)
-    display_name = raw or "Unknown principal"
+    # Phase 5: never substitute a "Unknown X" placeholder for the display
+    # name — it collapses different unresolved IDs into the same label and
+    # hides the raw u-/sa- ID operators need to investigate. Surface the
+    # raw ID instead; if there's no raw ID either, return an empty string
+    # so downstream consumers can render an explicit blank.
     return {
         "actor_id": raw or None,
-        "actor_display_name": display_name,
+        "actor_display_name": raw,
         "actor_email": None,
         "actor_type": actor_type,
         "actor_source": "fallback",
@@ -312,7 +316,7 @@ def enrich_actor(actor: str, subject: str = "", subject_type: str = "") -> dict[
     if identity:
         result: dict[str, str | None] = {
             "actor_id": identity.get("actor_id") or raw or None,
-            "actor_display_name": identity.get("actor_display_name") or identity.get("display_name") or raw or "Unknown principal",
+            "actor_display_name": identity.get("actor_display_name") or identity.get("display_name") or raw,
             "actor_email": identity.get("actor_email") or identity.get("email") or None,
             "actor_type": identity.get("actor_type") or identity.get("type") or infer_actor_type(raw, subject_type),
             "actor_raw_id": raw or None,

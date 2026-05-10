@@ -378,7 +378,17 @@ class AuditEvent(Base):
 
     @property
     def actor_display_name(self) -> str:
-        return str(self._actor_display_name or self._actor_enrichment()["actor_display_name"] or "Unknown actor")
+        # Phase 5: never substitute a placeholder. Fall back through stored
+        # display_name → enrichment result → raw actor ID, and only as a
+        # last resort the raw actor field (which may itself be the legacy
+        # column default — but that is the *raw* actor we received, not a
+        # synthetic "Unknown user" label that hides the underlying ID).
+        return str(
+            self._actor_display_name
+            or self._actor_enrichment()["actor_display_name"]
+            or self.actor
+            or ""
+        )
 
     @actor_display_name.setter
     def actor_display_name(self, value: str | None) -> None:

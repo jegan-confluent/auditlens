@@ -234,7 +234,10 @@ def test_actor_enrichment_audit_event_and_raw_fallbacks(monkeypatch):
     assert service_account["actor_display_name"] == "sa-domx5qd"
     assert service_account["actor_raw_id"] == "sa-domx5qd"
     assert service_account["actor_source"] == "fallback"
-    assert empty["actor_display_name"] == "Unknown principal"
+    # Phase 5: empty actor input never produces a placeholder display name
+    # — it returns an empty string so downstream consumers fall through to
+    # the raw actor field rather than collapsing onto "Unknown principal".
+    assert empty["actor_display_name"] == ""
     assert empty["actor_source"] == "fallback"
 
 
