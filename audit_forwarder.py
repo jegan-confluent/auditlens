@@ -71,7 +71,7 @@ from src.product import (
     heal_sqlite_on_startup,
 )
 from src.product.db_writer import AuditEventDbWriter
-from src.product.event_normalization import BULK_NOISE_METHODS
+from src.product.event_normalization import BULK_NOISE_METHODS, parse_event_timestamp
 
 # ──────────── graceful shutdown handler ────────────
 _shutdown_requested = False
@@ -487,6 +487,117 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+# ─────────────────── DB-writer freshness helpers ───────────────────────
+# These compute the /health db_writer block from in-memory metrics state
+# (no DB queries — keeps /health <100ms). All return None / safe defaults
+# on bad input so /health can never raise from them.
+
+def _max_event_timestamp_iso(payloads: list[dict]) -> str | None:
+    """Max event-time across a batch as ISO-8601 UTC, or None.
+
+    Used by the writer threads to advance the `db_last_event_timestamp_iso`
+    freshness mark after a successful INSERT — the highest event time in
+    the batch is the most-recent event Postgres has actually seen.
+    Wrapped in try/except: a single bad payload must not abort the
+    timestamp computation for the rest of the batch.
+    """
+    if not payloads:
+        return None
+    latest: datetime | None = None
+    for payload in payloads:
+        try:
+            ts = parse_event_timestamp(payload)
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            else:
+                ts = ts.astimezone(timezone.utc)
+            if latest is None or ts > latest:
+                latest = ts
+        except Exception:
+            continue
+    if latest is None:
+        return None
+    return latest.isoformat().replace("+00:00", "Z")
+
+
+def _parse_iso_to_utc(iso: str | None) -> datetime | None:
+    if not iso:
+        return None
+    try:
+        parsed = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _compute_db_behind_seconds(last_event_iso: str | None) -> int | None:
+    """now - last event timestamp, in whole seconds. None when unknown."""
+    last = _parse_iso_to_utc(last_event_iso)
+    if last is None:
+        return None
+    delta = (datetime.now(timezone.utc) - last).total_seconds()
+    return int(max(0, delta))
+
+
+def _classify_db_writer_status(last_write_iso: str | None, error_count: int) -> str:
+    """healthy: <60s ago + no consecutive errors;
+    degraded: 60-300s ago OR error_count > 0;
+    stalled:  >300s ago OR last_write_iso is None.
+
+    Cold start sits in `stalled` until the first successful batch lands
+    — matches the Phase 2 spec literally.
+    """
+    last = _parse_iso_to_utc(last_write_iso)
+    if last is None:
+        return "stalled"
+    age = (datetime.now(timezone.utc) - last).total_seconds()
+    if age > 300:
+        return "stalled"
+    if age > 60 or error_count > 0:
+        return "degraded"
+    return "healthy"
+
+
+def _is_replay_recommended(consumer_lag: int | None, db_behind_seconds: int | None) -> bool:
+    """True iff Kafka is fully consumed AND Postgres is >5min behind —
+    the signal that says 'run replay to backfill the missing tail'."""
+    if consumer_lag is None or db_behind_seconds is None:
+        return False
+    return consumer_lag == 0 and db_behind_seconds > 300
+
+
+def _build_db_writer_block(metrics_data: dict) -> dict:
+    """Compose the /health `db_writer` block from a metrics snapshot.
+
+    Each field is wrapped against missing keys / unparseable timestamps;
+    the worst possible outcome is `{status: "stalled", ...None}`, never
+    a 500.
+    """
+    try:
+        last_write_iso = metrics_data.get("db_last_successful_write")
+        last_event_iso = metrics_data.get("db_last_event_timestamp_iso")
+        error_count = int(metrics_data.get("db_write_consecutive_error_count") or 0)
+        return {
+            "last_write_at": last_write_iso,
+            "last_event_timestamp": last_event_iso,
+            "db_behind_seconds": _compute_db_behind_seconds(last_event_iso),
+            "write_error_count": error_count,
+            "status": _classify_db_writer_status(last_write_iso, error_count),
+        }
+    except Exception:
+        # Defensive: any unexpected shape returns a stalled-shaped block
+        # so the route stays valid JSON.
+        return {
+            "last_write_at": None,
+            "last_event_timestamp": None,
+            "db_behind_seconds": None,
+            "write_error_count": 0,
+            "status": "stalled",
+        }
+
+
 def build_raw_event(event: dict, msg) -> dict:
     """Wrap source event for replay-safe raw topic production."""
     return {
@@ -634,6 +745,18 @@ class Metrics:
         # short-circuited noise offsets in time (we did NOT commit;
         # restart will replay). High value signals bulk lane backpressure.
         self.noise_persist_wait_timeouts_total = 0
+        # ── DB-writer freshness state for /health ─────────────────────
+        # ISO-8601 UTC timestamp of the most-recent event time observed
+        # in any successfully-written batch (signal or noise lane).
+        # `db_behind_seconds` is computed off this — the gap between
+        # wall-clock now and the latest event Postgres has actually seen.
+        self.db_last_event_timestamp_iso: str | None = None
+        # Consecutive write-error count: bumped on every record_db_write_error,
+        # reset to 0 on every record_db_write_success. Distinct from
+        # db_write_error_total (cumulative). The /health db_writer.status
+        # classification uses this — a healthy lane means at least one
+        # writer just succeeded.
+        self.db_write_consecutive_error_count = 0
         self.last_ingested_event_time = None
         self.last_committed_at = None
         self.offset_commits_total = 0
@@ -803,17 +926,30 @@ class Metrics:
         with self.lock:
             self.noise_persist_wait_timeouts_total += 1
 
-    def record_db_write_success(self, batch_size: int):
+    def record_db_write_success(
+        self,
+        batch_size: int,
+        max_event_timestamp_iso: str | None = None,
+    ):
         with self.lock:
             self.db_write_success_total += 1
             self.db_write_batch_size = batch_size
             self.db_last_successful_write = utc_now_iso()
             self.db_writer_state = "connected"
             self.db_last_error = None
+            self.db_write_consecutive_error_count = 0
+            # Advance the per-event-time freshness mark monotonically. ISO
+            # strings compare correctly when both are UTC-Zulu — that's
+            # the shape _max_event_timestamp_iso emits.
+            if max_event_timestamp_iso:
+                current = self.db_last_event_timestamp_iso
+                if current is None or max_event_timestamp_iso > current:
+                    self.db_last_event_timestamp_iso = max_event_timestamp_iso
 
     def record_db_write_error(self, error: str, batch_size: int = 0):
         with self.lock:
             self.db_write_error_total += 1
+            self.db_write_consecutive_error_count += 1
             self.error_count += 1
             self.db_write_batch_size = batch_size
             self.db_writer_state = "degraded"
@@ -998,8 +1134,10 @@ class Metrics:
                 "consumer_state": self.consumer_state,
                 "db_write_success_total": self.db_write_success_total,
                 "db_write_error_total": self.db_write_error_total,
+                "db_write_consecutive_error_count": self.db_write_consecutive_error_count,
                 "db_write_batch_size": self.db_write_batch_size,
                 "db_last_successful_write": self.db_last_successful_write,
+                "db_last_event_timestamp_iso": self.db_last_event_timestamp_iso,
                 "db_writer_state": self.db_writer_state,
                 "db_last_error": self.db_last_error,
                 "db_last_cleanup_at": self.db_last_cleanup_at,
@@ -1442,6 +1580,15 @@ class MetricsHandler(BaseHTTPRequestHandler):
             }),
             "noise_short_circuited_total": metrics_data.get("noise_short_circuited_total", 0),
             "noise_persist_wait_timeouts_total": metrics_data.get("noise_persist_wait_timeouts_total", 0),
+            # ── DB-writer freshness / replay-recommended ──
+            # Computed defensively off the in-memory metrics snapshot.
+            # Every helper below returns a safe default on bad input so
+            # this block never raises and /health stays <100ms.
+            "db_writer": _build_db_writer_block(metrics_data),
+            "replay_recommended": _is_replay_recommended(
+                metrics_data.get("consumer_lag_total"),
+                _compute_db_behind_seconds(metrics_data.get("db_last_event_timestamp_iso")),
+            ),
             "freshness": {
                 "last_enriched_event_time": snapshot["last_enriched_event_time"],
                 "last_enriched_ingest_at": snapshot["last_enriched_ingest_at"],
@@ -2689,7 +2836,8 @@ def flush_db_writer_noise_batch(
     try:
         writer = initialize_db_writer_if_enabled()
         result = writer.write_noise_batch(payloads)
-        metrics.record_db_write_success(result.attempted)
+        max_event_iso = _max_event_timestamp_iso(payloads)
+        metrics.record_db_write_success(result.attempted, max_event_timestamp_iso=max_event_iso)
         backoff.reset()
         logger.info(
             "DB writer batch complete lane=%s table=audit_events_noise attempted=%d inserted=%d "
@@ -2729,7 +2877,8 @@ def flush_db_writer_batch(
             result = writer.write_batch(payloads, defer_catalog=True)
         else:
             result = writer.write_batch(payloads)
-        metrics.record_db_write_success(result.attempted)
+        max_event_iso = _max_event_timestamp_iso(payloads)
+        metrics.record_db_write_success(result.attempted, max_event_timestamp_iso=max_event_iso)
         cleanup = writer.cleanup_retention_if_due()
         if cleanup:
             metrics.record_db_retention_cleanup(cleanup)
