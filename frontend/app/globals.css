@@ -305,6 +305,61 @@ a {
   color: var(--accent);
 }
 
+.orientation-cards {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+@media (max-width: 720px) {
+  .orientation-cards {
+    grid-template-columns: 1fr;
+  }
+}
+
+.orientation-card {
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+}
+
+.orientation-card.alert {
+  border-color: #fda4af;
+  background: #fef2f2;
+}
+
+.orientation-card.warn {
+  border-color: #fcd34d;
+  background: #fffbeb;
+}
+
+.orientation-card.ok {
+  border-color: #bbf7d0;
+  background: #f0fdf4;
+}
+
+.orientation-card-label {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.orientation-card-value {
+  font-size: 28px;
+  font-weight: 700;
+  margin-top: 4px;
+}
+
+.orientation-card-sub {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
 .drawer-backdrop {
   position: fixed;
   inset: 0;

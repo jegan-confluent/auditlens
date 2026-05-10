@@ -10,6 +10,7 @@ import ErrorState from "../../components/ErrorState";
 import FilterBar from "../../components/FilterBar";
 import LoadingState from "../../components/LoadingState";
 import NarrativeStrip from "../../components/NarrativeStrip";
+import OrientationCards from "../../components/OrientationCards";
 import SignalSummaryPanel from "../../components/SignalSummaryPanel";
 import {
   getEvent,
@@ -136,6 +137,12 @@ function EventsPageInner() {
   // immediately while the /summary + /events round-trips complete.
   const [actorPanelId, setActorPanelId] = useState<string | null>(null);
   const [actorPanelSeed, setActorPanelSeed] = useState<AuditEvent | null>(null);
+
+  // Orientation summary: a fixed-window 24h snapshot, independent of the
+  // user's current filters. Drives the three cards above the filter bar.
+  const [orientation, setOrientation] = useState<SummaryResponse | null>(null);
+  const [orientationLoading, setOrientationLoading] = useState(true);
+  const [orientationError, setOrientationError] = useState<string | null>(null);
   const [summary, setSummary] = useState<SummaryResponse | null>(null);
   const [summaryLoading, setSummaryLoading] = useState(false);
   const [summaryError, setSummaryError] = useState<string | null>(null);
@@ -192,6 +199,26 @@ function EventsPageInner() {
       });
     return () => controller.abort();
   }, [filters]);
+
+  // Orient-the-customer cards: fixed 24h window, fetched once on mount,
+  // independent of the user's filter state. Failures degrade to "—" in
+  // OrientationCards; the rest of the page keeps working.
+  useEffect(() => {
+    const controller = new AbortController();
+    const params = new URLSearchParams({ time_window: "24h", mode: "audit_trail" });
+    setOrientationLoading(true);
+    setOrientationError(null);
+    getSummary(params, controller.signal)
+      .then(setOrientation)
+      .catch((err: Error) => {
+        if (isAbortError(err)) return;
+        setOrientationError(err.message);
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setOrientationLoading(false);
+      });
+    return () => controller.abort();
+  }, []);
 
   // Phase 2 Fix 4: keep `system` fresh on a 30 s heartbeat so the
   // "Last event: …" line at the top of the page reflects ingest health
@@ -290,6 +317,7 @@ function EventsPageInner() {
           <SignalSummaryPanel summary={summary} onApplyFlow={applyFlowFilters} />
         </>
       ) : summaryLoading ? <LoadingState label="Loading decision summary" /> : summaryError ? <p className="active-filters">Decision summary unavailable: {summaryError}</p> : null}
+      <OrientationCards summary={orientation} loading={orientationLoading} error={orientationError} />
       <FilterBar filters={filters} options={options} onChange={updateFilters} onReset={resetFilters} />
       <p className="active-filters">
         {isDecisionMode
