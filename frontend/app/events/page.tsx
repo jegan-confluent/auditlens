@@ -71,6 +71,39 @@ function filtersFromSearchParams(params: URLSearchParams, base: EventFilters): E
   return touched ? next : base;
 }
 
+// Phase 2 Fix 4: relative-time formatter for the "Last event: …" line.
+// Distinct from the System-page formatRelative — this one rounds to whole
+// minutes / hours so the Events header doesn't flicker every second.
+function formatRelativeMinutes(iso: string | null | undefined): string {
+  if (!iso) return "unknown";
+  const ts = Date.parse(iso);
+  if (Number.isNaN(ts)) return "unknown";
+  const seconds = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+  if (seconds < 60) return "just now";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes} minute${minutes === 1 ? "" : "s"} ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
+  const days = Math.floor(hours / 24);
+  return `${days} day${days === 1 ? "" : "s"} ago`;
+}
+
+function LastEventLine({ system }: { system: SystemStatus | null }) {
+  const lag = system?.pipeline_lag ?? null;
+  const dbLatest = lag?.db_latest_event_at ?? null;
+  const behindSeconds = lag?.db_behind_seconds ?? null;
+  const stale = typeof behindSeconds === "number" && behindSeconds > 300;
+  const text = dbLatest ? formatRelativeMinutes(dbLatest) : "unknown";
+  const className = stale
+    ? "events-last-event events-last-event-stale"
+    : "events-last-event muted";
+  return (
+    <p className={className}>
+      {stale ? "⚠️ " : ""}Last event: {text}
+    </p>
+  );
+}
+
 export default function EventsPage() {
   return (
     <Suspense fallback={<main className="page"><LoadingState label="Loading events" /></main>}>
@@ -149,6 +182,39 @@ function EventsPageInner() {
     return () => controller.abort();
   }, [filters]);
 
+  // Phase 2 Fix 4: keep `system` fresh on a 30 s heartbeat so the
+  // "Last event: …" line at the top of the page reflects ingest health
+  // even when the user isn't changing filters. Best-effort — fetch
+  // failures are silently ignored; the existing error path on
+  // getEvents() owns the top-level error UX.
+  useEffect(() => {
+    let cancelled = false;
+    let timer: ReturnType<typeof setInterval> | null = null;
+
+    async function fetchOnce(signal: AbortSignal) {
+      try {
+        const fresh = await getSystemStatus(signal);
+        if (!cancelled) setSystem(fresh);
+      } catch (err) {
+        if (isAbortError(err)) return;
+        // Silent: do not overwrite system on a transient miss.
+      }
+    }
+
+    const initial = new AbortController();
+    fetchOnce(initial.signal);
+    timer = setInterval(() => {
+      const c = new AbortController();
+      fetchOnce(c.signal);
+    }, 30_000);
+
+    return () => {
+      cancelled = true;
+      initial.abort();
+      if (timer !== null) clearInterval(timer);
+    };
+  }, []);
+
   const onToggleExpand = (event: AuditEvent) => {
     if (expandedId === event.id) {
       setExpandedId(null);
@@ -191,6 +257,7 @@ function EventsPageInner() {
   return (
     <main className="page">
       <h1>Events</h1>
+      <LastEventLine system={system} />
       {summary ? (
         <>
           <DecisionBanner summary={summary} timeWindowLabel={timeWindowLabel} onApplyDecision={applyDecisionFilters} />

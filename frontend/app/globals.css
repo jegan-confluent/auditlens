@@ -1575,3 +1575,14 @@ pre {
   overflow-x: auto;
   white-space: pre;
 }
+
+/* Phase 2 Fix 4 — last-event line under the Events page H1. */
+.events-last-event {
+  font-size: 13px;
+  margin-top: -4px;
+  margin-bottom: 12px;
+}
+.events-last-event-stale {
+  color: var(--warn);
+  font-weight: 600;
+}
