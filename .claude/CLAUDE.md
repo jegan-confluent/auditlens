@@ -68,7 +68,7 @@ dashboard/
 22. Use orjson instead of json module (2-3x faster parsing)
 23. Use cachetools.LRUCache for bounded caching (prevent memory leaks)
 24. Use tenacity for retry with exponential backoff on external calls
-25. Batch operations: 5000 messages per consume, flush offsets per batch; for cross-region Kafka use 30s socket timeout, 45s session timeout
+25. Batch operations: 5000 messages per consume, flush offsets per batch; for cross-region Kafka use 30s socket timeout, 45s session timeout. When splitting consume/process across threads, also set `heartbeat.interval.ms=15000`, `max.poll.interval.ms=300000`, `group.instance.id=<stable-per-replica>`, and use `statistics.interval.ms=10000` + `stats_cb` for per-partition lag instead of synchronous `get_watermark_offsets`.
 
 ## Documentation Patterns
 26. Create END_TO_END_FLOW.md explaining "why" not just "what"
@@ -76,7 +76,7 @@ dashboard/
 28. Include tables for configuration reference and decision rationale
 
 ## Testing & Verification Rules
-29. Always verify changes work before reporting completion - use browser tools if available, check logs otherwise
+29. Always verify changes work before reporting completion - use browser tools if available, check logs otherwise. If you cannot do a real browser visual check, say so explicitly in the session summary — do not claim "UI verified" from a TS build alone. Frontend / api containers do NOT mount source — code changes there require `docker compose build <svc> && docker compose up -d <svc>` even when the user's validation steps only mention rebuild for forwarder.
 30. When refactoring files, compare against original to catch missing features
 31. Create testing checklists for UI changes so user can systematically verify
 32. Bump version number when making user-facing changes (dashboard, API)
@@ -100,7 +100,7 @@ dashboard/
 44. Streamlit `@st.cache_data` can cache empty DataFrames; add `st.cache_data.clear()` on auto-refresh
 45. UUID regex in "internal event" filters will match org IDs in resourceName - be careful with default=True
 46. Cross-region Kafka: network latency is the bottleneck, not local CPU/memory (US West → AP South = 30s+ timeouts needed)
-47. Test data loading with `docker exec <container> python3 -c "..."` before debugging UI layer
+47. Test data loading with `docker exec <container> python3 -c "..."` before debugging UI layer. When the user reports symptom X but your code reading suggests it should work, fetch live data via `curl` / `docker exec` / `psql` for MULTIPLE rows of the same kind. Mixed-state (some enriched, some not) is a common cause of "works for one user but not others."
 48. Add debug logging at data transformation boundaries to trace where data disappears
 
 ## Kafka Producer Patterns
@@ -122,6 +122,122 @@ dashboard/
 58. Pre-launch validation: check daemon running, compose available, config files exist, ports free before docker compose up
 59. Test shell scripts with piped input: `printf 'k\nk\nL\n' | ./script.sh 2>&1`
 60. For required config values, set defaults at load, save, AND docker-compose.yml levels (default cascade)
+
+## Multi-Phase Workflow Rules (added 2026-05-10)
+
+### Process & Communication
+61. **Read every file the user lists FULLY before any edit.** "Read these files completely before touching anything" is a hard precondition, not a hint. Read the whole file, not just the symbol you think you need.
+62. **Run live diagnostics BEFORE editing.** First 1–3 tool calls of any task should be `Read` + diagnostic `Bash` (`curl /health`, `docker compose logs --tail`, `psql -c "..."`, `make status`). Premise mismatches surface here, not in code review.
+63. **STOP-and-report on premise mismatches via AskUserQuestion.** When a multi-fix prompt asserts a fact about disk state that turns out to be wrong (file path, function name, flag name), present 2–3 lettered options with a recommended one. The user almost always picks the recommendation in seconds. Never silently substitute.
+64. **Phased commits over big-bang commits when scope > 3 files.** Use AskUserQuestion to confirm sequencing if not already specified. The user reads the report once and picks fast.
+65. **One logical fix = one commit. Run pytest after every commit.** Each commit must independently leave tests at-or-above baseline. Never amend / squash / push without explicit user permission.
+66. **Honest "did not hit the target" reports beat fudged success.** When a numerical target is missed, report the bottleneck reason and the path forward. Same for spec deviations — call them out in the commit message or summary; silent deviations are not okay.
+
+### Testing
+67. **Pytest baseline command — always use the creds-unset wrapper:** `CONFLUENT_CLOUD_API_KEY="" CONFLUENT_CLOUD_API_SECRET="" CONFLUENT_API_KEY="" CONFLUENT_API_SECRET="" .venv/bin/pytest -q`. `.env` is loaded at module import time (audit_forwarder.py:222) and the dotenv `override=False` default means setting these to empty BEFORE import neutralises the `.env`/`.secrets` bleed. The exact pass count grows over time; the rule is "match or exceed prior session's clean count, zero failures."
+68. **When a test pins buggy behavior, update the test alongside the fix** and call it out as a "behavioral assertion change," not a "regression."
+
+### Security & Secrets
+69. **`.env` and `.secrets` are gitignored. Never stage them.** Confirm with `git status -s` before every commit. Live tuning of `.env` for a running container is fine; committing it is a hard "no." `.env.example` changes ARE safe to commit.
+
+### Docker & Compose
+70. **`docker compose restart <svc>` does NOT reload env vars.** After editing `.env`, use `docker compose up -d --force-recreate <svc>`.
+71. **Frontend / api containers need rebuild for source changes** — `docker compose build <svc> && docker compose up -d <svc>`. The forwarder container DOES mount `audit_forwarder.py` and `src/` so a `restart` picks up code changes; the `api` and `frontend` containers do not.
+72. **Prefer "graceful absence + log INFO" over forcing optional file mounts in compose v2.** If you bind-mount an absent host file, compose creates an empty directory at the source — worse than no mount. Pattern: handle missing config in code (notifications.yml, actor_mappings.yml).
+
+### Architecture & Code Patterns
+73. **Hot-reload pattern for optional config files:** mtime change detection inside a `threading.Lock`-guarded atomic dict swap. Bad YAML logs WARNING and returns empty config — the handler MUST never raise. Used by `notifications.yml` and `actor_mappings.yml`; reuse for any future customer-edited YAML.
+74. **Construct config dataclasses via `from_env()`, NOT direct constructor**, when the dataclass has `from_env()` defined. The direct constructor silently drops env-only fields. Audit existing call sites — `RateTrackerConfig`, `EnrichmentConfig`, `PersistenceConfig` all have this risk surface.
+75. **Daemon-thread retry budget:** compute `deadline = time.monotonic() + N` once and check before each attempt. Bounds worst-case duration regardless of retry count or HTTP timeout interactions. Used in `notifier._send_with_retry` and `_await_persisted`.
+76. **Single-flight admin async-job pattern:** module-level `threading.Lock` + state dict; POST returns `{"status": "started"}` (or in-flight state if running); GET returns `{status, started_at, completed_at, dry_run, progress, error}`. Worker thread builds its own session via `sessionmaker(bind=engine, ...)` — never reuse the request's session across thread boundaries.
+77. **Dialect-guarded `SET LOCAL statement_timeout`** for every Postgres-targeted backend SELECT that may scan large tables: `if db.get_bind().dialect.name == "postgresql": db.execute(text(f"SET LOCAL statement_timeout = {ms}"))`. Without the dialect guard, SQLite-based tests blow up. Already in event_service, noise_service, filter_options_service, backfill_service.
+
+### Kafka & Threading
+78. **Cross-thread `consume()` + `commit()` requires explicit per-`(topic, partition)` offset tracking** and `consumer.commit(offsets=[TopicPartition(t, p, off+1)])`. librdkafka's auto-offset-store does not propagate reliably across threads, even with `consumer.store_offsets(message=msg)`.
+
+## Current State (May 2026)
+
+This section supersedes the older "Current State (Feb 19, 2025) - v3.0.1" snapshot below. The Feb 2025 snapshot is preserved for history but no longer reflects live architecture.
+
+### Architecture (live)
+
+```
+Confluent Cloud audit topic
+        │
+        ▼
+audit_forwarder.py  ──►  Postgres (audit_events + audit_events_noise)
+   │                          │
+   │ writes Kafka topics      ▼
+   │ raw / normalized /     FastAPI backend (port 8080)
+   │ enriched / signals /     │
+   │ alerts / DLQ              ▼
+   │                       Next.js frontend (port 3000)
+   ▼
+notifier (slack/teams/webhook)
+```
+
+- **Forwarder**: container `auditlens-forwarder`, image `auditlens-forwarder:v1.0.0`, port 8003. Stateless. Two-table noise split (audit_events + audit_events_noise) with consumer-thread short-circuit for `BULK_NOISE_METHODS`.
+- **API (FastAPI)**: container `auditlens-api`, image `auditlens-api:v0.1.0`, port 8080. Routes: `/events`, `/summary`, `/filters`, `/system`, `/health`, `/admin/...`.
+- **Frontend (Next.js)**: container `auditlens-frontend`, image `auditlens-frontend:v0.1.0`, port 3000.
+- **Postgres**: container `auditlens-postgres`, image `postgres:16-alpine`, port 5432. Profile `postgres` or `dev`.
+- **Streamlit dashboard** (legacy, behind `streamlit`/`dev` compose profile): port 8503.
+- VERSION file: `3.1.0`.
+
+### Phase 1–5 changes (May 2026)
+
+| Phase | Theme | Headline |
+| --- | --- | --- |
+| 1 | Performance + noise table | `audit_events_noise` two-table split, consumer-thread `BULK_NOISE_METHODS` short-circuit, `WRITER_BULK_QUEUE_SIZE=200000`, `ENABLE_SQLITE_HOT_CACHE=auto` guard |
+| 2 | Pipeline visibility | `db_writer` block on forwarder `/health`, `pipeline_lag` on API `/system/status`, `PipelineLagBanner` on frontend, last-event line on Events page |
+| 3 | One-command install | `./setup` shell wrapper at repo root, `make setup/start/stop/restart/status`, README quickstart, bootstrap success block |
+| 4 | Configurable notifications | `notifications.yml` (slack/teams/webhook) at repo root with filters/dedup/retry, `AuditLensNotifier` daemon-thread dispatch, legacy SLACK_WEBHOOK gated by `ENABLE_LEGACY_SLACK_WEBHOOK` (auto/true/false) |
+| 5 | Actor display names | Removed `Unknown user/service account/principal` placeholders → raw IDs, `actor_mappings.yml` highest-priority manual overrides, `POST /admin/backfill/actor-display-names` for legacy rows |
+
+### New customer-facing config files
+
+| File | Gitignored? | Purpose |
+| --- | --- | --- |
+| `.env` | Yes | Runtime config; `.env.example` is the template |
+| `.secrets` | Yes | Secrets file; `.secrets.example` is the template |
+| `notifications.yml` | Yes | Slack/Teams/webhook destinations + filters; `notifications.example.yml` template |
+| `actor_mappings.yml` | Yes | Manual principal-ID → display-name overrides; `actor_mappings.example.yml` template |
+
+### Admin endpoints (require admin role)
+
+- `POST /admin/retention/cleanup` — delete events older than `event_retention_days`
+- `POST /admin/backfill/actor-display-names {"dry_run": bool}` — repair legacy `Unknown X` rows; single-flight async
+- `GET  /admin/backfill/actor-display-names/status` — `{status, started_at, completed_at, dry_run, progress, error}`
+
+### Key files (May 2026)
+
+| File | Purpose |
+| --- | --- |
+| `setup` (executable) | Single entry point; preflight + delegates to `scripts/bootstrap_auditlens.py` |
+| `audit_forwarder.py` | Main forwarder; thread-pool consumer, noise short-circuit, notifier wiring |
+| `src/notifications/notifier.py` | `AuditLensNotifier` (slack/teams/webhook, filters, dedup, retry) |
+| `src/product/actor_enrichment.py` | `enrich_actor` chain: `manual_mapping` → IAM cache → audit-event → raw ID; `ActorMappingFile` |
+| `src/product/event_signals.py` | New-vocabulary signal classifier (action_required/attention/informational/noise) |
+| `src/product/event_normalization.py` | `flatten_audit`, `normalize_event`, `BULK_NOISE_METHODS`, `minimal_normalize` |
+| `src/product/db_writer.py` | Async DB writer, two-queue (priority + bulk) split |
+| `backend/app/services/backfill_service.py` | Source/decision/resource/actor backfill jobs + admin state |
+| `backend/app/services/system_service.py` | `pipeline_lag`, forwarder-health proxy cache |
+| `frontend/components/PipelineLagBanner.tsx` | System-page degradation banner |
+
+### To Continue (May 2026)
+
+```bash
+make status                                        # Service health
+make logs                                          # Forwarder logs
+curl -s http://127.0.0.1:8080/system/status | jq   # Pipeline lag + DB freshness
+curl -s http://127.0.0.1:8003/health | jq          # Forwarder health
+docker compose build api && docker compose up -d api        # After /admin endpoint changes
+docker compose build frontend && docker compose up -d frontend  # After UI changes
+
+# Tests (creds-unset wrapper neutralises .env leakage):
+CONFLUENT_CLOUD_API_KEY="" CONFLUENT_CLOUD_API_SECRET="" \
+CONFLUENT_API_KEY="" CONFLUENT_API_SECRET="" \
+.venv/bin/pytest -q
+```
 
 ## Current State (Feb 19, 2025) - v3.0.1
 
