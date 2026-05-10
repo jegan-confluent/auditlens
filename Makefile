@@ -1,7 +1,42 @@
 # Makefile for Audit Forwarder
 # Production-ready build, test, and deployment tasks
 
-.PHONY: help build build-alpine build-distroless test scan clean deploy migrate
+.PHONY: help build build-alpine build-distroless test scan clean deploy migrate setup start stop restart status
+
+##############################################################################
+# Quickstart Lifecycle (Phase 3 — single-command install + service control)
+##############################################################################
+
+setup: ## Run the guided setup wizard (./setup)
+	@./setup
+
+start: ## Start all services via docker compose
+	docker compose up -d
+	@echo ""
+	@echo "✅  AuditLens started."
+	@echo "    UI:     http://localhost:3000"
+	@echo "    API:    http://localhost:8080"
+	@echo "    Health: http://localhost:8003/health"
+	@echo ""
+
+stop: ## Stop all services
+	docker compose down
+
+restart: ## Restart all services
+	docker compose down
+	docker compose up -d
+
+status: ## Show service health (compose ps + API + forwarder)
+	@echo ""
+	@docker compose ps
+	@echo ""
+	@curl -s --max-time 3 http://localhost:8080/health 2>/dev/null \
+	  | python3 -c "import json,sys; d=json.load(sys.stdin); print('API:', d.get('status'), '|', d.get('database_mode'))" \
+	  || echo "API: unreachable"
+	@curl -s --max-time 3 http://localhost:8003/health 2>/dev/null \
+	  | python3 -c "import json,sys; d=json.load(sys.stdin); print('Forwarder:', d.get('status'), '| rate:', round(d.get('processing_rate', 0), 1), 'msg/s | lag:', '{:,}'.format(d.get('consumer_lag', 0)))" \
+	  || echo "Forwarder: unreachable"
+	@echo ""
 
 # Default target
 .DEFAULT_GOAL := help
