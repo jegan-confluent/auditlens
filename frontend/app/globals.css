@@ -252,6 +252,59 @@ a {
   color: var(--text);
 }
 
+.events-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 8px;
+}
+
+.group-toggle-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.group-toggle-label input {
+  margin: 0;
+}
+
+.event-row-group {
+  background: var(--accent-soft, rgba(0, 0, 0, 0.02));
+}
+
+.event-row-group .group-toggle {
+  display: inline-block;
+  width: 14px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.event-row-grouped-child td:first-child {
+  padding-left: 28px;
+}
+
+.actor-badge.group-count {
+  background: #fde68a;
+  color: #92400e;
+}
+
+.identity-clickable {
+  cursor: pointer;
+}
+
+.identity-clickable strong:first-of-type {
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+}
+
+.identity-clickable:hover strong:first-of-type {
+  color: var(--accent);
+}
+
 .quick-filter-row {
   display: flex;
   flex-wrap: wrap;

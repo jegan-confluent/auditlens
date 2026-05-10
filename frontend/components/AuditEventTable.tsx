@@ -1,4 +1,4 @@
-import { Fragment } from "react";
+import { Fragment, useMemo, useState } from "react";
 import type { AuditEvent } from "../lib/types";
 
 const UNKNOWN_PRINCIPAL_LABELS = new Set(["unknown actor", "unknown user", "unknown service account", "unknown principal"]);
@@ -174,6 +174,57 @@ function plainEnglishSummary(event: AuditEvent, resourceText: string): string {
   return phrase;
 }
 
+// Sequential grouping: walk events in display order (newest first) and run
+// adjacent events with the same key into a single group. The 60-min ceiling
+// is measured from the run's first (newest) event so old activity never gets
+// merged into a fresh burst. Result/signal_type intentionally participate in
+// the key so a Success+Failure mix stays as separate rows.
+const GROUP_WINDOW_MS = 60 * 60 * 1000;
+
+type EventGroup = {
+  key: string;
+  events: AuditEvent[];
+};
+
+function buildGroupKey(e: AuditEvent): string {
+  const actor = e.actor_raw_id || e.actor || "";
+  const action = e.action || e.normalized_action || "";
+  const resource = e.resource_name || "";
+  const env = e.environment_id || e.environment_name || "";
+  const signal = e.signal_type || "";
+  const result = e.result || "";
+  return `${actor}|${action}|${resource}|${env}|${signal}|${result}`;
+}
+
+function groupConsecutive(events: AuditEvent[]): EventGroup[] {
+  const groups: EventGroup[] = [];
+  let current: { key: string; firstTs: number; events: AuditEvent[] } | null = null;
+  for (const ev of events) {
+    const k = buildGroupKey(ev);
+    const ts = Date.parse(ev.timestamp);
+    const within = current && current.key === k && !Number.isNaN(ts) && current.firstTs - ts <= GROUP_WINDOW_MS;
+    if (current && within) {
+      current.events.push(ev);
+    } else {
+      if (current) groups.push({ key: `${current.key}|${current.firstTs}`, events: current.events });
+      current = { key: k, firstTs: Number.isNaN(ts) ? 0 : ts, events: [ev] };
+    }
+  }
+  if (current) groups.push({ key: `${current.key}|${current.firstTs}`, events: current.events });
+  return groups;
+}
+
+function formatTimeRange(events: AuditEvent[]): string {
+  if (events.length === 0) return "";
+  const first = new Date(events[0].timestamp);
+  const last = new Date(events[events.length - 1].timestamp);
+  // events arrive newest-first, so events[0] is the latest, events[last] is
+  // the earliest. Display "earliest — latest" to read naturally.
+  const fmt = (d: Date) => d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  if (first.getTime() === last.getTime()) return first.toLocaleString();
+  return `${fmt(last)} — ${fmt(first)}`;
+}
+
 function ExpandedEventRow({ event, detail, loading, error }: {
   event: AuditEvent;
   detail: AuditEvent | null;
@@ -220,14 +271,161 @@ function ExpandedEventRow({ event, detail, loading, error }: {
   );
 }
 
-export default function AuditEventTable({ events, expandedId, expandedDetail, expandedLoading, expandedError, onToggleExpand }: {
-  events: AuditEvent[];
+type RowOptions = {
   expandedId: number | null;
   expandedDetail: AuditEvent | null;
   expandedLoading: boolean;
   expandedError: string | null;
   onToggleExpand: (event: AuditEvent) => void;
+  onActorClick?: (event: AuditEvent) => void;
+  groupedChild?: boolean;
+};
+
+function EventRow({ event, options }: { event: AuditEvent; options: RowOptions }) {
+  const actor = displayActor(event);
+  const reason = decisionReason(event);
+  const triaged = event.triage_status && event.triage_status !== "open";
+  const resourceText = displayResource(event);
+  const plainEng = plainEnglishSummary(event, resourceText);
+  const isExpanded = options.expandedId === event.id;
+  const childClass = options.groupedChild ? " event-row-grouped-child" : "";
+  const onActor = options.onActorClick;
+  return (
+    <Fragment>
+      <tr onClick={() => options.onToggleExpand(event)} className={`event-row signal-${event.signal_type}${isExpanded ? " expanded" : ""}${childClass}`}>
+        <td className="nowrap">{new Date(event.timestamp).toLocaleString()}</td>
+        <td className="decision-cell">
+          <span className={`status ${statusClass(event)}`}>{impactLabel(event)}</span>
+          {triaged ? (
+            <span className="decision-reason">triaged</span>
+          ) : reason ? (
+            <span className="decision-reason" title={event.decision_reason || event.signal_reason || ""}>{reason}</span>
+          ) : null}
+        </td>
+        <td
+          className={`identity-cell${actor.unenriched ? " unenriched" : ""}${onActor ? " identity-clickable" : ""}`}
+          title={actor.secondary || actor.primary}
+          onClick={onActor ? (e) => { e.stopPropagation(); onActor(event); } : undefined}
+        >
+          <strong>
+            {actor.primary}
+            {actor.isServiceAccount ? <span className="actor-badge sa" title="Service account">SA</span> : null}
+          </strong>
+          {actor.secondary ? <span>{actor.secondary}</span> : null}
+        </td>
+        <td className="summary-cell">
+          {plainEng ? (
+            <strong>{plainEng}</strong>
+          ) : (
+            <>
+              <strong>{event.event_title || event.normalized_action}</strong>
+              <span>{displaySummary(event)}</span>
+            </>
+          )}
+        </td>
+        <td className="resource-cell" title={event.resource_scope ? `${resourceText}\n${event.resource_scope}` : resourceText}>{resourceText}</td>
+        <td className="truncate-cell" title={displaySourceIp(event)}>{displaySourceIp(event)}</td>
+      </tr>
+      {isExpanded ? (
+        <ExpandedEventRow
+          event={event}
+          detail={options.expandedDetail}
+          loading={options.expandedLoading}
+          error={options.expandedError}
+        />
+      ) : null}
+    </Fragment>
+  );
+}
+
+function GroupRow({ group, expanded, onToggle, onActorClick }: {
+  group: EventGroup;
+  expanded: boolean;
+  onToggle: () => void;
+  onActorClick?: (event: AuditEvent) => void;
 }) {
+  const head = group.events[0];
+  const actor = displayActor(head);
+  const resourceText = displayResource(head);
+  const plainEng = plainEnglishSummary(head, resourceText);
+  const reason = decisionReason(head);
+  const triaged = head.triage_status && head.triage_status !== "open";
+  const onActor = onActorClick;
+  return (
+    <tr onClick={onToggle} className={`event-row event-row-group signal-${head.signal_type}${expanded ? " expanded" : ""}`}>
+      <td className="nowrap">
+        <span className="group-toggle" aria-label={expanded ? "Collapse group" : "Expand group"}>{expanded ? "▼" : "▶"}</span>
+        {" "}{formatTimeRange(group.events)}
+      </td>
+      <td className="decision-cell">
+        <span className={`status ${statusClass(head)}`}>{impactLabel(head)}</span>
+        {triaged ? (
+          <span className="decision-reason">triaged</span>
+        ) : reason ? (
+          <span className="decision-reason" title={head.decision_reason || head.signal_reason || ""}>{reason}</span>
+        ) : null}
+      </td>
+      <td
+        className={`identity-cell${actor.unenriched ? " unenriched" : ""}${onActor ? " identity-clickable" : ""}`}
+        title={actor.secondary || actor.primary}
+        onClick={onActor ? (e) => { e.stopPropagation(); onActor(head); } : undefined}
+      >
+        <strong>
+          {actor.primary}
+          <span className="actor-badge group-count" title={`${group.events.length} events grouped`}>×{group.events.length}</span>
+          {actor.isServiceAccount ? <span className="actor-badge sa" title="Service account">SA</span> : null}
+        </strong>
+        {actor.secondary ? <span>{actor.secondary}</span> : null}
+      </td>
+      <td className="summary-cell">
+        {plainEng ? (
+          <strong>{plainEng}</strong>
+        ) : (
+          <>
+            <strong>{head.event_title || head.normalized_action}</strong>
+            <span>{displaySummary(head)}</span>
+          </>
+        )}
+      </td>
+      <td className="resource-cell" title={head.resource_scope ? `${resourceText}\n${head.resource_scope}` : resourceText}>{resourceText}</td>
+      <td className="truncate-cell" title={displaySourceIp(head)}>{displaySourceIp(head)}</td>
+    </tr>
+  );
+}
+
+export default function AuditEventTable({
+  events,
+  groupSimilar = false,
+  expandedId,
+  expandedDetail,
+  expandedLoading,
+  expandedError,
+  onToggleExpand,
+  onActorClick,
+}: {
+  events: AuditEvent[];
+  groupSimilar?: boolean;
+  expandedId: number | null;
+  expandedDetail: AuditEvent | null;
+  expandedLoading: boolean;
+  expandedError: string | null;
+  onToggleExpand: (event: AuditEvent) => void;
+  onActorClick?: (event: AuditEvent) => void;
+}) {
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
+  const groups = useMemo(() => (groupSimilar ? groupConsecutive(events) : null), [events, groupSimilar]);
+
+  const toggleGroup = (key: string) => {
+    setExpandedGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
+  const rowOptions: RowOptions = { expandedId, expandedDetail, expandedLoading, expandedError, onToggleExpand, onActorClick };
+
   return (
     <div className="panel table-panel">
       <table className="event-table">
@@ -242,56 +440,30 @@ export default function AuditEventTable({ events, expandedId, expandedDetail, ex
           </tr>
         </thead>
         <tbody>
-          {events.map((event) => {
-            const actor = displayActor(event);
-            const reason = decisionReason(event);
-            const triaged = event.triage_status && event.triage_status !== "open";
-            const resourceText = displayResource(event);
-            const plainEng = plainEnglishSummary(event, resourceText);
-            const isExpanded = expandedId === event.id;
-            return (
-              <Fragment key={event.id}>
-                <tr onClick={() => onToggleExpand(event)} className={`event-row signal-${event.signal_type}${isExpanded ? " expanded" : ""}`}>
-                  <td className="nowrap">{new Date(event.timestamp).toLocaleString()}</td>
-                  <td className="decision-cell">
-                    <span className={`status ${statusClass(event)}`}>{impactLabel(event)}</span>
-                    {triaged ? (
-                      <span className="decision-reason">triaged</span>
-                    ) : reason ? (
-                      <span className="decision-reason" title={event.decision_reason || event.signal_reason || ""}>{reason}</span>
-                    ) : null}
-                  </td>
-                  <td className={`identity-cell${actor.unenriched ? " unenriched" : ""}`} title={actor.secondary || actor.primary}>
-                    <strong>
-                      {actor.primary}
-                      {actor.isServiceAccount ? <span className="actor-badge sa" title="Service account">SA</span> : null}
-                    </strong>
-                    {actor.secondary ? <span>{actor.secondary}</span> : null}
-                  </td>
-                  <td className="summary-cell">
-                    {plainEng ? (
-                      <strong>{plainEng}</strong>
-                    ) : (
-                      <>
-                        <strong>{event.event_title || event.normalized_action}</strong>
-                        <span>{displaySummary(event)}</span>
-                      </>
-                    )}
-                  </td>
-                  <td className="resource-cell" title={event.resource_scope ? `${resourceText}\n${event.resource_scope}` : resourceText}>{resourceText}</td>
-                  <td className="truncate-cell" title={displaySourceIp(event)}>{displaySourceIp(event)}</td>
-                </tr>
-                {isExpanded ? (
-                  <ExpandedEventRow
-                    event={event}
-                    detail={expandedDetail}
-                    loading={expandedLoading}
-                    error={expandedError}
-                  />
-                ) : null}
-              </Fragment>
-            );
-          })}
+          {groups
+            ? groups.map((group) => {
+                if (group.events.length === 1) {
+                  const ev = group.events[0];
+                  return <EventRow key={ev.id} event={ev} options={rowOptions} />;
+                }
+                const isExpanded = expandedGroups.has(group.key);
+                return (
+                  <Fragment key={group.key}>
+                    <GroupRow
+                      group={group}
+                      expanded={isExpanded}
+                      onToggle={() => toggleGroup(group.key)}
+                      onActorClick={onActorClick}
+                    />
+                    {isExpanded
+                      ? group.events.map((ev) => (
+                          <EventRow key={ev.id} event={ev} options={{ ...rowOptions, groupedChild: true }} />
+                        ))
+                      : null}
+                  </Fragment>
+                );
+              })
+            : events.map((event) => <EventRow key={event.id} event={event} options={rowOptions} />)}
         </tbody>
       </table>
     </div>

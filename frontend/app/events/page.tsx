@@ -125,6 +125,10 @@ function EventsPageInner() {
   const [filters, setFilters] = useState<EventFilters>(initialFilters);
   const [options, setOptions] = useState<FilterOptions | null>(null);
   const [data, setData] = useState<EventListResponse | null>(null);
+  // Session-only toggle: collapse repeated (actor, action, resource) runs into
+  // one row. Default OFF preserves the existing list. Not URL-persisted by
+  // design — opening a deep link still shows the full feed.
+  const [groupSimilar, setGroupSimilar] = useState(false);
   const [summary, setSummary] = useState<SummaryResponse | null>(null);
   const [summaryLoading, setSummaryLoading] = useState(false);
   const [summaryError, setSummaryError] = useState<string | null>(null);
@@ -271,9 +275,21 @@ function EventsPageInner() {
           ? "Decision mode is active. Routine informational activity is hidden."
           : "Full audit trail mode is active. Routine read/list activity is included."}
       </p>
+      <div className="events-toolbar">
+        <label className="group-toggle-label">
+          <input
+            type="checkbox"
+            checked={groupSimilar}
+            onChange={(e) => setGroupSimilar(e.target.checked)}
+            aria-label="Group similar events"
+          />
+          {" "}Group similar
+        </label>
+      </div>
       {!data ? <LoadingState /> : renderedEvents.length ? (
         <AuditEventTable
           events={renderedEvents}
+          groupSimilar={groupSimilar}
           expandedId={expandedId}
           expandedDetail={expandedDetail}
           expandedLoading={expandedLoading}
