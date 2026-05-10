@@ -1,14 +1,17 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { getForwarderHealth, isAbortError } from "../lib/api";
-import type { ForwarderHealth } from "../lib/types";
+import { getSystemStatus, isAbortError } from "../lib/api";
+import type { SystemStatus } from "../lib/types";
 
 type Tone = "loading" | "connected" | "degraded" | "critical" | "down";
 
 const POLL_INTERVAL_MS = 30_000;
-const HIGH_LAG_THRESHOLD = 100_000;
-const SLOW_PROCESSING_THRESHOLD = 10;
+
+type FetchState =
+  | { kind: "loading" }
+  | { kind: "ok"; status: SystemStatus }
+  | { kind: "error" };
 
 function compactNumber(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
@@ -16,39 +19,28 @@ function compactNumber(n: number): string {
   return String(n);
 }
 
-function classify(health: ForwarderHealth | null): { tone: Tone; label: string } {
-  if (health === null) return { tone: "loading", label: "Connecting…" };
+// The backend computes pipeline_status from kafka lag, db freshness, and
+// forwarder write time. Mirror that decision in the header rather than
+// re-deriving from raw lag/processing_rate, which produced false "Degraded"
+// readings on idle systems where processing_rate=0 < SLOW threshold even
+// though there was nothing to process.
+function classify(state: FetchState): { tone: Tone; label: string } {
+  if (state.kind === "loading") return { tone: "loading", label: "Connecting…" };
+  if (state.kind === "error") return { tone: "down", label: "Down" };
 
-  const errorOnFetch = !!health.error;
-  const consumerState = health.observability?.consumer_runtime?.consumer_state;
-  const apiAlive = !errorOnFetch && health.status === "healthy";
+  const status = state.status;
+  const pipeline = status.pipeline_status ?? status.pipeline_lag?.status ?? "unknown";
+  const lag = status.pipeline_lag?.kafka_consumer_lag_messages ?? status.consumer_lag ?? 0;
+  const lagSuffix = lag > 0 ? ` · ${compactNumber(lag)} lag` : "";
 
-  // Down: API call to forwarder failed entirely OR consumer can't connect.
-  if (errorOnFetch || consumerState === "down" || consumerState === "disconnected") {
-    return { tone: "down", label: "Down" };
-  }
-
-  const lag = typeof health.consumer_lag === "number" ? health.consumer_lag : 0;
-  const rate = typeof health.processing_rate === "number" ? health.processing_rate : 0;
-  const storageMode = health.observability?.persistence_storage?.storage_mode;
-  const dbWriterState = health.observability?.db_writer?.db_writer_state;
-
-  const storageCritical = storageMode === "critical" || storageMode === "emergency";
-  const dbWriterDown = health.observability?.db_writer?.enabled === true && dbWriterState !== "connected";
-
-  if (storageCritical || dbWriterDown || !apiAlive) {
-    return { tone: "critical", label: lag > 0 ? `Critical · ${compactNumber(lag)} lag` : "Critical" };
-  }
-
-  if (lag > HIGH_LAG_THRESHOLD || rate < SLOW_PROCESSING_THRESHOLD || storageMode === "warning") {
-    return { tone: "degraded", label: lag > HIGH_LAG_THRESHOLD ? `Degraded · ${compactNumber(lag)} lag` : "Degraded" };
-  }
-
+  if (pipeline === "stalled") return { tone: "critical", label: `Stalled${lagSuffix}` };
+  if (pipeline === "degraded") return { tone: "degraded", label: `Degraded${lagSuffix}` };
+  if (pipeline === "unknown") return { tone: "down", label: "Unknown" };
   return { tone: "connected", label: "Connected" };
 }
 
 export default function HeaderStatus() {
-  const [health, setHealth] = useState<ForwarderHealth | null>(null);
+  const [state, setState] = useState<FetchState>({ kind: "loading" });
 
   useEffect(() => {
     let cancelled = false;
@@ -57,11 +49,11 @@ export default function HeaderStatus() {
     async function tick() {
       const controller = new AbortController();
       try {
-        const next = await getForwarderHealth(controller.signal);
-        if (!cancelled) setHealth(next);
+        const next = await getSystemStatus(controller.signal);
+        if (!cancelled) setState({ kind: "ok", status: next });
       } catch (err) {
         if (isAbortError(err)) return;
-        if (!cancelled) setHealth({ status: "unknown", error: String(err) });
+        if (!cancelled) setState({ kind: "error" });
       } finally {
         if (!cancelled) timer = setTimeout(tick, POLL_INTERVAL_MS);
       }
@@ -74,6 +66,6 @@ export default function HeaderStatus() {
     };
   }, []);
 
-  const { tone, label } = classify(health);
+  const { tone, label } = classify(state);
   return <span className={`header-status ${tone}`}>{label}</span>;
 }
