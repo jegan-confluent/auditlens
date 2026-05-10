@@ -142,6 +142,9 @@ temp/
 frontend/.next/
 frontend/node_modules/
 node_modules/
+# TypeScript incremental compile cache — regenerated on build
+frontend/tsconfig.tsbuildinfo
+*.tsbuildinfo
 
 # Local runtime data and databases
 # ============================================================================
