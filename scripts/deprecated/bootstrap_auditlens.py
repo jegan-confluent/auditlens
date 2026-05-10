@@ -650,8 +650,6 @@ def print_final_summary(
     print(f"- Schema Registry validated: {schema_registry_status}")
     print(f"- persistence validated: {'yes' if persistence_validated else 'no'}")
     print(f"- services started: {'yes' if services_started else 'no'}")
-    if services_started and inputs.deployment_mode == "docker":
-        print(f"Open AuditLens: http://localhost:{inputs.landing_port}")
     print(f"- dashboard URL: http://localhost:{inputs.dashboard_port}")
     print(f"- metrics URL: http://localhost:{inputs.metrics_port}/metrics")
     print(f"- API health URL: http://localhost:{inputs.metrics_port}/api/v1/health")
@@ -666,6 +664,23 @@ def print_final_summary(
         print("- confirm the source topic still has retained data inside the default seven-day window")
         print("- check firewall or private networking paths for source and destination Kafka")
         print(f"- inspect forwarder logs: docker compose logs -f auditlens-forwarder")
+        return
+
+    if services_started and inputs.deployment_mode == "docker":
+        print("")
+        print("╔══════════════════════════════════════════════╗")
+        print("║                                              ║")
+        print("║   ✅  AuditLens is ready.                   ║")
+        print("║                                              ║")
+        print("║   Open http://localhost:3000                 ║")
+        print("║                                              ║")
+        print("║   Useful commands:                           ║")
+        print("║     make status   — check pipeline health   ║")
+        print("║     make logs     — follow forwarder logs   ║")
+        print("║     make stop     — stop all services       ║")
+        print("║                                              ║")
+        print("╚══════════════════════════════════════════════╝")
+        print("")
 
 
 def main() -> int:
