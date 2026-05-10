@@ -72,6 +72,8 @@ from src.product import (
 )
 from src.product.db_writer import AuditEventDbWriter
 from src.product.event_normalization import BULK_NOISE_METHODS, parse_event_timestamp
+from src.product.event_intelligence import decision_snapshot
+from src.notifications.notifier import AuditLensNotifier
 
 # ──────────── graceful shutdown handler ────────────
 _shutdown_requested = False
@@ -452,6 +454,13 @@ BUILTIN_ALERT_METHODS = {
 
 # Enable built-in alerts if SLACK_WEBHOOK is configured
 ENABLE_BUILTIN_ALERTS = os.getenv("SLACK_WEBHOOK", "") != ""
+
+# Gate the legacy SLACK_WEBHOOK firing path now that the configurable
+# notifications layer (notifications.yml) is the supported way forward.
+#   auto   → disabled when notifications.yml provides destinations
+#   true   → always enable (backward compatibility)
+#   false  → always disable (notifier-only)
+LEGACY_WEBHOOK_ENABLED = os.getenv("ENABLE_LEGACY_SLACK_WEBHOOK", "auto").lower()
 
 # ──────────── logging ────────────
 logging.basicConfig(
@@ -3374,6 +3383,28 @@ def main():
     else:
         logger.info("Webhook alerting disabled (no configuration)")
 
+    # Initialize the configurable notification layer (slack/teams/webhook).
+    # Failure here must not crash the forwarder — the legacy SLACK_WEBHOOK
+    # path stays available via ENABLE_LEGACY_SLACK_WEBHOOK=true.
+    notifier: AuditLensNotifier | None = None
+    try:
+        notifier = AuditLensNotifier(
+            config_path=os.getenv("NOTIFICATIONS_CONFIG", "notifications.yml")
+        )
+        if notifier.has_destinations():
+            enabled_count = sum(1 for d in notifier._destinations if d.enabled)
+            logger.info(
+                "Notification layer: %d destinations loaded from notifications.yml",
+                enabled_count,
+            )
+        else:
+            logger.info("Notification layer: disabled (no notifications.yml found)")
+    except Exception as exc:
+        logger.warning(
+            "Notification layer init failed (%s) — continuing without it", exc
+        )
+        notifier = None
+
     # Create clients. Hook the librdkafka stats callback so per-partition
     # consumer_lag flows in via stats.json, not synchronous watermark polls.
     consumer_conf_with_stats = dict(consumer_conf)
@@ -3930,8 +3961,33 @@ def main():
                                 persist_safely("anomaly_alert", product_store.persist_alert, anomaly_alert)
                                 metrics.record_persistence_success(product_store.health())
 
-                    # Send alert for built-in alert rules or CRITICAL events
-                    if webhook_sender.enabled and ENABLE_BUILTIN_ALERTS:
+                    # Configurable notification layer (slack/teams/webhook)
+                    # — runs before the legacy webhook so dedup keys are
+                    # owned by the notifier. Skip noise events and skip
+                    # entirely if no destinations are configured.
+                    if notifier is not None and notifier.has_destinations():
+                        try:
+                            notify_payload = {
+                                **enriched_event,
+                                **decision_snapshot(enriched_event),
+                            }
+                            if notify_payload.get("signal_type") != "noise":
+                                notifier.notify(notify_payload)
+                        except Exception as exc:
+                            logger.warning("notifier dispatch failed: %s", exc)
+
+                    # Legacy SLACK_WEBHOOK path. Auto-disabled once the
+                    # notifier owns destinations; flip ENABLE_LEGACY_SLACK_WEBHOOK
+                    # to true to force-fire, false to fully suppress.
+                    fire_legacy = False
+                    if LEGACY_WEBHOOK_ENABLED == "true":
+                        fire_legacy = True
+                    elif LEGACY_WEBHOOK_ENABLED == "auto":
+                        fire_legacy = not (
+                            notifier is not None and notifier.has_destinations()
+                        )
+
+                    if fire_legacy and webhook_sender.enabled and ENABLE_BUILTIN_ALERTS:
                         method_name = enriched_event.get('methodName', '')
 
                         # Check if this method triggers a built-in alert
