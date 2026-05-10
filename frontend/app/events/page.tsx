@@ -2,6 +2,7 @@
 
 import { Suspense, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
+import ActorActivityPanel from "../../components/ActorActivityPanel";
 import AuditEventTable from "../../components/AuditEventTable";
 import DecisionBanner from "../../components/DecisionBanner";
 import EmptyState from "../../components/EmptyState";
@@ -129,6 +130,12 @@ function EventsPageInner() {
   // one row. Default OFF preserves the existing list. Not URL-persisted by
   // design — opening a deep link still shows the full feed.
   const [groupSimilar, setGroupSimilar] = useState(false);
+
+  // Actor panel: holds the actor id whose 24h activity panel is open.
+  // Seed event lets the panel render the actor's badge / display name
+  // immediately while the /summary + /events round-trips complete.
+  const [actorPanelId, setActorPanelId] = useState<string | null>(null);
+  const [actorPanelSeed, setActorPanelSeed] = useState<AuditEvent | null>(null);
   const [summary, setSummary] = useState<SummaryResponse | null>(null);
   const [summaryLoading, setSummaryLoading] = useState(false);
   const [summaryError, setSummaryError] = useState<string | null>(null);
@@ -247,6 +254,20 @@ function EventsPageInner() {
     setExpandedId(null);
     setExpandedDetail(null);
   };
+  const onActorClick = (event: AuditEvent) => {
+    const id = (event.actor_raw_id || event.actor || "").trim();
+    if (!id) return;
+    setActorPanelSeed(event);
+    setActorPanelId(id);
+  };
+  const closeActorPanel = () => {
+    setActorPanelId(null);
+    setActorPanelSeed(null);
+  };
+  const applyActorFilter = (actorId: string) => {
+    closeActorPanel();
+    updateFilters({ ...filters, actor: actorId });
+  };
   const resetFilters = () => updateFilters(defaultFilters);
   const showAllActivity = () => updateFilters(allActivityFilters);
   const applyFlowFilters = (patch: Partial<EventFilters>) => updateFilters({ ...filters, ...patch });
@@ -295,6 +316,7 @@ function EventsPageInner() {
           expandedLoading={expandedLoading}
           expandedError={expandedError}
           onToggleExpand={onToggleExpand}
+          onActorClick={onActorClick}
         />
       ) : (
         <EmptyState
@@ -315,6 +337,12 @@ function EventsPageInner() {
           <button disabled={offset + data.limit >= data.total} onClick={() => setOffset(offset + data.limit)}>Next</button>
         </div>
       ) : null}
+      <ActorActivityPanel
+        actorId={actorPanelId}
+        seedEvent={actorPanelSeed}
+        onClose={closeActorPanel}
+        onApplyActorFilter={applyActorFilter}
+      />
     </main>
   );
 }
