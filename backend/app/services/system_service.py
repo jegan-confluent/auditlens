@@ -20,7 +20,7 @@ logger = logging.getLogger("auditlens.backend.system")
 # Short enough to track real outages quickly; long enough that bursty
 # /ready probes from a kubelet do not stampede the forwarder.
 FORWARDER_HEALTH_TTL_SECONDS = 5.0
-FORWARDER_HEALTH_TIMEOUT_SECONDS = 0.5
+FORWARDER_HEALTH_TIMEOUT_SECONDS = 3.0
 
 
 def _unknown_status(reason: str) -> dict[str, Any]:
