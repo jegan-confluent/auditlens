@@ -17,7 +17,7 @@ type Tone = "ok" | "warning" | "critical" | "unknown";
 
 function formatNumber(n: number | null | undefined): string {
   if (typeof n !== "number") return "—";
-  return n.toLocaleString();
+  return n.toLocaleString("en-US");
 }
 
 function formatBytes(n: number | null | undefined): string {
@@ -295,7 +295,7 @@ function QualityRow({ ok, info, label, value }: { ok: boolean; info?: boolean; l
     <li className={`system-quality-row ${ok ? "ok" : "warning"}`}>
       <span className="system-quality-icon">{icon}</span>
       <span className="system-quality-label">{label}</span>
-      <span className="system-quality-value">{value.toLocaleString()}</span>
+      <span className="system-quality-value">{value.toLocaleString("en-US")}</span>
     </li>
   );
 }
