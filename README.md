@@ -25,10 +25,38 @@ Default Docker Compose does not start Prometheus, Grafana, Loki, or Promtail.
 - Kafka/Confluent audit topic credentials for real ingestion
 - Node.js and Python only if running pieces outside Docker
 
-## Fresh Clone Setup
+## Quick Start
+
+**Prerequisites:** Python 3.11+, Docker Desktop
 
 ```bash
-cp .env.example .env
+git clone <repo>
+cd AuditLens
+./setup
+```
+
+That's it. The setup wizard will:
+
+- Validate your Confluent Cloud credentials
+- Validate your audit log topic access
+- Generate your configuration
+- Start all services
+
+When complete:
+
+```text
+✅  AuditLens is ready.
+    Open http://localhost:3000
+```
+
+**Other commands:**
+
+```bash
+make start      # start services
+make stop       # stop services
+make status     # check health
+make logs       # follow forwarder logs
+make help       # all commands
 ```
 
 Never commit `.env`, `.secrets`, API keys, tokens, or local database files.
