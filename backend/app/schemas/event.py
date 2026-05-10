@@ -92,3 +92,29 @@ class AuditEventCreate(BaseModel):
     source_ip: str | None = None
     summary: str | None = None
     raw_payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class AuditNoiseListOut(BaseModel):
+    """Item schema for /events?show_noise=true.
+
+    Mirrors the physical columns of the audit_events_noise table
+    (migration 0007). Decision fields like signal_type are constants for
+    every noise row (`signal_type='noise'`, `signal_reason='bulk_noise'`)
+    and are emitted unconditionally so clients can render a uniform list.
+    """
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    timestamp: datetime
+    actor: str | None = None
+    action: str | None = None
+    result: str | None = None
+    resource_name: str | None = None
+    source_ip: str | None = None
+    environment_id: str | None = None
+    cluster_id: str | None = None
+    is_denied: bool = False
+    # Constants — see class docstring.
+    signal_type: str = "noise"
+    signal_reason: str = "bulk_noise"
+    source: str = "noise_table"

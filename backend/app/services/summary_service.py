@@ -215,6 +215,8 @@ def get_summary(
     hide_noise: bool = False,
     impact_type: str | None = None,
     change_type: str | None = None,
+    include_noise: bool = False,
+    noise_retention_days: int = 7,
     **filters: Any,
 ) -> dict:
     is_postgres = db.get_bind().dialect.name == "postgresql"
@@ -344,7 +346,17 @@ def get_summary(
         out_by_resource_type = _canonical_resource_counts(_group_counts(db, AuditEvent.resource_type, conditions))
         out_by_result = _group_counts(db, AuditEvent.result, conditions)
 
+    # Optional noise summary block (`?include_noise=true`). Best-effort:
+    # returns None on missing table or query failure rather than 500-ing
+    # the whole summary route.
+    noise_summary = None
+    if include_noise:
+        from backend.app.services.noise_service import get_noise_summary
+
+        noise_summary = get_noise_summary(db, retention_days=noise_retention_days)
+
     return {
+        "noise_summary": noise_summary,
         "total_events": total,
         "scanned_events": len(scanned_events),
         "failures": failures,

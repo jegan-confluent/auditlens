@@ -1,8 +1,9 @@
-from typing import Any
+from datetime import datetime
+from typing import Any, Literal
 
 from pydantic import BaseModel
 
-from backend.app.schemas.event import AuditEventListOut
+from backend.app.schemas.event import AuditEventListOut, AuditNoiseListOut
 
 
 class HealthResponse(BaseModel):
@@ -29,6 +30,18 @@ class FilterOptionsResponse(BaseModel):
     action_categories: list[str]
     results: list[str]
     actors: list[str]
+
+
+class NoiseSummaryEntry(BaseModel):
+    action: str
+    count: int
+
+
+class NoiseSummary(BaseModel):
+    total_noise_events: int
+    top_noise_methods: list[NoiseSummaryEntry]
+    noise_table_rows: int
+    noise_retention_days: int
 
 
 class SummaryResponse(BaseModel):
@@ -59,6 +72,44 @@ class SummaryResponse(BaseModel):
     by_action_category: dict[str, int]
     by_resource_type: dict[str, int]
     by_result: dict[str, int]
+    # Populated only when ?include_noise=true is set on the request. None
+    # when the noise table is unavailable / query failed.
+    noise_summary: NoiseSummary | None = None
+
+
+class MethodDistributionEntry(BaseModel):
+    """Per-method aggregate row for /summary/methods.
+
+    ``table`` is `"signal"` for rows derived from audit_events and
+    `"noise"` for rows derived from audit_events_noise. When the same
+    action appears in both tables the entry shows the combined count and
+    the higher-priority signal_type ("noise" only if the action is
+    exclusively noise).
+    """
+    action: str
+    count: int
+    signal_type: str
+    table: Literal["signal", "noise"]
+    last_seen: datetime | None = None
+
+
+class MethodDistributionResponse(BaseModel):
+    methods: list[MethodDistributionEntry]
+    total_signal_events: int
+    total_noise_events: int
+    generated_at: datetime
+
+
+class EventListNoiseResponse(BaseModel):
+    """Response shape for /events?show_noise=true. The noise table has 9
+    physical columns — much fewer than audit_events — so we use a
+    dedicated item schema instead of overloading AuditEventListOut and
+    inventing default values for fields that don't exist on noise rows."""
+    items: list[AuditNoiseListOut]
+    limit: int
+    offset: int
+    total: int
+    source: Literal["noise_table"] = "noise_table"
 
 
 class SystemStatusResponse(BaseModel):

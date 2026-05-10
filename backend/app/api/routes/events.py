@@ -1,13 +1,18 @@
-from typing import Any
+from typing import Any, Union
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from backend.app.db.database import get_db
-from backend.app.schemas.event import AuditEventDetailOut
-from backend.app.schemas.response import EventListResponse
+from backend.app.schemas.event import AuditEventDetailOut, AuditNoiseListOut
+from backend.app.schemas.response import EventListNoiseResponse, EventListResponse
 from backend.app.services.event_service import get_event, list_deletions, list_events_result, list_failures
+from backend.app.services.noise_service import (
+    NOISE_EVENTS_MAX_LIMIT,
+    UNSUPPORTED_NOISE_FILTERS,
+    list_noise_events,
+)
 from backend.app.services.triage_service import upsert_triage
 from src.product.auth import AuthConfig, Authenticator, Role
 
@@ -48,7 +53,10 @@ class TriageUpdate(BaseModel):
     triage_actor: str | None = None
 
 
-@router.get("/events", response_model=EventListResponse)
+@router.get(
+    "/events",
+    response_model=Union[EventListResponse, EventListNoiseResponse],
+)
 @limiter.limit("20/minute")
 def events(
     request: Request,
@@ -60,6 +68,7 @@ def events(
     environment_name: str | None = None,
     action_category: str | None = None,
     actor: str | None = None,
+    action: str | None = None,
     result: str | None = None,
     is_denied: bool | None = None,
     signal_type: str | None = None,
@@ -70,8 +79,74 @@ def events(
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     cursor: str | None = Query(default=None, description="Opaque keyset cursor; pass back the next_cursor from the previous response"),
+    show_noise: bool = Query(
+        default=False,
+        description="Read from audit_events_noise instead of audit_events. Restricted filters: only time_window/actor/action/limit/offset are honoured.",
+    ),
     db: Session = Depends(get_db),
-) -> EventListResponse:
+):
+    if show_noise:
+        # Per the noise-table contract, only a small subset of filters
+        # has a meaningful column on audit_events_noise. Reject the rest
+        # at 400 so callers don't silently get an unfiltered result.
+        rejected = []
+        if signal_type:
+            rejected.append("signal_type")
+        if impact_type:
+            rejected.append("impact_type")
+        if change_type:
+            rejected.append("change_type")
+        if mode and mode != "decision":
+            # `mode` is supplied with a default so we only reject when the
+            # caller actively switched it; the default is harmless because
+            # it doesn't apply to noise rows at all.
+            rejected.append("mode")
+        if resource_type:
+            rejected.append("resource_type")
+        if resource:
+            rejected.append("resource")
+        if is_denied is not None:
+            rejected.append("is_denied")
+        if result:
+            rejected.append("result")
+        if cluster_name:
+            rejected.append("cluster_name")
+        if environment_name:
+            rejected.append("environment_name")
+        if action_category:
+            rejected.append("action_category")
+        if hide_noise:
+            rejected.append("hide_noise")
+        if cursor:
+            rejected.append("cursor")
+        if rejected:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Filter {rejected[0]} is not supported for noise events. "
+                    f"Supported filters with show_noise=true: time_window, actor, action, limit, offset. "
+                    f"Rejected: {', '.join(sorted(set(rejected)))}."
+                ),
+            )
+        capped_limit = min(int(limit), NOISE_EVENTS_MAX_LIMIT)
+        try:
+            noise_result = list_noise_events(
+                db,
+                time_window=time_window,
+                actor=actor,
+                action=action,
+                limit=capped_limit,
+                offset=offset,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return EventListNoiseResponse(
+            items=[AuditNoiseListOut.model_validate(row) for row in noise_result.items],
+            limit=capped_limit,
+            offset=offset,
+            total=noise_result.total,
+        )
+
     try:
         result_set = list_events_result(
             db,

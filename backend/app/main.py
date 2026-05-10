@@ -98,6 +98,24 @@ def create_app() -> FastAPI:
                 AuthConfig.from_env()
             except Exception as exc:
                 logger.warning("API auth is enabled but no valid tokens are configured; continuing startup: %s", exc)
+        # Probe for the noise table once at startup. Absence is non-fatal:
+        # /summary/methods, /summary?include_noise, and /events?show_noise
+        # all degrade gracefully — but operators benefit from a clear
+        # signal that an older deployment is running pre-migration-0007.
+        try:
+            from sqlalchemy import inspect
+            from backend.app.db.database import engine
+
+            if "audit_events_noise" not in set(inspect(engine).get_table_names()):
+                logger.warning(
+                    "audit_events_noise table not present — /summary/methods and "
+                    "/events?show_noise=true will return empty results until Alembic "
+                    "migration 0007_noise_table is applied"
+                )
+            else:
+                logger.info("audit_events_noise table present — noise query path active")
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("audit_events_noise existence check failed: %s", exc)
 
     app.include_router(health.router)
     app.include_router(readiness.router)
