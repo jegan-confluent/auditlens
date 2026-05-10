@@ -288,6 +288,29 @@ DB_WRITE_BACKOFF_MAX_SECONDS = float(os.getenv("DB_WRITE_BACKOFF_MAX_SECONDS", "
 DB_WRITE_FLUSH_INTERVAL_SECONDS = float(os.getenv("DB_WRITE_FLUSH_INTERVAL_SECONDS", "2.0"))
 EVENT_RETENTION_DAYS = int(os.getenv("EVENT_RETENTION_DAYS", "7"))
 DB_RETENTION_CLEANUP_INTERVAL_SECONDS = float(os.getenv("DB_RETENTION_CLEANUP_INTERVAL_SECONDS", "3600.0"))
+
+# Postgres-backed deployments are the durable store and don't need the
+# SQLite "hot cache" (the legacy SQLiteProductStore). Detect product mode
+# off the DATABASE_URL prefix — matches backend/app/core/config.py's
+# database_mode logic so the two halves of the system agree.
+PRODUCT_MODE = DATABASE_URL.startswith("postgresql")
+# Override knob for the SQLite hot cache. `auto` disables in product
+# mode; `true` forces on (debug only); anything else forces off. Keeping
+# the SQLiteProductStore class compiled so demo mode keeps working — this
+# is a runtime guard, not a removal.
+ENABLE_SQLITE_HOT_CACHE = os.getenv("ENABLE_SQLITE_HOT_CACHE", "auto").strip().lower()
+
+
+def _sqlite_hot_cache_enabled() -> bool:
+    """Decide whether the legacy SQLite hot cache should run."""
+    if ENABLE_SQLITE_HOT_CACHE in {"true", "1", "yes", "on"}:
+        return True
+    if ENABLE_SQLITE_HOT_CACHE in {"false", "0", "no", "off"}:
+        return False
+    # `auto` (default) or any unrecognised value: lean on PRODUCT_MODE.
+    return not PRODUCT_MODE
+
+
 # Short-circuit bulk-noise events (mds.Authorize, kafka.Fetch, kafka.Produce, …)
 # at the consume point — they go straight to the bulk writer, bypassing
 # flatten_audit, the seven canonical Kafka produces, anomaly tracking, and
@@ -2812,6 +2835,21 @@ def initialize_product_store_or_exit() -> None:
         return
     if product_store is not None:
         return
+    if not _sqlite_hot_cache_enabled():
+        # Postgres-backed deployments don't need the legacy SQLite hot
+        # cache — Postgres IS the durable store. Leave product_store as
+        # None; every call site already guards on `if product_store: …`,
+        # so persistence calls become no-ops without raising. The
+        # SQLiteProductStore class stays compiled for demo mode.
+        if PRODUCT_MODE:
+            logger.info("Storage mode: PRODUCT (Postgres only — SQLite hot cache disabled)")
+        else:
+            logger.info(
+                "Storage mode: SQLite hot cache: DISABLED "
+                "(ENABLE_SQLITE_HOT_CACHE=%s)",
+                ENABLE_SQLITE_HOT_CACHE,
+            )
+        return
     try:
         # Heal the SQLite hot cache before opening the long-lived
         # connection. Either reclaims accumulated freelist pages via
@@ -2825,6 +2863,16 @@ def initialize_product_store_or_exit() -> None:
         product_store.enforce_storage_bounds(trigger="startup")
         metrics.record_persistence_success(product_store.health())
         metrics.set_restart_count(product_store.health().get("startup_count", 0))
+        if PRODUCT_MODE:
+            # Caller asked for hot cache + Postgres concurrently
+            # (ENABLE_SQLITE_HOT_CACHE=true). Surface the choice clearly so
+            # operators know they're paying for two stores.
+            logger.info(
+                "Storage mode: PRODUCT + SQLite hot cache (ENABLE_SQLITE_HOT_CACHE=true) — "
+                "dual-write active"
+            )
+        else:
+            logger.info("Storage mode: DEMO (SQLite hot cache active)")
         logger.info("Persistence initialized: backend=%s path=%s",
                     PERSISTENCE_CONFIG.backend, PERSISTENCE_CONFIG.db_path)
     except Exception as exc:
