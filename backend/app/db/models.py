@@ -369,6 +369,10 @@ class AuditEvent(Base):
     def recommended_action(self, value: str | None) -> None:
         self._recommended_action = value
 
+    @property
+    def suppressed(self) -> bool:
+        return getattr(self, "_suppressed", False)
+
     def _actor_enrichment(self) -> dict[str, str | None]:
         cached = getattr(self, "_actor_enrichment_cache", None)
         if cached is None:
@@ -498,6 +502,36 @@ class AuditEventTriage(Base):
     )
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AuditEventPattern(Base):
+    __tablename__ = "audit_event_patterns"
+    __table_args__ = (
+        UniqueConstraint("pattern_key", name="uq_audit_event_patterns_pattern_key"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    pattern_key: Mapped[str] = mapped_column(String(512), nullable=False)
+    actor: Mapped[str] = mapped_column(Text, nullable=False)
+    action: Mapped[str] = mapped_column(Text, nullable=False)
+    resource_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    occurrence_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    window_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
+    suppressed_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    suppressed_by: Mapped[str | None] = mapped_column(Text, nullable=True)
+    suppression_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
 
 
 class ResourceCatalog(Base):

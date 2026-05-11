@@ -63,6 +63,7 @@ class AuditEventListOut(BaseModel):
     triage_actor: str | None = None
     triage_timestamp: str | None = None
     triage_note: str | None = None
+    suppressed: bool = False
 
     @field_validator("resource_type", mode="before")
     @classmethod
