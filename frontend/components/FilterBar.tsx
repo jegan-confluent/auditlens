@@ -102,8 +102,9 @@ export default function FilterBar({ filters, options, onChange, onReset }: {
           ))}
         </select>
         <select value={filters.time_window} onChange={(event) => update("time_window", event.target.value)} aria-label="Time window">
-          <option value="1h">Last hour</option>
-          <option value="6h">Last 6 hours</option>
+          <option value="30m">Last 30 minutes</option>
+          <option value="2h">Last 2 hours</option>
+          <option value="4h">Last 4 hours</option>
           <option value="12h">Last 12 hours</option>
           <option value="24h">Last 24 hours</option>
           <option value="7d">Last 7 days</option>

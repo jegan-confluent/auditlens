@@ -23,12 +23,19 @@ function actorTypeLabel(event: AuditEvent | null): string {
   return "User";
 }
 
+function looksLikeJson(v: string): boolean {
+  return v.startsWith("{") || v.startsWith("[");
+}
+
 function actorPrimary(event: AuditEvent | null, fallback: string): string {
+  // actorId itself may be a JSON blob (Confluent externalAccount) — catch it
+  // before doing any event inspection so the heading never shows raw JSON.
+  if (looksLikeJson(fallback)) return "Confluent (platform)";
   if (!event) return fallback;
   const display = (event.actor_display_name || "").trim();
   const raw = (event.actor_raw_id || event.subject || event.actor || "").trim();
   const email = (event.actor_email || "").trim();
-  if (display.startsWith("{") || display.startsWith("[")) return "Confluent (platform)";
+  if (looksLikeJson(display) || looksLikeJson(raw)) return "Confluent (platform)";
   if (display && display !== raw && !UNKNOWN_PRINCIPAL_LABELS.has(display.toLowerCase())) return display;
   if (email) return email;
   return raw || fallback;
@@ -166,7 +173,7 @@ export default function ActorActivityPanel({ actorId, seedEvent, onClose, onAppl
             <h2>
               {primary} <span className={`actor-badge ${typeLabel === "Service Account" ? "sa" : ""}`}>{typeLabel}</span>
             </h2>
-            {raw && raw !== primary ? <p className="muted">{raw}</p> : null}
+            {raw && raw !== primary && !looksLikeJson(raw) ? <p className="muted">{raw}</p> : null}
           </div>
           <button onClick={onClose} aria-label="Close actor panel">×</button>
         </div>

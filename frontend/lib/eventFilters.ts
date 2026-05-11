@@ -136,8 +136,9 @@ export function activeFilterLabels(filters: EventFilters) {
   const labelFor = (key: string, value: string) => {
     if (key === "mode" && value === "decision") return "Decision mode";
     if (key === "mode" && value === "audit_trail") return "Full audit trail mode";
-    if (key === "time_window" && value === "1h") return "Last hour";
-    if (key === "time_window" && value === "6h") return "Last 6 hours";
+    if (key === "time_window" && value === "30m") return "Last 30 minutes";
+    if (key === "time_window" && value === "2h") return "Last 2 hours";
+    if (key === "time_window" && value === "4h") return "Last 4 hours";
     if (key === "time_window" && value === "12h") return "Last 12 hours";
     if (key === "time_window" && value === "24h") return "Last 24 hours";
     if (key === "time_window" && value === "7d") return "Last 7 days";
