@@ -3358,6 +3358,18 @@ def main():
                 mask_sensitive_text(str(exc)),
             )
 
+    ip_baseline_tracker = None
+    if ENABLE_DB_WRITER:
+        try:
+            from src.product.ip_baseline_tracker import IpBaselineTracker
+            ip_baseline_tracker = IpBaselineTracker(DATABASE_URL)
+            logger.info("IpBaselineTracker initialized for actor/IP baseline tracking")
+        except Exception as exc:
+            logger.warning(
+                "IpBaselineTracker init failed; IP baseline tracking disabled: %s",
+                mask_sensitive_text(str(exc)),
+            )
+
     # Optional Schema Registry check
     if SCHEMA_REGISTRY_URL:
         logger.info("Schema Registry configured: %s", SCHEMA_REGISTRY_URL)
@@ -3962,6 +3974,16 @@ def main():
                         _method = str(enriched_event.get("methodName", "")).lower()
                         if _method not in BULK_NOISE_METHODS:
                             pattern_detector.record(enriched_event)
+
+                    if ip_baseline_tracker is not None:
+                        _ip_actor = str(
+                            enriched_event.get("actor")
+                            or enriched_event.get("principal")
+                            or ""
+                        ).strip()
+                        _ip_src = str(enriched_event.get("clientIp") or enriched_event.get("source_ip") or "").strip()
+                        if _ip_actor and _ip_src:
+                            ip_baseline_tracker.record(_ip_actor, _ip_src)
 
                     safe_produce(producer, AUDIT_NORMALIZED_TOPIC, event_key, orjson.dumps(normalized_event))
                     safe_produce(producer, AUDIT_ENRICHED_TOPIC, event_key, orjson.dumps(enriched_event))
