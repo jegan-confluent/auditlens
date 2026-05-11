@@ -81,3 +81,37 @@ def test_extract_resource_context_for_topic_crn():
 def test_canonical_resource_type_supports_ksqldb():
     assert canonical_resource_type("KSQLDB") == "ksqldb"
     assert resource_type_label("ksqldb") == "KSQLDB"
+
+
+def test_extract_resource_context_for_create_api_key():
+    # CreateAPIKey cloudResources is a list; first item has USER scope (2 resources),
+    # second has ENVIRONMENT + KAFKA_CLUSTER scope (4 resources). We should pick
+    # the richer item and extract the key ID, cluster, and environment.
+    payload = {
+        "methodName": "CreateAPIKey",
+        "resourceName": "crn://confluent.cloud/organization=f5f511c7-d821-48cc-8388-c96a6f11f12a",
+        "cloudResources": [
+            {
+                "scope": {"resources": [
+                    {"type": "ORGANIZATION", "resourceId": "f5f511c7-d821-48cc-8388-c96a6f11f12a"},
+                    {"type": "USER", "resourceId": "u-12g806"},
+                ]},
+                "resource": {"type": "API_KEY", "resourceId": "76NATGA2SWTNEZX5"},
+            },
+            {
+                "scope": {"resources": [
+                    {"type": "ORGANIZATION", "resourceId": "f5f511c7-d821-48cc-8388-c96a6f11f12a"},
+                    {"type": "ENVIRONMENT", "resourceId": "env-9zj7y5"},
+                    {"type": "CLOUD_CLUSTER", "resourceId": "lkc-jqn0xm"},
+                    {"type": "KAFKA_CLUSTER", "resourceId": "lkc-jqn0xm"},
+                ]},
+                "resource": {"type": "API_KEY", "resourceId": "76NATGA2SWTNEZX5"},
+            },
+        ],
+    }
+    context = extract_resource_context(payload)
+    assert context.resource_type == "api_key"
+    assert context.resource_name == "76NATGA2SWTNEZX5"
+    assert "76NATGA2SWTNEZX5" in context.resource_display_name
+    assert context.cluster_id == "lkc-jqn0xm"
+    assert context.environment_id == "env-9zj7y5"

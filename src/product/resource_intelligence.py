@@ -353,6 +353,19 @@ def _cloud_resources(payload: dict[str, Any]) -> dict[str, Any]:
     value = payload.get("cloudResources") or data.get("cloudResources")
     if isinstance(value, dict):
         return value
+    if isinstance(value, list):
+        # cloudResources can be a list (e.g. CreateAPIKey emits one entry per
+        # cluster scope). Pick the item with the richest scope so we can
+        # extract cluster_id, environment_id, and the primary resource ID.
+        best: dict[str, Any] = {}
+        best_scope_len = -1
+        for item in value:
+            if isinstance(item, dict):
+                scope_len = len((item.get("scope") or {}).get("resources") or [])
+                if scope_len > best_scope_len:
+                    best_scope_len = scope_len
+                    best = item
+        return best
     return _load_json(value)
 
 
