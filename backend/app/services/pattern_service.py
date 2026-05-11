@@ -3,7 +3,7 @@
 import logging
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import func, or_, select, text
+from sqlalchemy import func, or_, select, text, update
 from sqlalchemy.orm import Session
 
 from backend.app.db.models import AuditEvent, AuditEventPattern
@@ -11,6 +11,7 @@ from backend.app.db.models import AuditEvent, AuditEventPattern
 logger = logging.getLogger("auditlens.backend.patterns")
 
 PATTERN_TIMEOUT_MS = 2000
+PATTERN_STALE_HOURS = 24
 
 
 def _set_timeout(db: Session) -> None:
@@ -21,6 +22,28 @@ def _set_timeout(db: Session) -> None:
             pass
 
 
+def _expire_stale_patterns(db: Session) -> None:
+    """Mark active patterns as 'expired' if last_seen_at is > PATTERN_STALE_HOURS old.
+
+    Lazy expiry — called at the start of list_patterns so stale rows are cleaned
+    up on the first read after they go quiet, without any scheduled job.
+    """
+    stale_cutoff = datetime.now(timezone.utc) - timedelta(hours=PATTERN_STALE_HOURS)
+    try:
+        db.execute(
+            update(AuditEventPattern)
+            .where(
+                AuditEventPattern.status == "active",
+                AuditEventPattern.last_seen_at < stale_cutoff,
+            )
+            .values(status="expired", updated_at=datetime.now(timezone.utc))
+        )
+        db.commit()
+    except Exception as exc:
+        logger.warning("pattern expiry failed (non-fatal): %s", exc)
+        db.rollback()
+
+
 def list_patterns(
     db: Session,
     status: str | None = None,
@@ -28,6 +51,7 @@ def list_patterns(
     limit: int = 50,
 ) -> dict:
     limit = min(max(limit, 1), 200)
+    _expire_stale_patterns(db)
     _set_timeout(db)
     conditions = []
     if status:

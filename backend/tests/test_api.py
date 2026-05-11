@@ -1250,3 +1250,49 @@ def test_patterns_enriched_actor_display_name(client):
         f"expected real name, got {enriched['actor_display_name']!r}"
     )
     assert enriched["actor_type"] == "user"
+
+
+def test_stale_patterns_auto_expire(client):
+    from backend.app.db.models import AuditEventPattern
+
+    db_override = next(iter(client.app.dependency_overrides.values()))
+    session_gen = db_override()
+    db = next(session_gen)
+    try:
+        stale = AuditEventPattern(
+            pattern_key="stale-pattern-expiry-test",
+            actor="u-staletest",
+            action="kafka.Authentication",
+            resource_name="-",
+            occurrence_count=11,
+            window_count=1,
+            first_seen_at=datetime.now(timezone.utc) - timedelta(hours=30),
+            last_seen_at=datetime.now(timezone.utc) - timedelta(hours=25),
+            status="active",
+        )
+        db.add(stale)
+        db.commit()
+    finally:
+        session_gen.close()
+
+    # Calling list_patterns should trigger lazy expiry of the stale pattern.
+    response = client.get("/patterns", params={"status": "active"})
+    assert response.status_code == 200
+    data = response.json()
+    active_actors = [p["actor"] for p in data["patterns"]]
+    assert "u-staletest" not in active_actors, "stale pattern should have been expired"
+
+    # Verify the DB row was updated to 'expired', not deleted.
+    session_gen2 = db_override()
+    db2 = next(session_gen2)
+    try:
+        from sqlalchemy import select as sa_select
+        row = db2.scalar(
+            sa_select(AuditEventPattern).where(
+                AuditEventPattern.actor == "u-staletest"
+            )
+        )
+        assert row is not None, "pattern row should still exist (not deleted)"
+        assert row.status == "expired", f"expected 'expired', got {row.status!r}"
+    finally:
+        session_gen2.close()
