@@ -83,6 +83,10 @@ def events(
         default=False,
         description="Read from audit_events_noise instead of audit_events. Restricted filters: only time_window/actor/action/limit/offset are honoured.",
     ),
+    include_suppressed: bool = Query(
+        default=False,
+        description="When true, suppressed/expected patterns are included in decision mode results (for ops debugging).",
+    ),
     db: Session = Depends(get_db),
 ):
     if show_noise:
@@ -168,6 +172,7 @@ def events(
             limit=limit,
             offset=offset,
             cursor=cursor,
+            include_suppressed=include_suppressed,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

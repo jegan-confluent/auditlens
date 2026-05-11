@@ -3,6 +3,8 @@ import binascii
 import json
 import logging
 import re
+import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -14,11 +16,18 @@ from sqlalchemy.orm import Session, defer, load_only
 
 from backend.app.db.models import AuditEvent, AuditEventTriage
 from backend.app.services.filter_service import event_fingerprint, normalize_event, parse_event_timestamp
+from backend.app.services.pattern_service import _norm, get_suppressed_combos
 from backend.app.services.resource_service import upsert_resource_catalog
 from backend.app.services.triage_service import attach_triage_snapshots, get_triage_snapshot
 from src.product.event_normalization import canonical_resource_type
 
 MAX_EVENT_LIMIT = 500
+
+# Suppression cache — refreshed at most once per minute
+_suppression_lock = threading.Lock()
+_suppression_cache: tuple[float, set[tuple[str, str, str]]] | None = None
+_suppression_ttl = 60.0
+_suppression_table_missing = False
 # Per-transaction statement_timeout for /events (Postgres). The default 30s
 # pool-level timeout is exceeded by the decision-mode count() query on the
 # production table; 120s matches /summary's allowance.
@@ -50,6 +59,34 @@ CHANGE_TYPE_ALIASES = {
 DECISION_ACTION_CATEGORIES = {"create", "delete", "modify", "api key"}
 logger = logging.getLogger("auditlens.backend.events")
 TIME_WINDOW_RE = re.compile(r"^([1-9][0-9]*)([mh])$")
+
+
+def _get_suppressed_combos_cached(db: Session) -> set[tuple[str, str, str]]:
+    global _suppression_cache, _suppression_table_missing
+    if _suppression_table_missing:
+        return set()
+    with _suppression_lock:
+        now = time.time()
+        if _suppression_cache is not None:
+            cached_at, combos = _suppression_cache
+            if now - cached_at < _suppression_ttl:
+                return combos
+        try:
+            combos = get_suppressed_combos(db)
+        except Exception as exc:
+            err = str(exc).lower()
+            if "no such table" in err or "does not exist" in err or "relation" in err:
+                _suppression_table_missing = True
+                logger.warning(
+                    "audit_event_patterns table not found; suppression disabled until migration 0009 is applied"
+                )
+            else:
+                logger.warning("Failed to load suppressed patterns (non-fatal): %s", exc)
+            return set()
+        _suppression_cache = (now, combos)
+        return combos
+
+
 EVENT_LIST_COLUMNS = (
     AuditEvent.id,
     AuditEvent.event_fingerprint,
@@ -350,7 +387,10 @@ def _matches_derived_filters(
     hide_noise: bool,
     impact_types: set[str] | None = None,
     change_types: set[str] | None = None,
+    suppressed_combos: set[tuple[str, str, str]] | None = None,
 ) -> bool:
+    if suppressed_combos and (event.actor, event.action, _norm(event.resource_name)) in suppressed_combos:
+        return False
     if hide_noise and event.signal_type == "noise":
         return False
     if signal_types and event.signal_type not in signal_types:
@@ -383,6 +423,7 @@ def list_events_result(
     change_type: str | None = None,
     cursor: str | None = None,
     debug: bool = False,
+    include_suppressed: bool = False,
     **filters: Any,
 ) -> EventListResult:
     limit = min(max(limit, 1), MAX_EVENT_LIMIT)
@@ -397,7 +438,11 @@ def list_events_result(
     signal_types = _parse_signal_types(signal_type)
     impact_types = _parse_impact_types(impact_type)
     change_types = _parse_change_types(change_type)
-    derived_filter_applied = bool(signal_types or impact_types or change_types) or hide_noise
+    suppressed_combos: set[tuple[str, str, str]] = set()
+    if not include_suppressed:
+        suppressed_combos = _get_suppressed_combos_cached(db)
+    use_suppression = bool(suppressed_combos)
+    derived_filter_applied = bool(signal_types or impact_types or change_types) or hide_noise or (use_suppression and mode == "decision")
     filters = _apply_derived_prefilters(filters, impact_types, change_types)
     active_filters = {key: value for key, value in {**filters, "mode": mode}.items() if isinstance(value, str) and value.strip()}
     conditions = _event_filter_conditions(**filters)
@@ -434,10 +479,14 @@ def list_events_result(
             offset_for_query = 0
         else:
             offset_for_query = offset
-        items = db.scalars(
+        items = list(db.scalars(
             keyset_query.order_by(AuditEvent.timestamp.desc(), AuditEvent.id.desc()).limit(limit).offset(offset_for_query)
-        ).all()
+        ).all())
         attach_triage_snapshots(db, items)
+        if mode == "audit_trail" and use_suppression:
+            for ev in items:
+                if (ev.actor, ev.action, _norm(ev.resource_name)) in suppressed_combos:
+                    setattr(ev, "_suppressed", True)
         next_cursor = None
         if items and len(items) == limit:
             tail = items[-1]
@@ -462,11 +511,16 @@ def list_events_result(
             break
         scanned += len(batch)
         db_offset += len(batch)
-        collected.extend(event for event in batch if _matches_derived_filters(event, signal_types, hide_noise, impact_types, change_types))
+        combos_for_filter = suppressed_combos if mode == "decision" else None
+        collected.extend(event for event in batch if _matches_derived_filters(event, signal_types, hide_noise, impact_types, change_types, combos_for_filter))
         if len(batch) < batch_size:
             break
     page = collected[offset : offset + limit]
     attach_triage_snapshots(db, page)
+    if mode == "audit_trail" and use_suppression:
+        for ev in page:
+            if (ev.actor, ev.action, _norm(ev.resource_name)) in suppressed_combos:
+                setattr(ev, "_suppressed", True)
     result_limit_reached = scanned >= SIGNAL_FILTER_MAX_SCAN and len(collected) >= offset + limit
     # Derived filtering keeps offset semantics — keyset cursors are emitted
     # only on the SQL-only path because the derived prefilter loop scans a
