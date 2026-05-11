@@ -2195,3 +2195,158 @@ pre {
   color: var(--muted);
   margin-top: 1px;
 }
+
+/* Phase 8 E2 — Settings page */
+.settings-tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 2px solid #e5e7eb;
+  margin-bottom: 20px;
+}
+.settings-tab-btn {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -2px;
+  padding: 8px 16px;
+  font-size: 14px;
+  cursor: pointer;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.settings-tab-btn:hover { color: var(--text); }
+.settings-tab-btn.active {
+  color: var(--text);
+  border-bottom-color: #3b82f6;
+  font-weight: 600;
+}
+.settings-section { max-width: 540px; }
+.settings-field {
+  margin-bottom: 16px;
+}
+.settings-label {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 4px;
+  color: var(--text);
+}
+.settings-input-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.settings-number-input {
+  width: 80px;
+  padding: 6px 10px;
+  border: 1px solid #d1d5db;
+  border-radius: 5px;
+  font-size: 13px;
+}
+.settings-text-input {
+  padding: 6px 10px;
+  border: 1px solid #d1d5db;
+  border-radius: 5px;
+  font-size: 13px;
+  min-width: 220px;
+}
+.settings-textarea {
+  padding: 6px 10px;
+  border: 1px solid #d1d5db;
+  border-radius: 5px;
+  font-size: 12px;
+  min-width: 320px;
+  min-height: 100px;
+  font-family: monospace;
+}
+.settings-masked {
+  font-size: 13px;
+  color: var(--muted);
+  letter-spacing: 2px;
+}
+.settings-isset {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.settings-change-btn {
+  background: none;
+  border: 1px solid #d1d5db;
+  border-radius: 4px;
+  padding: 3px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  color: #374151;
+}
+.settings-change-btn:hover { background: #f3f4f6; }
+.settings-provider-btn {
+  padding: 5px 16px;
+  border: 1px solid #d1d5db;
+  border-radius: 5px;
+  background: none;
+  font-size: 13px;
+  cursor: pointer;
+  color: #374151;
+}
+.settings-provider-btn.active {
+  background: #eff6ff;
+  border-color: #93c5fd;
+  color: #1d4ed8;
+  font-weight: 600;
+}
+.settings-info {
+  font-size: 12.5px;
+  color: var(--muted);
+  margin: 8px 0 16px;
+  line-height: 1.5;
+}
+.settings-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 20px;
+}
+.settings-save-btn {
+  background: #3b82f6;
+  color: #fff;
+  border: none;
+  border-radius: 5px;
+  padding: 7px 20px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.settings-save-btn:hover { background: #2563eb; }
+.settings-save-btn:disabled { opacity: 0.6; cursor: default; }
+.settings-test-btn {
+  background: none;
+  border: 1px solid #d1d5db;
+  border-radius: 5px;
+  padding: 7px 16px;
+  font-size: 13px;
+  cursor: pointer;
+  color: #374151;
+}
+.settings-test-btn:hover { background: #f3f4f6; }
+.settings-test-btn:disabled { opacity: 0.6; cursor: default; }
+.settings-save-status { font-size: 13px; }
+.settings-save-status.saving { color: var(--muted); }
+.settings-save-status.ok { color: #16a34a; }
+.settings-save-status.error { color: #dc2626; }
+.settings-test-result {
+  margin-top: 10px;
+  font-size: 13px;
+  padding: 6px 12px;
+  border-radius: 5px;
+}
+.settings-test-result.ok { background: #f0fdf4; color: #15803d; }
+.settings-test-result.error { background: #fef2f2; color: #dc2626; }
+.settings-access-denied {
+  padding: 20px;
+  background: #fef2f2;
+  border-radius: 8px;
+  color: #991b1b;
+  font-size: 14px;
+}
+.settings-tab-content { padding-top: 4px; }
