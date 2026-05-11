@@ -436,6 +436,40 @@ a {
   border-top: 1px solid var(--line);
 }
 
+.actor-ip-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+}
+
+.actor-ip-entry {
+  display: grid;
+  grid-template-columns: 22px 1fr auto;
+  gap: 6px;
+  align-items: center;
+  padding: 5px 0;
+  font-size: 13px;
+  border-bottom: 1px solid var(--line);
+}
+
+.actor-ip-entry:last-child { border-bottom: none; }
+.actor-ip-entry.new-ip .ip-addr { color: var(--danger); font-weight: 600; }
+.actor-ip-entry.trusted-ip .ip-addr { color: var(--success, #15803d); }
+
+.ip-history-badge {
+  display: inline-block;
+  margin-left: 6px;
+  font-size: 11px;
+  padding: 1px 5px;
+  border-radius: 99px;
+  font-weight: 600;
+}
+
+.ip-history-badge.new {
+  background: #fee2e2;
+  color: var(--danger);
+}
+
 .actor-panel-skeleton {
   display: flex;
   flex-direction: column;

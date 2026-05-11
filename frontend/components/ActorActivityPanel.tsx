@@ -1,8 +1,8 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { getEvents, getSummary, isAbortError } from "../lib/api";
-import type { AuditEvent, EventListResponse, SummaryResponse } from "../lib/types";
+import { getActorIpBaseline, getEvents, getSummary, isAbortError } from "../lib/api";
+import type { ActorIpBaseline, AuditEvent, EventListResponse, SummaryResponse } from "../lib/types";
 
 const UNKNOWN_PRINCIPAL_LABELS = new Set(["unknown actor", "unknown user", "unknown service account", "unknown principal"]);
 const SERVICE_ACCOUNT_TYPES = new Set(["service_account", "serviceaccount", "service-account"]);
@@ -69,6 +69,7 @@ type Props = {
 export default function ActorActivityPanel({ actorId, seedEvent, onClose, onApplyActorFilter }: Props) {
   const [summary, setSummary] = useState<SummaryResponse | null>(null);
   const [events, setEvents] = useState<EventListResponse | null>(null);
+  const [ipBaseline, setIpBaseline] = useState<ActorIpBaseline | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -94,6 +95,7 @@ export default function ActorActivityPanel({ actorId, seedEvent, onClose, onAppl
     setError(null);
     setSummary(null);
     setEvents(null);
+    setIpBaseline(null);
 
     const summaryParams = new URLSearchParams({ actor: actorId, time_window: "24h" });
     const eventsParams = new URLSearchParams({
@@ -106,13 +108,15 @@ export default function ActorActivityPanel({ actorId, seedEvent, onClose, onAppl
     Promise.all([
       getSummary(summaryParams, controller.signal),
       getEvents(eventsParams, controller.signal),
+      getActorIpBaseline(actorId, controller.signal).catch(() => null),
     ])
-      .then(([sum, evs]) => {
+      .then(([sum, evs, ipb]) => {
         setSummary(sum);
         // /events endpoint may return either EventListResponse or
         // EventListNoiseResponse — but mode=decision never reads the noise
         // table, so the union narrows to EventListResponse here.
         setEvents(evs as EventListResponse);
+        setIpBaseline(ipb);
       })
       .catch((err: Error) => {
         if (isAbortError(err)) return;
@@ -244,6 +248,34 @@ export default function ActorActivityPanel({ actorId, seedEvent, onClose, onAppl
                 </ul>
               )}
             </section>
+
+            {ipBaseline && ipBaseline.ips.length > 0 ? (
+              <section className="actor-panel-section">
+                <div className="eyebrow">
+                  IP history
+                  {ipBaseline.new_ips_last_24h > 0 ? (
+                    <span className="ip-history-badge new"> {ipBaseline.new_ips_last_24h} new</span>
+                  ) : null}
+                </div>
+                <ul className="actor-ip-list">
+                  {ipBaseline.ips.slice(0, 8).map((entry) => (
+                    <li key={entry.source_ip} className={`actor-ip-entry${entry.is_new ? " new-ip" : ""}${entry.is_trusted ? " trusted-ip" : ""}`}>
+                      <span className="ip-icon" aria-label={entry.is_trusted ? "Trusted" : entry.is_new ? "New" : "Known"}>
+                        {entry.is_trusted ? "✅" : entry.is_new ? "🔴" : "·"}
+                      </span>
+                      <span className="ip-addr">{entry.source_ip}</span>
+                      <span className="ip-meta muted">
+                        {entry.cloud_provider ? `${entry.cloud_provider}${entry.region ? ` · ${entry.region}` : ""}` : ""}
+                        {entry.occurrence_count > 1 ? ` · ${entry.occurrence_count}×` : ""}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+                {ipBaseline.total_ips > 8 ? (
+                  <p className="muted" style={{ fontSize: 12, marginTop: 4 }}>+{ipBaseline.total_ips - 8} more IPs</p>
+                ) : null}
+              </section>
+            ) : null}
 
             <div className="actor-panel-footer">
               <button onClick={() => onApplyActorFilter(actorId)}>Filter events to this actor</button>

@@ -254,3 +254,23 @@ export type VacuumResult = {
   error?: string;
   at?: string;
 };
+
+export type ActorIpEntry = {
+  source_ip: string;
+  first_seen_at: string | null;
+  last_seen_at: string | null;
+  occurrence_count: number;
+  cloud_provider: string | null;
+  region: string | null;
+  is_trusted: boolean;
+  is_new: boolean;
+};
+
+export type ActorIpBaseline = {
+  actor: string;
+  actor_display_name: string | null;
+  ips: ActorIpEntry[];
+  total_ips: number;
+  new_ips_last_24h: number;
+  trusted_ips_configured: boolean;
+};

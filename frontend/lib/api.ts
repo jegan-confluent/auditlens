@@ -1,4 +1,4 @@
-import type { AuditEvent, EventListResponse, FilterOptions, ForwarderHealth, PatternListResponse, SummaryResponse, SystemStatus, VacuumResult } from "./types";
+import type { ActorIpBaseline, AuditEvent, EventListResponse, FilterOptions, ForwarderHealth, PatternListResponse, SummaryResponse, SystemStatus, VacuumResult } from "./types";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8080";
 
@@ -71,6 +71,10 @@ export async function runForwarderVacuum(signal?: AbortSignal): Promise<VacuumRe
     throw new Error(`${response.status} ${response.statusText}`);
   }
   return body;
+}
+
+export function getActorIpBaseline(actorId: string, signal?: AbortSignal) {
+  return request<ActorIpBaseline>(`/actors/${encodeURIComponent(actorId)}/ip-baseline`, signal);
 }
 
 export function getPatterns(status?: string, signal?: AbortSignal) {
