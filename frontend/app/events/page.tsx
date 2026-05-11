@@ -304,6 +304,7 @@ function EventsPageInner() {
     tableRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
   };
   const applyDecisionFilters = (patch: Partial<EventFilters>) => {
+    console.log("[Events] applyDecisionFilters — patch:", patch, "tableRef:", tableRef.current);
     updateFilters({ ...filters, ...patch });
     tableRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
   };

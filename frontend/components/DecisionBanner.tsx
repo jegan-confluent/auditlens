@@ -1,5 +1,3 @@
-"use client";
-
 import type { SummaryResponse } from "../lib/types";
 import type { EventFilters } from "../lib/eventFilters";
 
@@ -30,7 +28,11 @@ function ClickableCount({ value, field, onApply }: {
     <button
       type="button"
       className={`count-link${n === 0 ? " zero" : ""}`}
-      onClick={() => onApply?.(derivePatch(field))}
+      onClick={() => {
+        const patch = derivePatch(field);
+        console.log("[DecisionBanner] count clicked — field:", field, "patch:", patch, "handler:", typeof onApply);
+        onApply?.(patch);
+      }}
     >
       {n.toLocaleString()}
     </button>
