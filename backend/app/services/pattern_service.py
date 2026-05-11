@@ -148,6 +148,7 @@ def _enrich_actor_display_names(
                 AuditEvent.actor.in_(actor_values),
                 AuditEvent._actor_display_name.isnot(None),
                 AuditEvent._actor_display_name != "",
+                AuditEvent._actor_display_name != AuditEvent.actor,
             )
             .group_by(AuditEvent.actor)
             .subquery()

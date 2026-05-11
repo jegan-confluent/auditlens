@@ -1193,22 +1193,37 @@ def test_patterns_enriched_actor_display_name(client):
     session_gen = db_override()
     db = next(session_gen)
     try:
-        event = AuditEvent(
-            event_fingerprint="pattern-enrich-test",
-            timestamp=datetime.now(timezone.utc),
-            result="Success",
-            actor="u-enrichtest",
-            action="kafka.Authentication",
-            normalized_action="Authentication",
-            action_category="Other",
-            resource_type="cluster",
-            resource_name="-",
-            resource_display="Unknown",
-            summary="",
-        )
-        event.actor_display_name = "Enrich Test User"
-        event._actor_type = "user"
-        db.add(event)
+        def _base_event(fingerprint: str) -> AuditEvent:
+            return AuditEvent(
+                event_fingerprint=fingerprint,
+                timestamp=datetime.now(timezone.utc),
+                result="Success",
+                actor="u-enrichtest",
+                action="kafka.Authentication",
+                normalized_action="Authentication",
+                action_category="Other",
+                resource_type="cluster",
+                resource_name="-",
+                resource_display="Unknown",
+                summary="",
+            )
+
+        # Good row — real display name (highest id wins)
+        good = _base_event("pattern-enrich-good")
+        good.actor_display_name = "Enrich Test User"
+        good._actor_type = "user"
+
+        # Bad row — raw actor ID stored as display name
+        bad_raw = _base_event("pattern-enrich-bad-rawid")
+        bad_raw.actor_display_name = "u-enrichtest"
+        bad_raw._actor_type = "user"
+
+        # Bad row — empty display name
+        bad_empty = _base_event("pattern-enrich-bad-empty")
+        bad_empty.actor_display_name = ""
+        bad_empty._actor_type = "user"
+
+        db.add_all([bad_raw, bad_empty, good])  # good inserted last = highest id
 
         pattern = AuditEventPattern(
             pattern_key="u-enrichtest||kafka.Authentication||-",
@@ -1231,5 +1246,7 @@ def test_patterns_enriched_actor_display_name(client):
     data = response.json()
     enriched = next((p for p in data["patterns"] if p["actor"] == "u-enrichtest"), None)
     assert enriched is not None, "pattern for u-enrichtest not found in response"
-    assert enriched["actor_display_name"] == "Enrich Test User"
+    assert enriched["actor_display_name"] == "Enrich Test User", (
+        f"expected real name, got {enriched['actor_display_name']!r}"
+    )
     assert enriched["actor_type"] == "user"
