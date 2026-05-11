@@ -564,6 +564,30 @@ Index("idx_audit_event_triage_event_fingerprint", AuditEventTriage.event_fingerp
 Index("idx_audit_event_triage_status", AuditEventTriage.triage_status)
 Index("idx_resource_catalog_resource_type", ResourceCatalog.resource_type)
 Index("idx_resource_catalog_resource_name", ResourceCatalog.resource_name)
+
+
+class ActorIpBaseline(Base):
+    __tablename__ = "actor_ip_baseline"
+    __table_args__ = (
+        UniqueConstraint("actor", "source_ip", name="uq_actor_ip"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    actor: Mapped[str] = mapped_column(String(255), nullable=False)
+    source_ip: Mapped[str] = mapped_column(String(128), nullable=False)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    occurrence_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    cloud_provider: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    region: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    is_trusted: Mapped[bool] = mapped_column(Integer, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
+    )
+
+
+Index("ix_actor_ip_baseline_actor", ActorIpBaseline.actor)
+Index("ix_actor_ip_baseline_is_trusted", ActorIpBaseline.is_trusted)
 Index("idx_resource_catalog_cluster_id", ResourceCatalog.cluster_id)
 Index("idx_resource_catalog_environment_id", ResourceCatalog.environment_id)
 Index("idx_resource_catalog_last_seen_at", ResourceCatalog.last_seen_at)
