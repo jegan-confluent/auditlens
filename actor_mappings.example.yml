@@ -3,16 +3,39 @@
 # priority over the Confluent IAM API resolution and over any name
 # embedded in the audit event itself.
 #
-# Use this file for principals the IAM API will never resolve:
-#   - Deleted service accounts (events still reference the old ID)
-#   - Third-party integrations whose API names are cryptic
-#     (e.g. sa-8nwyn7 = "Datadog")
-#   - Internal automation IDs
+# Two formats are supported:
 #
-# Format: principal_id: display_name
+# String format (display name only):
+#   sa-xxxx: "Datadog Monitor"
+#
+# Dict format (display name + IP trust + metadata):
+#   sa-xxxx:
+#     display_name: "Datadog Monitor"
+#     trusted_ips:
+#       - "10.0.0.0/8"          # Internal VPC
+#       - "34.238.241.0/24"     # Confluent management plane
+#     alert_on_new_ip: true     # Notify when a new IP is seen for this actor
+#     team: "Platform"
+#     k8s_namespace: "monitoring"
+#     k8s_deployment: "datadog-agent"
+#
+# trusted_ips: CIDRs that are known-safe for this actor. New IPs outside
+#   this list AND alert_on_new_ip: true will trigger an action_required alert.
+# alert_on_new_ip: if true, an action_required notification fires when a new
+#   IP is seen for this actor that is not in trusted_ips.
 
 mappings:
   sa-8nwyn7:    "Datadog Monitor"
   sa-38rprrm:   "Chargeback Handler"
   sa-7y6xj82:   "Canary SA (Confluent internal)"
   u-xxxxx:      "Former Employee - John Smith"
+
+  sa-abcd1234:
+    display_name: "Payment Processor"
+    trusted_ips:
+      - "10.0.0.0/8"
+      - "172.16.0.0/12"
+    alert_on_new_ip: true
+    team: "Payments"
+    k8s_namespace: "payments"
+    k8s_deployment: "payment-processor"

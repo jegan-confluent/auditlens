@@ -282,10 +282,21 @@ class ActorMappingFile:
 
     Reads a YAML file on construction, then re-reads on mtime change so
     operators can edit `actor_mappings.yml` without restarting services.
-    Schema:
+
+    Schema — string format (backward compatible):
         mappings:
           sa-xxxx: "Datadog Monitor"
           u-xxxxx: "Former Employee - John"
+
+    Schema — dict format (extended):
+        mappings:
+          sa-xxxx:
+            display_name: "Datadog Monitor"
+            trusted_ips: ["10.0.0.0/8", "34.238.241.0/24"]
+            alert_on_new_ip: true
+            team: "Platform"
+            k8s_namespace: "monitoring"
+            k8s_deployment: "datadog-agent"
 
     Thread-safe reads. Never raises — bad YAML logs WARNING and returns
     empty mappings, so callers can treat `get(...) is None` as "no
@@ -295,6 +306,7 @@ class ActorMappingFile:
     def __init__(self, path: str = "actor_mappings.yml") -> None:
         self._path = path
         self._mappings: dict[str, str] = {}
+        self._metadata: dict[str, dict[str, Any]] = {}
         self._mtime: float = 0.0
         self._lock = threading.Lock()
         self._load()
@@ -306,6 +318,33 @@ class ActorMappingFile:
         with self._lock:
             return self._mappings.get(principal_id)
 
+    def get_trusted_ips(self, principal_id: str) -> list[str]:
+        """Return the list of trusted IP CIDRs for principal_id (empty if none)."""
+        if not principal_id:
+            return []
+        self._reload_if_changed()
+        with self._lock:
+            meta = self._metadata.get(principal_id, {})
+        raw = meta.get("trusted_ips") or []
+        return [str(ip) for ip in raw] if isinstance(raw, list) else []
+
+    def alert_on_new_ip(self, principal_id: str) -> bool:
+        """Return True if new-IP alerts are enabled for principal_id."""
+        if not principal_id:
+            return False
+        self._reload_if_changed()
+        with self._lock:
+            meta = self._metadata.get(principal_id, {})
+        return bool(meta.get("alert_on_new_ip", False))
+
+    def get_metadata(self, principal_id: str) -> dict[str, Any]:
+        """Return the full metadata dict for principal_id (empty dict if none)."""
+        if not principal_id:
+            return {}
+        self._reload_if_changed()
+        with self._lock:
+            return dict(self._metadata.get(principal_id, {}))
+
     def count(self) -> int:
         with self._lock:
             return len(self._mappings)
@@ -314,6 +353,7 @@ class ActorMappingFile:
         if not os.path.isfile(self._path):
             with self._lock:
                 self._mappings = {}
+                self._metadata = {}
                 self._mtime = 0.0
             return
         try:
@@ -327,25 +367,48 @@ class ActorMappingFile:
             )
             with self._lock:
                 self._mappings = {}
+                self._metadata = {}
                 self._mtime = 0.0
             return
 
         mappings: dict[str, str] = {}
+        metadata: dict[str, dict[str, Any]] = {}
         if isinstance(raw, dict):
             entries = raw.get("mappings") or {}
             if isinstance(entries, dict):
                 for key, value in entries.items():
-                    if isinstance(key, str) and isinstance(value, str):
-                        key_clean = key.strip()
+                    if not isinstance(key, str):
+                        continue
+                    key_clean = key.strip()
+                    if not key_clean:
+                        continue
+                    if isinstance(value, str):
+                        # Legacy string format
                         value_clean = value.strip()
-                        if key_clean and value_clean:
+                        if value_clean:
                             mappings[key_clean] = value_clean
+                    elif isinstance(value, dict):
+                        # Extended dict format
+                        display = _as_text(value.get("display_name") or "").strip()
+                        if display:
+                            mappings[key_clean] = display
+                        meta: dict[str, Any] = {}
+                        if "trusted_ips" in value:
+                            meta["trusted_ips"] = value["trusted_ips"]
+                        if "alert_on_new_ip" in value:
+                            meta["alert_on_new_ip"] = bool(value["alert_on_new_ip"])
+                        for field in ("team", "k8s_namespace", "k8s_deployment"):
+                            if field in value:
+                                meta[field] = _as_text(value[field])
+                        if meta:
+                            metadata[key_clean] = meta
             elif entries:
                 logger.warning(
                     "actor_mappings.yml: 'mappings' must be a mapping — ignoring",
                 )
         with self._lock:
             self._mappings = mappings
+            self._metadata = metadata
             self._mtime = mtime
 
     def _reload_if_changed(self) -> None:
@@ -356,6 +419,7 @@ class ActorMappingFile:
             with self._lock:
                 if self._mtime != 0.0:
                     self._mappings = {}
+                    self._metadata = {}
                     self._mtime = 0.0
             return
         if mtime != self._mtime:
