@@ -21,6 +21,11 @@ function truncate(value: string, max: number): string {
   return value.length > max ? `${value.slice(0, max)}…` : value;
 }
 
+function formatPatternActor(actor: string): string {
+  if (actor.startsWith("{") || actor.startsWith("[")) return "Confluent (platform)";
+  return truncate(actor, 40);
+}
+
 export default function RecurringPatterns() {
   const [patterns, setPatterns] = useState<EventPattern[]>([]);
   const [total, setTotal] = useState(0);
@@ -114,7 +119,7 @@ export default function RecurringPatterns() {
               <tbody>
                 {patterns.map((p) => (
                   <tr key={p.id}>
-                    <td title={p.actor}>{truncate(p.actor, 40)}</td>
+                    <td title={p.actor}>{formatPatternActor(p.actor)}</td>
                     <td title={p.action}>{truncate(p.action, 50)}</td>
                     <td title={p.resource_name ?? ""}>{p.resource_name ? truncate(p.resource_name, 40) : <span className="muted">—</span>}</td>
                     <td className="pattern-count">{p.occurrence_count.toLocaleString()}×</td>
