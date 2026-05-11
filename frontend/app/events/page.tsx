@@ -318,6 +318,12 @@ function EventsPageInner() {
     <main className="page">
       <h1>Events</h1>
       <LastEventLine system={system} />
+      <FilterBar filters={filters} options={options} onChange={updateFilters} onReset={resetFilters} />
+      <p className="active-filters">
+        {isDecisionMode
+          ? "Decision mode is active. Routine informational activity is hidden."
+          : "Full audit trail mode is active. Routine read/list activity is included."}
+      </p>
       {summary ? (
         <>
           <DecisionBanner summary={summary} timeWindowLabel={timeWindowLabel} onApplyDecision={applyDecisionFilters} />
@@ -328,12 +334,6 @@ function EventsPageInner() {
       <OrientationCards summary={orientation} loading={orientationLoading} error={orientationError} />
       <RecurringPatterns />
       <div ref={tableRef}>
-      <FilterBar filters={filters} options={options} onChange={updateFilters} onReset={resetFilters} />
-      <p className="active-filters">
-        {isDecisionMode
-          ? "Decision mode is active. Routine informational activity is hidden."
-          : "Full audit trail mode is active. Routine read/list activity is included."}
-      </p>
       <div className="events-toolbar">
         <label className="group-toggle-label">
           <input
