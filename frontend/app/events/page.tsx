@@ -4,15 +4,11 @@ import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import ActorActivityPanel from "../../components/ActorActivityPanel";
 import AuditEventTable from "../../components/AuditEventTable";
-import DecisionBanner from "../../components/DecisionBanner";
 import EmptyState from "../../components/EmptyState";
 import ErrorState from "../../components/ErrorState";
 import FilterBar from "../../components/FilterBar";
 import LoadingState from "../../components/LoadingState";
-import NarrativeStrip from "../../components/NarrativeStrip";
-import OrientationCards from "../../components/OrientationCards";
 import RecurringPatterns from "../../components/RecurringPatterns";
-import SignalSummaryPanel from "../../components/SignalSummaryPanel";
 import {
   getEvent,
   getEvents,
@@ -91,19 +87,207 @@ function formatRelativeMinutes(iso: string | null | undefined): string {
   return `${days} day${days === 1 ? "" : "s"} ago`;
 }
 
-function LastEventLine({ system }: { system: SystemStatus | null }) {
+// Zone 1: Status strip — always-visible one-line sticky header
+function StatusStrip({
+  system,
+  summary,
+  filters,
+  onFilterChange,
+}: {
+  system: SystemStatus | null;
+  summary: SummaryResponse | null;
+  filters: EventFilters;
+  onFilterChange: (patch: Partial<EventFilters>) => void;
+}) {
   const lag = system?.pipeline_lag ?? null;
   const dbLatest = lag?.db_latest_event_at ?? null;
-  const behindSeconds = lag?.db_behind_seconds ?? null;
-  const stale = typeof behindSeconds === "number" && behindSeconds > 300;
-  const text = dbLatest ? formatRelativeMinutes(dbLatest) : "unknown";
-  const className = stale
-    ? "events-last-event events-last-event-stale"
-    : "events-last-event muted";
+  const status = lag?.status ?? "unknown";
+  const lastEventText = dbLatest ? formatRelativeMinutes(dbLatest) : "unknown";
+  const attentionCount = summary?.action_required_count ?? 0;
+
+  let statusDot: string;
+  let statusText: string;
+  if (status === "healthy") { statusDot = "🟢"; statusText = "Connected"; }
+  else if (status === "degraded") { statusDot = "🟡"; statusText = "Degraded"; }
+  else if (status === "stalled") { statusDot = "🔴"; statusText = "Stalled"; }
+  else { statusDot = "⚪"; statusText = "Unknown"; }
+
+  const TIME_WINDOW_OPTIONS = ["30m", "2h", "4h", "12h", "24h", "7d", "30d"];
+
   return (
-    <p className={className}>
-      {stale ? "⚠️ " : ""}Last event: {text}
-    </p>
+    <div className="events-status-strip">
+      <span className="events-status-brand">AuditLens</span>
+      <span className="events-status-sep">·</span>
+      <span>Last event: {lastEventText}</span>
+      {attentionCount > 0 ? (
+        <>
+          <span className="events-status-sep">·</span>
+          <button
+            className="events-status-attention"
+            onClick={() => onFilterChange({ signal: "action_required" })}
+          >
+            {attentionCount} need attention
+          </button>
+        </>
+      ) : null}
+      <span className="events-status-sep">·</span>
+      <span>{statusDot} {statusText}</span>
+      <span className="events-status-sep">·</span>
+      <select
+        className="events-status-time-window"
+        value={filters.time_window}
+        onChange={(e) => onFilterChange({ time_window: e.target.value })}
+        aria-label="Time window"
+      >
+        {TIME_WINDOW_OPTIONS.map((opt) => (
+          <option key={opt} value={opt}>{opt} ▼</option>
+        ))}
+      </select>
+    </div>
+  );
+}
+
+// Zone 2: Incident card
+function formatSubject(subject: string): string {
+  if (subject.startsWith("{") || subject.startsWith("[")) return "Confluent (platform)";
+  if (subject.length > 30 && !subject.includes(" ") && !subject.includes("@")) {
+    return subject.slice(0, 20) + "...";
+  }
+  return subject;
+}
+
+function IncidentCard({
+  summary,
+  timeWindowLabel,
+  onInvestigateActor,
+  onSeeAll,
+}: {
+  summary: SummaryResponse | null;
+  timeWindowLabel: string;
+  onInvestigateActor: (actor: string) => void;
+  onSeeAll: () => void;
+}): React.ReactElement | null {
+  if (!summary) return null;
+
+  const actionRequired = summary.action_required_count;
+  const attention = summary.attention_count;
+  const flows = summary.flow_groups ?? [];
+
+  if (actionRequired > 0) {
+    const criticalFlows = flows.filter((f) => f.signal_type === "action_required").slice(0, 2);
+    const topFlow = criticalFlows[0];
+    return (
+      <div className="incident-card incident-card-critical">
+        <div className="incident-card-header">
+          🔴 <strong>{actionRequired} critical event{actionRequired === 1 ? "" : "s"} need immediate attention</strong>
+        </div>
+        {criticalFlows.map((flow, i) => (
+          <div key={i} className="incident-card-flow">
+            {formatSubject(flow.subject)} — {flow.group_title}
+          </div>
+        ))}
+        <div className="incident-card-actions">
+          {topFlow ? (
+            <button
+              className="incident-card-btn-primary"
+              onClick={() => onInvestigateActor(topFlow.subject)}
+            >
+              Investigate top actor →
+            </button>
+          ) : null}
+          <button className="incident-card-btn-secondary" onClick={onSeeAll}>
+            See all {actionRequired} events
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (attention > 0) {
+    const attentionFlows = flows.filter((f) => f.signal_type === "attention").slice(0, 2);
+    return (
+      <div className="incident-card incident-card-attention">
+        <div className="incident-card-header">
+          🟡 <strong>{attention} event{attention === 1 ? "" : "s"} need review</strong>
+        </div>
+        {attentionFlows.map((flow, i) => (
+          <div key={i} className="incident-card-flow">
+            {formatSubject(flow.subject)} — {flow.group_title}
+          </div>
+        ))}
+        <div className="incident-card-actions">
+          <button className="incident-card-btn-secondary" onClick={onSeeAll}>
+            Review →
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="incident-card incident-card-ok">
+      ✅ No critical activity in the {timeWindowLabel}
+    </div>
+  );
+}
+
+// Zone 3: Collapsible filter toolbar
+function FilterToolbar({
+  filters,
+  options,
+  filterOpen,
+  onToggleFilter,
+  onChange,
+  onReset,
+  groupSimilar,
+  onGroupSimilarChange,
+}: {
+  filters: EventFilters;
+  options: FilterOptions | null;
+  filterOpen: boolean;
+  onToggleFilter: () => void;
+  onChange: (filters: EventFilters) => void;
+  onReset: () => void;
+  groupSimilar: boolean;
+  onGroupSimilarChange: (value: boolean) => void;
+}) {
+  const chips = activeFilterLabels(filters);
+  return (
+    <div className="filter-toolbar-zone">
+      <div className="filter-toolbar-bar">
+        <button
+          className={`filter-toggle-btn${filterOpen ? " active" : ""}`}
+          onClick={onToggleFilter}
+          aria-expanded={filterOpen}
+        >
+          🔍 Filters {filterOpen ? "▲" : "▼"}
+        </button>
+        {chips.length > 0 ? (
+          <div className="filter-active-chips">
+            {chips.map((chip) => (
+              <span key={chip} className="filter-chip">{chip}</span>
+            ))}
+          </div>
+        ) : null}
+        {chips.length > 0 ? (
+          <button className="filter-clear-all" onClick={onReset}>
+            Clear all
+          </button>
+        ) : null}
+        <label className="group-toggle-label" style={{ marginLeft: "auto" }}>
+          <input
+            type="checkbox"
+            checked={groupSimilar}
+            onChange={(e) => onGroupSimilarChange(e.target.checked)}
+            aria-label="Group similar events"
+          />
+          {" "}Group similar
+        </label>
+      </div>
+      {filterOpen ? (
+        <FilterBar filters={filters} options={options} onChange={onChange} onReset={onReset} />
+      ) : null}
+    </div>
   );
 }
 
@@ -140,11 +324,6 @@ function EventsPageInner() {
   const [actorPanelId, setActorPanelId] = useState<string | null>(null);
   const [actorPanelSeed, setActorPanelSeed] = useState<AuditEvent | null>(null);
 
-  // Orientation summary: a fixed-window 24h snapshot, independent of the
-  // user's current filters. Drives the three cards above the filter bar.
-  const [orientation, setOrientation] = useState<SummaryResponse | null>(null);
-  const [orientationLoading, setOrientationLoading] = useState(true);
-  const [orientationError, setOrientationError] = useState<string | null>(null);
   const [summary, setSummary] = useState<SummaryResponse | null>(null);
   const [summaryLoading, setSummaryLoading] = useState(false);
   const [summaryError, setSummaryError] = useState<string | null>(null);
@@ -156,6 +335,11 @@ function EventsPageInner() {
   const [expandedDetail, setExpandedDetail] = useState<AuditEvent | null>(null);
   const [expandedLoading, setExpandedLoading] = useState(false);
   const [expandedError, setExpandedError] = useState<string | null>(null);
+
+  // Auto-open filter panel if URL has any query params
+  const [filterOpen, setFilterOpen] = useState(
+    () => new URLSearchParams(searchParams.toString()).size > 0
+  );
 
   useEffect(() => {
     const controller = new AbortController();
@@ -201,26 +385,6 @@ function EventsPageInner() {
       });
     return () => controller.abort();
   }, [filters]);
-
-  // Orient-the-customer cards: fixed 24h window, fetched once on mount,
-  // independent of the user's filter state. Failures degrade to "—" in
-  // OrientationCards; the rest of the page keeps working.
-  useEffect(() => {
-    const controller = new AbortController();
-    const params = new URLSearchParams({ time_window: "24h", mode: "audit_trail" });
-    setOrientationLoading(true);
-    setOrientationError(null);
-    getSummary(params, controller.signal)
-      .then(setOrientation)
-      .catch((err: Error) => {
-        if (isAbortError(err)) return;
-        setOrientationError(err.message);
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setOrientationLoading(false);
-      });
-    return () => controller.abort();
-  }, []);
 
   // Phase 2 Fix 4: keep `system` fresh on a 30 s heartbeat so the
   // "Last event: …" line at the top of the page reflects ingest health
@@ -308,74 +472,75 @@ function EventsPageInner() {
     updateFilters({ ...filters, ...patch });
     tableRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
   };
-  const activeFilters = activeFilterLabels(filters);
   const isDecisionMode = filters.mode === "decision";
   const timeWindowLabel = humanTimeWindowLabel(filters.time_window);
+
+  // suppress unused-variable warning for applyFlowFilters / applyDecisionFilters
+  void applyFlowFilters;
+  void applyDecisionFilters;
 
   if (error) return <main className="page"><ErrorState message={error} systemState={system?.db_writer_state || system?.consumer_state} /></main>;
   const renderedEvents = data ? data.items : [];
 
   return (
-    <main className="page">
-      <h1>Events</h1>
-      <LastEventLine system={system} />
-      <FilterBar filters={filters} options={options} onChange={updateFilters} onReset={resetFilters} />
-      <p className="active-filters">
-        {isDecisionMode
-          ? "Decision mode is active. Routine informational activity is hidden."
-          : "Full audit trail mode is active. Routine read/list activity is included."}
-      </p>
-      {summary ? (
-        <>
-          <DecisionBanner summary={summary} timeWindowLabel={timeWindowLabel} onApplyDecision={applyDecisionFilters} />
-          <NarrativeStrip summary={summary} onApplyFilter={applyFlowFilters} />
-          <SignalSummaryPanel summary={summary} onApplyFlow={applyFlowFilters} currentSignal={filters.signal} />
-        </>
-      ) : summaryLoading ? <LoadingState label="Loading decision summary" /> : summaryError ? <p className="active-filters">Decision summary unavailable: {summaryError}</p> : null}
-      <OrientationCards summary={orientation} loading={orientationLoading} error={orientationError} />
+    <main className="page events-page">
+      <StatusStrip
+        system={system}
+        summary={summary}
+        filters={filters}
+        onFilterChange={(patch) => updateFilters({ ...filters, ...patch })}
+      />
+      <IncidentCard
+        summary={summary}
+        timeWindowLabel={timeWindowLabel}
+        onInvestigateActor={(actor) => { closeActorPanel(); updateFilters({ ...filters, actor }); }}
+        onSeeAll={() => updateFilters({ ...filters, signal: "action_required" })}
+      />
+      <FilterToolbar
+        filters={filters}
+        options={options}
+        filterOpen={filterOpen}
+        onToggleFilter={() => setFilterOpen(!filterOpen)}
+        onChange={updateFilters}
+        onReset={resetFilters}
+        groupSimilar={groupSimilar}
+        onGroupSimilarChange={setGroupSimilar}
+      />
+      {summaryLoading ? null : summaryError ? (
+        <p className="active-filters">Decision summary unavailable: {summaryError}</p>
+      ) : null}
       <RecurringPatterns />
       <div ref={tableRef}>
-      <div className="events-toolbar">
-        <label className="group-toggle-label">
-          <input
-            type="checkbox"
-            checked={groupSimilar}
-            onChange={(e) => setGroupSimilar(e.target.checked)}
-            aria-label="Group similar events"
+        {!data ? <LoadingState /> : renderedEvents.length ? (
+          <AuditEventTable
+            events={renderedEvents}
+            groupSimilar={groupSimilar}
+            expandedId={expandedId}
+            expandedDetail={expandedDetail}
+            expandedLoading={expandedLoading}
+            expandedError={expandedError}
+            onToggleExpand={onToggleExpand}
+            onActorClick={onActorClick}
           />
-          {" "}Group similar
-        </label>
-      </div>
-      {!data ? <LoadingState /> : renderedEvents.length ? (
-        <AuditEventTable
-          events={renderedEvents}
-          groupSimilar={groupSimilar}
-          expandedId={expandedId}
-          expandedDetail={expandedDetail}
-          expandedLoading={expandedLoading}
-          expandedError={expandedError}
-          onToggleExpand={onToggleExpand}
-          onActorClick={onActorClick}
-        />
-      ) : (
-        <EmptyState
-          diagnostics={
-            isDecisionMode
-              ? `No decision events matched this window. Total matching rows: ${data.total}. Switch to audit trail mode to inspect routine reads and informational activity.`
-              : `Nothing matched these filters. Total matching rows: ${data.total}.`
-          }
-          activeFilters={activeFilters}
-          onReset={resetFilters}
-          onShowAll={showAllActivity}
-        />
-      )}
-      {data ? (
-        <div className="toolbar" style={{ marginTop: 12 }}>
-          <button disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - data.limit))}>Previous</button>
-          <span className="muted">Showing {offset + 1}-{Math.min(offset + data.items.length, data.total)} of {data.total}</span>
-          <button disabled={offset + data.limit >= data.total} onClick={() => setOffset(offset + data.limit)}>Next</button>
-        </div>
-      ) : null}
+        ) : (
+          <EmptyState
+            diagnostics={
+              isDecisionMode
+                ? `No decision events matched this window. Total matching rows: ${data.total}. Switch to audit trail mode to inspect routine reads and informational activity.`
+                : `Nothing matched these filters. Total matching rows: ${data.total}.`
+            }
+            activeFilters={activeFilterLabels(filters)}
+            onReset={resetFilters}
+            onShowAll={showAllActivity}
+          />
+        )}
+        {data ? (
+          <div className="toolbar" style={{ marginTop: 12 }}>
+            <button disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - data.limit))}>Previous</button>
+            <span className="muted">Showing {offset + 1}-{Math.min(offset + data.items.length, data.total)} of {data.total}</span>
+            <button disabled={offset + data.limit >= data.total} onClick={() => setOffset(offset + data.limit)}>Next</button>
+          </div>
+        ) : null}
       </div>
       <ActorActivityPanel
         actorId={actorPanelId}
