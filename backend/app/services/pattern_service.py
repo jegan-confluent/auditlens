@@ -142,21 +142,42 @@ def _enrich_actor_display_names(
     if not actor_values:
         return {}
     try:
-        inner = (
-            select(AuditEvent.actor.label("actor"), func.max(AuditEvent.id).label("max_id"))
-            .where(
-                AuditEvent.actor.in_(actor_values),
-                AuditEvent._actor_display_name.isnot(None),
-                AuditEvent._actor_display_name != "",
-                AuditEvent._actor_display_name != AuditEvent.actor,
+        if db.get_bind().dialect.name == "postgresql":
+            # LATERAL + LIMIT 1 uses idx_audit_events_actor_display_enrichment
+            # to stop after the first qualifying row per actor (~2ms vs 49s).
+            rows = db.execute(
+                text(
+                    "SELECT a.actor, e.actor_display_name, e.actor_type "
+                    "FROM UNNEST(:actors::text[]) AS a(actor) "
+                    "LEFT JOIN LATERAL ("
+                    "  SELECT ae.actor_display_name, ae.actor_type "
+                    "  FROM audit_events ae "
+                    "  WHERE ae.actor = a.actor "
+                    "    AND ae.actor_display_name IS NOT NULL "
+                    "    AND ae.actor_display_name != '' "
+                    "    AND ae.actor_display_name != ae.actor "
+                    "  ORDER BY ae.id DESC LIMIT 1"
+                    ") e ON TRUE "
+                    "WHERE e.actor_display_name IS NOT NULL"
+                ),
+                {"actors": actor_values},
+            ).all()
+        else:
+            inner = (
+                select(AuditEvent.actor.label("actor"), func.max(AuditEvent.id).label("max_id"))
+                .where(
+                    AuditEvent.actor.in_(actor_values),
+                    AuditEvent._actor_display_name.isnot(None),
+                    AuditEvent._actor_display_name != "",
+                    AuditEvent._actor_display_name != AuditEvent.actor,
+                )
+                .group_by(AuditEvent.actor)
+                .subquery()
             )
-            .group_by(AuditEvent.actor)
-            .subquery()
-        )
-        rows = db.execute(
-            select(AuditEvent.actor, AuditEvent._actor_display_name, AuditEvent._actor_type)
-            .join(inner, AuditEvent.id == inner.c.max_id)
-        ).all()
+            rows = db.execute(
+                select(AuditEvent.actor, AuditEvent._actor_display_name, AuditEvent._actor_type)
+                .join(inner, AuditEvent.id == inner.c.max_id)
+            ).all()
         return {r[0]: (r[1], r[2]) for r in rows}
     except Exception as exc:
         logger.warning("actor enrichment for patterns failed (non-fatal): %s", exc)
