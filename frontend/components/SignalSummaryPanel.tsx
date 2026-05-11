@@ -158,7 +158,7 @@ export default function SignalSummaryPanel({ summary, onApplyFlow, currentSignal
               >
                 <span className="flow-icon" aria-hidden>{iconForSignal(group.signal_type)}</span>
                 <span className="flow-body">
-                  <span className="flow-title">{group.group_title}</span>
+                  <span className="flow-title">{group.subject ? group.group_title.replace(group.subject, formatSubject(group.subject)) : group.group_title}</span>
                   <span className="flow-meta">
                     {formatSubject(group.subject)} · {formatAge(group.last_seen)}
                     {group.event_count > 1 ? ` · ${group.event_count.toLocaleString()} events` : ""}
