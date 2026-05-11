@@ -4,9 +4,9 @@ import { useEffect, useRef, useState } from "react";
 import ErrorState from "../../components/ErrorState";
 import LoadingState from "../../components/LoadingState";
 import PipelineLagBanner from "../../components/PipelineLagBanner";
-import { getForwarderHealth, getReadinessStatus, isAbortError, runForwarderVacuum } from "../../lib/api";
+import { getForwarderHealth, getReadinessStatus, getSystemStatus, isAbortError, runForwarderVacuum } from "../../lib/api";
 import type { ReadinessSnapshot } from "../../lib/api";
-import type { ForwarderHealth, VacuumResult } from "../../lib/types";
+import type { ForwarderHealth, SystemStatus, VacuumResult } from "../../lib/types";
 
 const HIGH_LAG_THRESHOLD = 100_000;
 const LOW_LAG_THRESHOLD = 10_000;
@@ -82,6 +82,7 @@ function ScrollLink({ targetId, children }: { targetId: string; children: React.
 export default function SystemPage() {
   const [health, setHealth] = useState<ForwarderHealth | null>(null);
   const [ready, setReady] = useState<ReadinessSnapshot | null>(null);
+  const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [vacuum, setVacuum] = useState<{ running: boolean; result: VacuumResult | null; error: string | null }>({
     running: false,
@@ -106,6 +107,15 @@ export default function SystemPage() {
         if (isAbortError(err)) return;
         if (!mountedRef.current) return;
         setError(err instanceof Error ? err.message : String(err));
+      });
+    getSystemStatus(controller.signal)
+      .then((s) => {
+        if (!mountedRef.current) return;
+        setSystemStatus(s);
+      })
+      .catch((err: unknown) => {
+        if (isAbortError(err)) return;
+        // non-fatal — storage card shows "—"
       });
     return () => {
       mountedRef.current = false;
@@ -191,6 +201,9 @@ export default function SystemPage() {
             </div>
           </div>
         </ScrollLink>
+        {systemStatus?.storage_health ? (
+          <StorageHealthCard health={systemStatus.storage_health} />
+        ) : null}
       </section>
 
       <section id="forwarder-pipeline" className="panel system-section">
@@ -275,6 +288,22 @@ export default function SystemPage() {
         </section>
       ) : null}
     </main>
+  );
+}
+
+function StorageHealthCard({ health }: {
+  health: NonNullable<SystemStatus["storage_health"]>;
+}) {
+  const tone: Tone = health.status === "critical" ? "critical" : health.status === "warning" ? "warning" : health.status === "healthy" ? "ok" : "unknown";
+  return (
+    <div className={`system-status-card ${tone}`}>
+      <div className="system-status-card-head">{indicator(tone)} Postgres</div>
+      <div className="system-status-card-headline">{health.db_size_pretty || "—"}</div>
+      <div className="system-status-card-detail">
+        {health.retention_days ? `${health.retention_days}d retention` : ""}<br />
+        {health.status === "warning" ? "approaching limit" : health.status === "critical" ? "ACTION REQUIRED" : "healthy"}
+      </div>
+    </div>
   );
 }
 

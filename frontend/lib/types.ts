@@ -159,6 +159,18 @@ export type SystemStatus = {
   db_health?: Record<string, unknown>;
   pipeline_lag?: PipelineLag | null;
   pipeline_status?: PipelineStatus;
+  storage_health?: {
+    status: "healthy" | "warning" | "critical" | "error";
+    db_size_bytes?: number;
+    db_size_pretty?: string;
+    audit_events_size_pretty?: string;
+    noise_table_size_pretty?: string;
+    oldest_event_at?: string | null;
+    newest_event_at?: string | null;
+    events_with_raw_payload?: number;
+    retention_days?: number;
+    error?: string;
+  } | null;
 };
 
 // Shape of GET /system/forwarder-health (proxies the forwarder's /health).

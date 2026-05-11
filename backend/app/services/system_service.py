@@ -3,7 +3,7 @@ import os
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Optional
 
 import httpx
 from sqlalchemy import text
@@ -311,6 +311,121 @@ def get_storage_usage(db: Session) -> dict[str, Any]:
     return {"mode": "postgres", "bytes": int(size or 0)}
 
 
+# ─────────────────────── Postgres storage health ───────────────────────────
+_STORAGE_HEALTH_TTL_SECONDS = 60.0
+_STORAGE_HEALTH_TIMEOUT_MS = 3_000
+
+
+class _StorageHealthCache:
+    """Caches the storage health block for 60 seconds."""
+
+    def __init__(self, ttl_seconds: float = _STORAGE_HEALTH_TTL_SECONDS) -> None:
+        self._ttl = ttl_seconds
+        self._lock = threading.Lock()
+        self._snapshots: dict[int, tuple[float, dict[str, Any]]] = {}
+
+    def reset(self) -> None:
+        with self._lock:
+            self._snapshots.clear()
+
+    def get(self, db: Session) -> dict[str, Any]:
+        bind = db.get_bind()
+        key = id(bind)
+        now = time.monotonic()
+        with self._lock:
+            snapshot = self._snapshots.get(key)
+            if snapshot is not None and (now - snapshot[0]) < self._ttl:
+                return snapshot[1]
+        result = self._fetch_now(db)
+        with self._lock:
+            self._snapshots[key] = (time.monotonic(), result)
+        return result
+
+    @staticmethod
+    def _fetch_now(db: Session) -> dict[str, Any]:
+        settings = get_settings()
+        dialect = db.get_bind().dialect.name
+        if dialect != "postgresql":
+            return {
+                "status": "healthy",
+                "db_size_bytes": 0,
+                "db_size_pretty": "n/a (sqlite)",
+                "audit_events_size_pretty": "n/a",
+                "noise_table_size_pretty": "n/a",
+                "oldest_event_at": None,
+                "newest_event_at": None,
+                "events_with_raw_payload": 0,
+                "retention_days": settings.event_retention_days,
+            }
+        try:
+            db.execute(text(f"SET LOCAL statement_timeout = {_STORAGE_HEALTH_TIMEOUT_MS}"))
+            db_size = db.scalar(text("SELECT pg_database_size(current_database())")) or 0
+            audit_size = db.scalar(text("SELECT pg_total_relation_size('audit_events')")) or 0
+            noise_size_result: Optional[int] = None
+            try:
+                noise_size_result = db.scalar(text("SELECT pg_total_relation_size('audit_events_noise')"))
+            except Exception:
+                pass
+            oldest_at = db.scalar(text("SELECT MIN(timestamp) FROM audit_events"))
+            newest_at = db.scalar(text("SELECT MAX(timestamp) FROM audit_events"))
+            raw_count = db.scalar(text(
+                "SELECT COUNT(*) FROM audit_events WHERE raw_payload_json IS NOT NULL AND raw_payload_json != '{}'"
+            )) or 0
+        except Exception as exc:
+            logger.warning("storage_health query failed: %s", exc)
+            db.rollback()
+            return {"status": "error", "error": str(exc), "retention_days": settings.event_retention_days}
+
+        def pretty_bytes(n: int) -> str:
+            if n < 1024:
+                return f"{n} B"
+            if n < 1024 ** 2:
+                return f"{n / 1024:.1f} KB"
+            if n < 1024 ** 3:
+                return f"{n / 1024 ** 2:.1f} MB"
+            return f"{n / 1024 ** 3:.2f} GB"
+
+        gb = db_size / (1024 ** 3)
+        if gb >= 40:
+            status = "critical"
+        elif gb >= 20:
+            status = "warning"
+        else:
+            status = "healthy"
+
+        def _iso(ts: Any) -> Optional[str]:
+            if ts is None:
+                return None
+            if isinstance(ts, datetime):
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                return ts.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+            return str(ts)
+
+        return {
+            "status": status,
+            "db_size_bytes": int(db_size),
+            "db_size_pretty": pretty_bytes(int(db_size)),
+            "audit_events_size_pretty": pretty_bytes(int(audit_size)),
+            "noise_table_size_pretty": pretty_bytes(int(noise_size_result or 0)),
+            "oldest_event_at": _iso(oldest_at),
+            "newest_event_at": _iso(newest_at),
+            "events_with_raw_payload": int(raw_count),
+            "retention_days": settings.event_retention_days,
+        }
+
+
+_storage_health_cache = _StorageHealthCache()
+
+
+def reset_storage_health_cache() -> None:
+    _storage_health_cache.reset()
+
+
+def get_storage_health(db: Session) -> dict[str, Any]:
+    return _storage_health_cache.get(db)
+
+
 def get_forwarder_status() -> dict[str, Any]:
     """Return the most-recent forwarder /health snapshot.
 
@@ -349,4 +464,8 @@ def get_system_status(db: Session) -> dict[str, Any]:
         }
     status["pipeline_lag"] = pipeline
     status["pipeline_status"] = pipeline.get("status", "unknown")
+    try:
+        status["storage_health"] = get_storage_health(db)
+    except Exception as exc:
+        status["storage_health"] = {"status": "error", "error": str(exc)}
     return status

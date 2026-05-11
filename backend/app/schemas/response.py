@@ -149,3 +149,4 @@ class SystemStatusResponse(BaseModel):
     db_health: dict[str, Any] | None = None
     pipeline_lag: PipelineLag | None = None
     pipeline_status: Literal["healthy", "degraded", "stalled", "unknown"] = "unknown"
+    storage_health: dict[str, Any] | None = None
