@@ -1,39 +1,86 @@
 import type { SummaryResponse } from "../lib/types";
 import type { EventFilters } from "../lib/eventFilters";
 
-function titleFor(summary: SummaryResponse) {
+type CountField =
+  | "failure_count"
+  | "denied_count"
+  | "destructive_count"
+  | "configuration_change_count"
+  | "access_change_count";
+
+function derivePatch(field: CountField): Partial<EventFilters> {
+  switch (field) {
+    case "failure_count": return { result: "Failure" };
+    case "denied_count": return { result: "Denied" };
+    case "destructive_count": return { impact_type: "destructive" };
+    case "configuration_change_count": return { impact_type: "configuration_change" };
+    case "access_change_count": return { impact_type: "access_change" };
+  }
+}
+
+function ClickableCount({ value, field, onApply }: {
+  value: number;
+  field: CountField;
+  onApply?: (patch: Partial<EventFilters>) => void;
+}) {
+  return (
+    <button
+      type="button"
+      className={`count-link${value === 0 ? " zero" : ""}`}
+      onClick={() => onApply?.(derivePatch(field))}
+    >
+      {value.toLocaleString()}
+    </button>
+  );
+}
+
+function MessageContent({ summary, windowLabel, onApply }: {
+  summary: SummaryResponse;
+  windowLabel: string;
+  onApply?: (patch: Partial<EventFilters>) => void;
+}) {
+  if (summary.overall_status === "action_required") {
+    return (
+      <>
+        <ClickableCount value={summary.failure_count} field="failure_count" onApply={onApply} />{" "}failures,{" "}
+        <ClickableCount value={summary.denied_count} field="denied_count" onApply={onApply} />{" "}denied attempts, and{" "}
+        <ClickableCount value={summary.destructive_count} field="destructive_count" onApply={onApply} />{" "}destructive actions in the {windowLabel}.
+      </>
+    );
+  }
+  if (summary.overall_status === "review_needed") {
+    return (
+      <>
+        <ClickableCount value={summary.configuration_change_count} field="configuration_change_count" onApply={onApply} />{" "}configuration changes and{" "}
+        <ClickableCount value={summary.access_change_count} field="access_change_count" onApply={onApply} />{" "}access changes in the {windowLabel} need review.
+      </>
+    );
+  }
+  return (
+    <>{summary.short_digest || `Most activity in the ${windowLabel} is routine authentication, authorization, or read-only access. No destructive, failed, or configuration-changing activity was detected.`}</>
+  );
+}
+
+function titleFor(summary: SummaryResponse): string {
   if (summary.overall_status === "action_required") return "Critical activity detected — action required";
   if (summary.overall_status === "review_needed") return "Changes detected — review required";
   return "No action needed";
 }
 
-function messageFor(summary: SummaryResponse, windowLabel: string) {
-  if (summary.overall_status === "action_required") {
-    return `${summary.failure_count.toLocaleString()} failures, ${summary.denied_count.toLocaleString()} denied attempts, and ${summary.destructive_count.toLocaleString()} destructive actions in the ${windowLabel}.`;
-  }
-  if (summary.overall_status === "review_needed") {
-    return `${summary.configuration_change_count.toLocaleString()} configuration changes and ${summary.access_change_count.toLocaleString()} access changes in the ${windowLabel} need review.`;
-  }
-  return summary.short_digest || `Most activity in the ${windowLabel} is routine authentication, authorization, or read-only access. No destructive, failed, or configuration-changing activity was detected.`;
-}
-
-function actionFor(summary: SummaryResponse) {
+function actionFor(summary: SummaryResponse): string {
   if (summary.overall_status === "action_required") return "Investigate immediately and confirm owner, source IP, and affected resource.";
   if (summary.overall_status === "review_needed") return "Verify whether these changes match an approved change window.";
   return "Continue monitoring.";
 }
 
-function ctaFor(summary: SummaryResponse) {
+function ctaFor(summary: SummaryResponse): { label: string; patch: Partial<EventFilters> } {
   if (summary.overall_status === "action_required") {
-    const patch: Partial<EventFilters> = { mode: "decision", signal: "action_required", hide_noise: "true" };
-    return { label: "Investigate critical events", patch };
+    return { label: "Investigate critical events", patch: { mode: "decision", signal: "action_required", hide_noise: "true" } };
   }
   if (summary.overall_status === "review_needed") {
-    const patch: Partial<EventFilters> = { mode: "decision", signal: "attention", hide_noise: "true" };
-    return { label: "Show changes to review", patch };
+    return { label: "Show changes to review", patch: { mode: "decision", signal: "attention", hide_noise: "true" } };
   }
-  const patch: Partial<EventFilters> = { mode: "audit_trail", time_window: "72h", signal: "", hide_noise: "false" };
-  return { label: "Show full audit trail", patch };
+  return { label: "Show full audit trail", patch: { mode: "audit_trail", time_window: "72h", signal: "", hide_noise: "false" } };
 }
 
 export default function DecisionBanner({ summary, timeWindowLabel, onApplyDecision }: {
@@ -47,8 +94,12 @@ export default function DecisionBanner({ summary, timeWindowLabel, onApplyDecisi
       <div>
         <div className="eyebrow">Decision</div>
         <h2>{titleFor(summary)}</h2>
-        <p>{messageFor(summary, timeWindowLabel)}</p>
-        {summary.summary_scope === "sampled" ? <span>{summary.sample_warning || `Based on latest ${summary.scanned_events.toLocaleString()} of ${summary.total_events.toLocaleString()} matching events.`}</span> : null}
+        <p>
+          <MessageContent summary={summary} windowLabel={timeWindowLabel} onApply={onApplyDecision} />
+        </p>
+        {summary.summary_scope === "sampled" ? (
+          <span>{summary.sample_warning || `Based on latest ${summary.scanned_events.toLocaleString()} of ${summary.total_events.toLocaleString()} matching events.`}</span>
+        ) : null}
       </div>
       <div className="decision-action">
         <strong>{actionFor(summary)}</strong>

@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import ActorActivityPanel from "../../components/ActorActivityPanel";
 import AuditEventTable from "../../components/AuditEventTable";
@@ -126,6 +126,7 @@ function EventsPageInner() {
     []
   );
   const [filters, setFilters] = useState<EventFilters>(initialFilters);
+  const tableRef = useRef<HTMLDivElement>(null);
   const [options, setOptions] = useState<FilterOptions | null>(null);
   const [data, setData] = useState<EventListResponse | null>(null);
   // Session-only toggle: collapse repeated (actor, action, resource) runs into
@@ -299,7 +300,10 @@ function EventsPageInner() {
   const resetFilters = () => updateFilters(defaultFilters);
   const showAllActivity = () => updateFilters(allActivityFilters);
   const applyFlowFilters = (patch: Partial<EventFilters>) => updateFilters({ ...filters, ...patch });
-  const applyDecisionFilters = (patch: Partial<EventFilters>) => updateFilters({ ...filters, ...patch });
+  const applyDecisionFilters = (patch: Partial<EventFilters>) => {
+    updateFilters({ ...filters, ...patch });
+    tableRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
   const activeFilters = activeFilterLabels(filters);
   const isDecisionMode = filters.mode === "decision";
   const timeWindowLabel = humanTimeWindowLabel(filters.time_window);
@@ -320,6 +324,7 @@ function EventsPageInner() {
       ) : summaryLoading ? <LoadingState label="Loading decision summary" /> : summaryError ? <p className="active-filters">Decision summary unavailable: {summaryError}</p> : null}
       <OrientationCards summary={orientation} loading={orientationLoading} error={orientationError} />
       <RecurringPatterns />
+      <div ref={tableRef}>
       <FilterBar filters={filters} options={options} onChange={updateFilters} onReset={resetFilters} />
       <p className="active-filters">
         {isDecisionMode
@@ -367,6 +372,7 @@ function EventsPageInner() {
           <button disabled={offset + data.limit >= data.total} onClick={() => setOffset(offset + data.limit)}>Next</button>
         </div>
       ) : null}
+      </div>
       <ActorActivityPanel
         actorId={actorPanelId}
         seedEvent={actorPanelSeed}
