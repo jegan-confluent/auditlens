@@ -818,6 +818,17 @@ th {
   background: var(--danger-soft);
   border-color: #fecdca;
 }
+.signal-stat-card.active {
+  outline: 2px solid var(--primary, #1d4ed8);
+  outline-offset: -2px;
+  background: #eff6ff;
+}
+.signal-stat-card.active.amber {
+  background: var(--warn-soft);
+}
+.signal-stat-card.active.red {
+  background: var(--danger-soft);
+}
 .signal-stat-icon {
   font-size: 18px;
   line-height: 1;

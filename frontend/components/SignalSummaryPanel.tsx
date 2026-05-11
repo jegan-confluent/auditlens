@@ -1,7 +1,26 @@
 import type { SummaryResponse } from "../lib/types";
 import type { EventFilters } from "../lib/eventFilters";
 
-function resourceTypeForFamily(family: string) {
+type SignalCountField = "noise_count" | "informational_count" | "attention_count" | "action_required_count";
+
+function signalFromField(fieldKey: SignalCountField): string {
+  return fieldKey.replace(/_count$/, "");
+}
+
+const SIGNAL_CARDS: ReadonlyArray<{
+  fieldKey: SignalCountField;
+  className: string;
+  icon: string;
+  label: string;
+  alertClass?: (count: number) => string;
+}> = [
+  { fieldKey: "noise_count", className: "noise", icon: "🔇", label: "Noise" },
+  { fieldKey: "informational_count", className: "info", icon: "ℹ️", label: "Info" },
+  { fieldKey: "attention_count", className: "review", icon: "👀", label: "Review", alertClass: (c) => c > 0 ? "amber" : "" },
+  { fieldKey: "action_required_count", className: "action", icon: "🔴", label: "Action", alertClass: (c) => c > 0 ? "red" : "" },
+];
+
+function resourceTypeForFamily(family: string): string {
   // Mirrors src/product/resource_intelligence.RESOURCE_TYPE_ALIASES (the
   // canonical types the forwarder emits after the 2026-05-08 alias
   // extension). When `flowPatch` produces a `resource_type` query value the
@@ -78,49 +97,49 @@ function formatAge(iso: string): string {
   return `${Math.round(ageH / 24)}d ago`;
 }
 
-export default function SignalSummaryPanel({ summary, onApplyFlow }: {
+function looksLikeJson(v: string): boolean {
+  return v.startsWith("{") || v.startsWith("[");
+}
+
+function formatSubject(subject: string): string {
+  if (!subject) return "—";
+  if (looksLikeJson(subject)) return "Confluent (platform)";
+  return subject;
+}
+
+export default function SignalSummaryPanel({ summary, onApplyFlow, currentSignal }: {
   summary: SummaryResponse;
   onApplyFlow?: (patch: Partial<EventFilters>) => void;
+  currentSignal?: string;
 }) {
   return (
     <section className={`signal-panel ${summary.overall_status}`}>
       <div className="signal-stat-cards">
-        <button
-          type="button"
-          className="signal-stat-card noise"
-          onClick={() => onApplyFlow?.(statPatch("noise"))}
-        >
-          <span className="signal-stat-icon" aria-hidden>🔇</span>
-          <span className="signal-stat-count">{summary.noise_count.toLocaleString()}</span>
-          <span className="signal-stat-label">Noise</span>
-        </button>
-        <button
-          type="button"
-          className="signal-stat-card info"
-          onClick={() => onApplyFlow?.(statPatch("informational"))}
-        >
-          <span className="signal-stat-icon" aria-hidden>ℹ️</span>
-          <span className="signal-stat-count">{summary.informational_count.toLocaleString()}</span>
-          <span className="signal-stat-label">Info</span>
-        </button>
-        <button
-          type="button"
-          className={`signal-stat-card review ${summary.attention_count > 0 ? "amber" : ""}`}
-          onClick={() => onApplyFlow?.(statPatch("attention"))}
-        >
-          <span className="signal-stat-icon" aria-hidden>👀</span>
-          <span className="signal-stat-count">{summary.attention_count.toLocaleString()}</span>
-          <span className="signal-stat-label">Review</span>
-        </button>
-        <button
-          type="button"
-          className={`signal-stat-card action ${summary.action_required_count > 0 ? "red" : ""}`}
-          onClick={() => onApplyFlow?.(statPatch("action_required"))}
-        >
-          <span className="signal-stat-icon" aria-hidden>🔴</span>
-          <span className="signal-stat-count">{summary.action_required_count.toLocaleString()}</span>
-          <span className="signal-stat-label">Action</span>
-        </button>
+        {SIGNAL_CARDS.map(({ fieldKey, className, icon, label, alertClass }) => {
+          const signalType = signalFromField(fieldKey);
+          const count = summary[fieldKey];
+          const isActive = currentSignal === signalType;
+          const alertCls = alertClass ? alertClass(count) : "";
+          const cardClass = [
+            "signal-stat-card",
+            className,
+            alertCls,
+            isActive ? "active" : "",
+          ].filter(Boolean).join(" ");
+          return (
+            <button
+              key={fieldKey}
+              type="button"
+              className={cardClass}
+              aria-pressed={isActive}
+              onClick={() => onApplyFlow?.(isActive ? { signal: "" } : statPatch(signalType))}
+            >
+              <span className="signal-stat-icon" aria-hidden>{icon}</span>
+              <span className="signal-stat-count">{count.toLocaleString()}</span>
+              <span className="signal-stat-label">{label}</span>
+            </button>
+          );
+        })}
       </div>
       {summary.flow_groups.length ? (
         <div className="flow-list">
@@ -141,7 +160,7 @@ export default function SignalSummaryPanel({ summary, onApplyFlow }: {
                 <span className="flow-body">
                   <span className="flow-title">{group.group_title}</span>
                   <span className="flow-meta">
-                    {group.subject || "—"} · {formatAge(group.last_seen)}
+                    {formatSubject(group.subject)} · {formatAge(group.last_seen)}
                     {group.event_count > 1 ? ` · ${group.event_count.toLocaleString()} events` : ""}
                   </span>
                 </span>

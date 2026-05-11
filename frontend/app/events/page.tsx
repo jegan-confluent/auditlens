@@ -319,7 +319,7 @@ function EventsPageInner() {
         <>
           <DecisionBanner summary={summary} timeWindowLabel={timeWindowLabel} onApplyDecision={applyDecisionFilters} />
           <NarrativeStrip summary={summary} />
-          <SignalSummaryPanel summary={summary} onApplyFlow={applyFlowFilters} />
+          <SignalSummaryPanel summary={summary} onApplyFlow={applyFlowFilters} currentSignal={filters.signal} />
         </>
       ) : summaryLoading ? <LoadingState label="Loading decision summary" /> : summaryError ? <p className="active-filters">Decision summary unavailable: {summaryError}</p> : null}
       <OrientationCards summary={orientation} loading={orientationLoading} error={orientationError} />
