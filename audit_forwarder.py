@@ -3361,7 +3361,7 @@ def main():
     ip_baseline_tracker = None
     if ENABLE_DB_WRITER:
         try:
-            from src.product.ip_baseline_tracker import IpBaselineTracker
+            from src.product.ip_baseline_tracker import IpBaselineTracker, _is_private_ip
             ip_baseline_tracker = IpBaselineTracker(DATABASE_URL)
             logger.info("IpBaselineTracker initialized for actor/IP baseline tracking")
         except Exception as exc:
@@ -3369,6 +3369,10 @@ def main():
                 "IpBaselineTracker init failed; IP baseline tracking disabled: %s",
                 mask_sensitive_text(str(exc)),
             )
+
+    # 24h dedup cache for new-IP alerts: maps (actor, ip) → alert_sent_at epoch
+    _ip_alert_dedup: dict[tuple[str, str], float] = {}
+    _IP_ALERT_DEDUP_WINDOW = 86400.0  # 24 hours
 
     # Optional Schema Registry check
     if SCHEMA_REGISTRY_URL:
@@ -3983,7 +3987,52 @@ def main():
                         ).strip()
                         _ip_src = str(enriched_event.get("clientIp") or enriched_event.get("source_ip") or "").strip()
                         if _ip_actor and _ip_src:
-                            ip_baseline_tracker.record(_ip_actor, _ip_src)
+                            _ip_is_new = ip_baseline_tracker.record(_ip_actor, _ip_src)
+                            if _ip_is_new and notifier is not None and notifier.has_destinations():
+                                try:
+                                    _mapping = get_actor_mapping_file()
+                                    _trusted = _mapping.get_trusted_ips(_ip_actor)
+                                    _alert_on_new = _mapping.alert_on_new_ip(_ip_actor)
+                                    _whitelisted = (
+                                        _ip_actor in anomaly_config.whitelist_principals
+                                    )
+                                    _is_private = _is_private_ip(_ip_src)
+                                    _dedup_key = (_ip_actor, _ip_src)
+                                    _now_ts = time.time()
+                                    _last_alerted = _ip_alert_dedup.get(_dedup_key, 0.0)
+                                    _dedup_ok = (_now_ts - _last_alerted) >= _IP_ALERT_DEDUP_WINDOW
+                                    _in_trusted = any(
+                                        __import__("ipaddress").ip_address(_ip_src)
+                                        in __import__("ipaddress").ip_network(cidr, strict=False)
+                                        for cidr in _trusted
+                                        if cidr
+                                    ) if _trusted else False
+                                    _should_alert = (
+                                        not _whitelisted
+                                        and not _in_trusted
+                                        and _dedup_ok
+                                        and (_alert_on_new or _trusted or not _is_private)
+                                    )
+                                    if _should_alert:
+                                        _ip_alert_dedup[_dedup_key] = _now_ts
+                                        _ip_alert = {
+                                            **enriched_event,
+                                            "signal_type": "action_required",
+                                            "alert_type": "new_ip_detected",
+                                            "severity": "HIGH",
+                                            "recommended_action": (
+                                                f"Verify whether {_ip_actor} legitimately accessed from {_ip_src}. "
+                                                "If unexpected, rotate credentials and investigate recent activity."
+                                            ),
+                                        }
+                                        notifier.notify(_ip_alert)
+                                        logger.warning(
+                                            "New IP alert: actor=%s ip=%s (first time seen)",
+                                            _ip_actor,
+                                            _ip_src,
+                                        )
+                                except Exception as _ip_exc:
+                                    logger.warning("IP alert dispatch failed: %s", _ip_exc)
 
                     safe_produce(producer, AUDIT_NORMALIZED_TOPIC, event_key, orjson.dumps(normalized_event))
                     safe_produce(producer, AUDIT_ENRICHED_TOPIC, event_key, orjson.dumps(enriched_event))
