@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import func, or_, select, text
 from sqlalchemy.orm import Session
 
-from backend.app.db.models import AuditEventPattern
+from backend.app.db.models import AuditEvent, AuditEventPattern
 
 logger = logging.getLogger("auditlens.backend.patterns")
 
@@ -44,7 +44,8 @@ def list_patterns(
     query = query.order_by(AuditEventPattern.occurrence_count.desc()).limit(limit)
     patterns = list(db.scalars(query).all())
     total = int(db.scalar(count_query) or 0)
-    return {"patterns": [_to_dict(p) for p in patterns], "total": total}
+    enrichment = _enrich_actor_display_names(db, patterns)
+    return {"patterns": [_to_dict(p, enrichment.get(p.actor)) for p in patterns], "total": total}
 
 
 def suppress_pattern(
@@ -130,10 +131,47 @@ def _norm(value: str | None) -> str:
     return value
 
 
-def _to_dict(p: AuditEventPattern) -> dict:
+def _enrich_actor_display_names(
+    db: Session,
+    patterns: list[AuditEventPattern],
+) -> dict[str, tuple[str | None, str | None]]:
+    """Return {actor: (display_name, actor_type)} for each pattern actor that has enrichment."""
+    if not patterns:
+        return {}
+    actor_values = list({p.actor for p in patterns if p.actor})
+    if not actor_values:
+        return {}
+    try:
+        inner = (
+            select(AuditEvent.actor.label("actor"), func.max(AuditEvent.id).label("max_id"))
+            .where(
+                AuditEvent.actor.in_(actor_values),
+                AuditEvent._actor_display_name.isnot(None),
+                AuditEvent._actor_display_name != "",
+            )
+            .group_by(AuditEvent.actor)
+            .subquery()
+        )
+        rows = db.execute(
+            select(AuditEvent.actor, AuditEvent._actor_display_name, AuditEvent._actor_type)
+            .join(inner, AuditEvent.id == inner.c.max_id)
+        ).all()
+        return {r[0]: (r[1], r[2]) for r in rows}
+    except Exception as exc:
+        logger.warning("actor enrichment for patterns failed (non-fatal): %s", exc)
+        return {}
+
+
+def _to_dict(
+    p: AuditEventPattern,
+    enrichment: tuple[str | None, str | None] | None = None,
+) -> dict:
+    display_name, actor_type = enrichment if enrichment else (None, None)
     return {
         "id": p.id,
         "actor": p.actor,
+        "actor_display_name": display_name,
+        "actor_type": actor_type,
         "action": p.action,
         "resource_name": p.resource_name,
         "occurrence_count": p.occurrence_count,

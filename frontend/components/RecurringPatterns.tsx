@@ -26,6 +26,10 @@ function formatPatternActor(actor: string): string {
   return truncate(actor, 40);
 }
 
+function isServiceAccount(actor_type: string | null | undefined): boolean {
+  return actor_type === "service_account";
+}
+
 export default function RecurringPatterns() {
   const [patterns, setPatterns] = useState<EventPattern[]>([]);
   const [total, setTotal] = useState(0);
@@ -119,7 +123,10 @@ export default function RecurringPatterns() {
               <tbody>
                 {patterns.map((p) => (
                   <tr key={p.id}>
-                    <td title={p.actor}>{formatPatternActor(p.actor)}</td>
+                    <td title={p.actor}>
+                      {p.actor_display_name ? truncate(p.actor_display_name, 40) : formatPatternActor(p.actor)}
+                      {isServiceAccount(p.actor_type) && <span className="actor-badge">SA</span>}
+                    </td>
                     <td title={p.action}>{truncate(p.action, 50)}</td>
                     <td title={p.resource_name ?? ""}>{p.resource_name ? truncate(p.resource_name, 40) : <span className="muted">—</span>}</td>
                     <td className="pattern-count">{p.occurrence_count.toLocaleString()}×</td>

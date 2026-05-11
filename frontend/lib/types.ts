@@ -239,6 +239,8 @@ export type ForwarderHealth = {
 export type EventPattern = {
   id: number;
   actor: string;
+  actor_display_name?: string | null;
+  actor_type?: string | null;
   action: string;
   resource_name: string | null;
   occurrence_count: number;

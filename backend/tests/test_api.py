@@ -1184,3 +1184,52 @@ def test_admin_retention_cleanup_requires_admin_when_auth_enabled(client, monkey
     assert missing.status_code == 401
     assert viewer.status_code == 403
     assert admin.status_code == 200
+
+
+def test_patterns_enriched_actor_display_name(client):
+    from backend.app.db.models import AuditEvent, AuditEventPattern
+
+    db_override = next(iter(client.app.dependency_overrides.values()))
+    session_gen = db_override()
+    db = next(session_gen)
+    try:
+        event = AuditEvent(
+            event_fingerprint="pattern-enrich-test",
+            timestamp=datetime.now(timezone.utc),
+            result="Success",
+            actor="u-enrichtest",
+            action="kafka.Authentication",
+            normalized_action="Authentication",
+            action_category="Other",
+            resource_type="cluster",
+            resource_name="-",
+            resource_display="Unknown",
+            summary="",
+        )
+        event.actor_display_name = "Enrich Test User"
+        event._actor_type = "user"
+        db.add(event)
+
+        pattern = AuditEventPattern(
+            pattern_key="u-enrichtest||kafka.Authentication||-",
+            actor="u-enrichtest",
+            action="kafka.Authentication",
+            resource_name="-",
+            occurrence_count=25,
+            window_count=3,
+            first_seen_at=datetime.now(timezone.utc),
+            last_seen_at=datetime.now(timezone.utc),
+            status="active",
+        )
+        db.add(pattern)
+        db.commit()
+    finally:
+        session_gen.close()
+
+    response = client.get("/patterns", params={"status": "active"})
+    assert response.status_code == 200
+    data = response.json()
+    enriched = next((p for p in data["patterns"] if p["actor"] == "u-enrichtest"), None)
+    assert enriched is not None, "pattern for u-enrichtest not found in response"
+    assert enriched["actor_display_name"] == "Enrich Test User"
+    assert enriched["actor_type"] == "user"
