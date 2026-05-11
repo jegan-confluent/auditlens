@@ -468,4 +468,9 @@ def get_system_status(db: Session) -> dict[str, Any]:
         status["storage_health"] = get_storage_health(db)
     except Exception as exc:
         status["storage_health"] = {"status": "error", "error": str(exc)}
+    try:
+        from backend.app.services.cold_storage_service import get_cold_storage_status
+        status["cold_storage"] = get_cold_storage_status(db)
+    except Exception as exc:
+        status["cold_storage"] = {"enabled": False, "status": "error", "error": str(exc)}
     return status
