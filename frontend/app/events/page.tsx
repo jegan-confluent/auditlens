@@ -159,15 +159,46 @@ function formatSubject(subject: string): string {
 function IncidentCard({
   summary,
   timeWindowLabel,
+  filters,
+  onCategoryFilter,
   onInvestigateActor,
   onSeeAll,
 }: {
   summary: SummaryResponse | null;
   timeWindowLabel: string;
+  filters: EventFilters;
+  onCategoryFilter: (patch: Partial<EventFilters>) => void;
   onInvestigateActor: (actor: string) => void;
   onSeeAll: () => void;
 }): React.ReactElement | null {
   if (!summary) return null;
+
+  const categoryCards = (
+    <div className="incident-category-cards">
+      {[
+        { key: "destructive", label: "Destructive actions", count: summary.destructive_count, isActive: filters.impact_type === "destructive" },
+        { key: "configuration_change", label: "Configuration changes", count: summary.configuration_change_count, isActive: filters.impact_type === "configuration_change" },
+        { key: "access_change", label: "Access changes", count: summary.access_change_count, isActive: filters.impact_type === "access_change" },
+        { key: "failures", label: "Failures / denied", count: summary.failure_count + summary.denied_count, isActive: filters.result === "Failure" },
+      ].map(({ key, label, count, isActive }) => {
+        const activePatch: Partial<EventFilters> = key === "failures"
+          ? { result: "Failure", impact_type: "", mode: "audit_trail", signal: "", hide_noise: "false" }
+          : { impact_type: key, mode: "audit_trail", signal: "", hide_noise: "false" };
+        const clearPatch: Partial<EventFilters> = key === "failures" ? { result: "" } : { impact_type: "" };
+        return (
+          <button
+            key={key}
+            type="button"
+            className={`incident-category-card${isActive ? " active" : ""}`}
+            onClick={() => onCategoryFilter(isActive ? clearPatch : activePatch)}
+          >
+            <span className="incident-category-count">{count.toLocaleString()}</span>
+            <span className="incident-category-label">{label}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
 
   const actionRequired = summary.action_required_count;
   const attention = summary.attention_count;
@@ -199,6 +230,7 @@ function IncidentCard({
             See all {actionRequired} events
           </button>
         </div>
+        {categoryCards}
       </div>
     );
   }
@@ -220,13 +252,15 @@ function IncidentCard({
             Review →
           </button>
         </div>
+        {categoryCards}
       </div>
     );
   }
 
   return (
     <div className="incident-card incident-card-ok">
-      ✅ No critical activity in the {timeWindowLabel}
+      <div className="incident-card-header">✅ No critical activity in the {timeWindowLabel}</div>
+      {categoryCards}
     </div>
   );
 }
@@ -493,6 +527,11 @@ function EventsPageInner() {
       <IncidentCard
         summary={summary}
         timeWindowLabel={timeWindowLabel}
+        filters={filters}
+        onCategoryFilter={(patch) => {
+          updateFilters({ ...filters, ...patch });
+          tableRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+        }}
         onInvestigateActor={(actor) => { closeActorPanel(); updateFilters({ ...filters, actor }); }}
         onSeeAll={() => updateFilters({ ...filters, signal: "action_required" })}
       />
