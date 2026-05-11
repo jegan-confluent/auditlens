@@ -1,7 +1,7 @@
 # Makefile for Audit Forwarder
 # Production-ready build, test, and deployment tasks
 
-.PHONY: help build build-alpine build-distroless test scan clean deploy migrate setup start stop restart status
+.PHONY: help build build-alpine build-distroless test scan clean deploy migrate setup start stop restart status monitoring
 
 ##############################################################################
 # Quickstart Lifecycle (Phase 3 — single-command install + service control)
@@ -36,6 +36,12 @@ status: ## Show service health (compose ps + API + forwarder)
 	@curl -s --max-time 3 http://localhost:8003/health 2>/dev/null \
 	  | python3 -c "import json,sys; d=json.load(sys.stdin); print('Forwarder:', d.get('status'), '| rate:', round(d.get('processing_rate', 0), 1), 'msg/s | lag:', '{:,}'.format(d.get('consumer_lag', 0)))" \
 	  || echo "Forwarder: unreachable"
+	@echo ""
+
+monitoring: ## Show monitoring URLs
+	@echo ""
+	@echo "Grafana:    http://localhost:3001 (admin/admin)"
+	@echo "Prometheus: http://localhost:9090"
 	@echo ""
 
 # Default target

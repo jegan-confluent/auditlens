@@ -247,6 +247,7 @@ services:
   postgres:
     profiles: ["postgres", "dev"]
     image: postgres:16-alpine
+    shm_size: '256mb'
     container_name: auditlens-postgres
     restart: unless-stopped
     environment:
@@ -292,7 +293,6 @@ services:
       - no-new-privileges:true
 
   prometheus:
-    profiles: ["observability", "dev"]
     image: prom/prometheus:v2.54.1
     container_name: audit-prometheus
     restart: unless-stopped
@@ -318,12 +318,12 @@ services:
       resources:
         limits:
           cpus: '0.75'
-          memory: 768M
+          memory: 512M
         reservations:
           cpus: '0.25'
           memory: 256M
     cpus: "0.75"
-    mem_limit: 768m
+    mem_limit: 512m
     security_opt:
       - no-new-privileges:true
     read_only: true
@@ -333,7 +333,6 @@ services:
       - ALL
 
   grafana:
-    profiles: ["observability", "dev"]
     image: grafana/grafana:11.3.1
     container_name: audit-grafana
     restart: unless-stopped
@@ -341,28 +340,22 @@ services:
     env_file:
       - path: .secrets
         required: false
-    entrypoint:
-      - /bin/sh
-      - -ec
-      - |
-        test -n "$$GF_SECURITY_ADMIN_PASSWORD" || { echo "GF_SECURITY_ADMIN_PASSWORD must be set" >&2; exit 1; }
-        test "$$GF_SECURITY_ADMIN_PASSWORD" != "admin" || { echo "GF_SECURITY_ADMIN_PASSWORD must not use the default admin value" >&2; exit 1; }
-        exec /run.sh
     volumes:
       - grafana_data:/var/lib/grafana
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
       - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
     environment:
       - GF_SECURITY_ADMIN_USER=${GF_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GF_SECURITY_ADMIN_PASSWORD:-admin}
       - GF_USERS_ALLOW_SIGN_UP=false
-      - GF_SERVER_ROOT_URL=http://localhost:3000
+      - GF_SERVER_ROOT_URL=http://localhost:3001
       - GF_ANALYTICS_REPORTING_ENABLED=false
       - GF_ANALYTICS_CHECK_FOR_UPDATES=false
       - GF_SECURITY_DISABLE_GRAVATAR=true
       - GF_SNAPSHOTS_EXTERNAL_ENABLED=false
       - GF_AUTH_ANONYMOUS_ENABLED=false
     ports:
-      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:3001:3000"
     networks:
       - monitoring  # Access to Prometheus metrics
       - frontend-network  # User interface access
@@ -372,12 +365,12 @@ services:
       resources:
         limits:
           cpus: '0.50'
-          memory: 512M
+          memory: 256M
         reservations:
           cpus: '0.25'
           memory: 128M
     cpus: "0.50"
-    mem_limit: 512m
+    mem_limit: 256m
     security_opt:
       - no-new-privileges:true
     read_only: false  # Grafana needs write access for plugins and DB
@@ -606,6 +599,27 @@ services:
       - /tmp:mode=1777,size=50M
     cap_drop:
       - ALL
+
+  postgres-exporter:
+    profiles: ["postgres", "dev"]
+    image: prometheuscommunity/postgres-exporter:v0.15.0
+    container_name: auditlens-postgres-exporter
+    environment:
+      - DATA_SOURCE_NAME=postgresql://${POSTGRES_USER:-auditlens}:${POSTGRES_PASSWORD:-auditlens}@postgres:5432/${POSTGRES_DB:-auditlens}?sslmode=disable
+    ports:
+      - "127.0.0.1:9187:9187"
+    mem_limit: 64m
+    cpus: "0.1"
+    read_only: true
+    cap_drop:
+      - ALL
+    networks:
+      - kafka-network
+      - monitoring
+    depends_on:
+      - postgres
+    security_opt:
+      - no-new-privileges:true
 
 networks:
   # Network segmentation for better security isolation
