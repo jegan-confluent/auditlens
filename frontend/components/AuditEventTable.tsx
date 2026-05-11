@@ -5,36 +5,6 @@ const UNKNOWN_PRINCIPAL_LABELS = new Set(["unknown actor", "unknown user", "unkn
 const SERVICE_ACCOUNT_TYPES = new Set(["service_account", "serviceaccount", "service-account"]);
 const REASON_MAX_CHARS = 60;
 
-function statusClass(event: AuditEvent) {
-  if (["approved", "resolved", "false_positive"].includes(event.triage_status)) return "success";
-  if (["acknowledged", "investigating"].includes(event.triage_status)) return "denied";
-  if (event.signal_type === "action_required") return "failure";
-  if (event.signal_type === "attention") return "denied";
-  if (event.signal_type === "informational") return "success";
-  if (event.impact_type === "destructive" || event.risk_level === "critical") return "failure";
-  if (event.impact_type === "security_sensitive" || event.impact_type === "access_change" || event.is_denied) return "denied";
-  if (event.impact_type === "constructive") return "success";
-  const result = event.result.toLowerCase();
-  if (event.is_denied || result.includes("denied")) return "denied";
-  if (event.is_failure || result.includes("failure")) return "failure";
-  if (result.includes("success")) return "success";
-  return "neutral";
-}
-
-function impactLabel(event: AuditEvent) {
-  if (event.triage_status && event.triage_status !== "open") {
-    return event.triage_status.replace("_", " ");
-  }
-  return event.decision_label || "Info";
-}
-
-function decisionReason(event: AuditEvent): string {
-  const reason = (event.decision_reason || event.signal_reason || "").trim();
-  if (!reason) return "";
-  if (reason.length <= REASON_MAX_CHARS) return reason;
-  return `${reason.slice(0, REASON_MAX_CHARS - 1).trimEnd()}…`;
-}
-
 function isServiceAccount(event: AuditEvent): boolean {
   const type = (event.actor_type || event.subject_type || "").toLowerCase();
   if (SERVICE_ACCOUNT_TYPES.has(type)) return true;
@@ -51,11 +21,7 @@ function displayResource(event: AuditEvent) {
 type ActorDisplay = { primary: string; secondary: string; isServiceAccount: boolean; unenriched: boolean; isPlatform: boolean };
 
 // True only when actor_display_name holds a real human-readable name —
-// distinct from the raw id and not one of the Unknown* placeholders. Some
-// events get persisted with display_name == raw_id when enrichment hasn't
-// run yet (cache cold, missing creds, missing IAM record); we must treat
-// those as unenriched so the cell renders in italic grey rather than
-// pretending the raw id is a name.
+// distinct from the raw id and not one of the Unknown* placeholders.
 function isEnrichedDisplay(display: string, raw: string): boolean {
   if (!display) return false;
   if (display === raw) return false;
@@ -64,8 +30,7 @@ function isEnrichedDisplay(display: string, raw: string): boolean {
 }
 
 // Confluent's internal externalAccount actors arrive as raw JSON blobs in
-// display_name (e.g. {"externalAccount":{"subject":"Confluent"}}). Anything
-// starting with { or [ is one of these — relabel to a friendly platform tag.
+// display_name (e.g. {"externalAccount":{"subject":"Confluent"}}).
 function looksLikeJsonActor(value: string): boolean {
   return value.startsWith("{") || value.startsWith("[");
 }
@@ -75,8 +40,6 @@ function displayActor(event: AuditEvent): ActorDisplay {
   const raw = (event.actor_raw_id || event.subject || event.actor || "").trim();
   const email = (event.actor_email || "").trim();
 
-  // JSON-shaped display (Confluent platform externalAccount) wins before any
-  // other classification — both display and the would-be primary are unreadable.
   if (looksLikeJsonActor(display) || looksLikeJsonActor(raw)) {
     return { primary: "Confluent (platform)", secondary: "", isServiceAccount: false, unenriched: false, isPlatform: true };
   }
@@ -84,8 +47,6 @@ function displayActor(event: AuditEvent): ActorDisplay {
   const isSA = isServiceAccount(event);
   const enriched = isEnrichedDisplay(display, raw);
 
-  // Pick the most informative primary label, then add raw as secondary only
-  // when it adds something (i.e. it's not the same string already shown).
   let primary: string;
   let unenriched: boolean;
   if (enriched) {
@@ -104,10 +65,6 @@ function displayActor(event: AuditEvent): ActorDisplay {
 }
 
 // Best label for prose contexts (the plain-English sentence in the table).
-// Prefers the human display name over the email — "Marcia Lima deleted X"
-// reads more naturally than "mlima@confluent.io deleted X". The Who column
-// uses a different priority (email first) because email is the more
-// recognisable identifier when scanning a list of rows.
 function bestSentenceLabel(event: AuditEvent): string {
   const display = (event.actor_display_name || "").trim();
   const raw = (event.actor_raw_id || event.subject || event.actor || "").trim();
@@ -123,17 +80,8 @@ function displaySourceIp(event: AuditEvent) {
   return "—";
 }
 
-function displaySummary(event: AuditEvent) {
-  const summary = event.event_summary || event.summary || "";
-  const raw = event.actor_raw_id || event.subject || event.actor || "";
-  const { primary } = displayActor(event);
-  return raw && primary && raw !== primary ? summary.replace(raw, primary) : summary;
-}
-
 // "[actor] [verb] [resource] on [cluster] in [environment]" sentence built
-// from action_category + action. Returns "" for Data / unmapped categories so
-// the caller falls back to event_title (Data activity is dominated by
-// automated reads that don't tell a useful story in the table).
+// from action_category + action.
 function plainEnglishSummary(event: AuditEvent, resourceText: string): string {
   const cat = (event.action_category || "").trim();
   const action = (event.action || event.normalized_action || "").trim();
@@ -176,8 +124,7 @@ function plainEnglishSummary(event: AuditEvent, resourceText: string): string {
 // Sequential grouping: walk events in display order (newest first) and run
 // adjacent events with the same key into a single group. The 60-min ceiling
 // is measured from the run's first (newest) event so old activity never gets
-// merged into a fresh burst. Result/signal_type intentionally participate in
-// the key so a Success+Failure mix stays as separate rows.
+// merged into a fresh burst.
 const GROUP_WINDOW_MS = 60 * 60 * 1000;
 
 type EventGroup = {
@@ -217,12 +164,44 @@ function formatTimeRange(events: AuditEvent[]): string {
   if (events.length === 0) return "";
   const first = new Date(events[0].timestamp);
   const last = new Date(events[events.length - 1].timestamp);
-  // events arrive newest-first, so events[0] is the latest, events[last] is
-  // the earliest. Display "earliest — latest" to read naturally.
   const fmt = (d: Date) => d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
   if (first.getTime() === last.getTime()) return first.toLocaleString();
   return `${fmt(last)} — ${fmt(first)}`;
 }
+
+// Phase 8 A2: signal border color
+function signalBorderColor(signalType: string): string {
+  if (signalType === "action_required") return "#ef4444";
+  if (signalType === "attention") return "#f59e0b";
+  if (signalType === "informational") return "#22c55e";
+  if (signalType === "noise") return "#9ca3af";
+  return "#e5e7eb";
+}
+
+// Phase 8 A2: compact relative time for table rows
+function formatRelativeCompact(iso: string): string {
+  const ts = Date.parse(iso);
+  if (Number.isNaN(ts)) return "—";
+  const seconds = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+  if (seconds < 60) return "just now";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
+}
+
+// Keep decisionReason — still used in ExpandedEventRow indirectly via detail data
+function decisionReason(event: AuditEvent): string {
+  const reason = (event.decision_reason || event.signal_reason || "").trim();
+  if (!reason) return "";
+  if (reason.length <= REASON_MAX_CHARS) return reason;
+  return `${reason.slice(0, REASON_MAX_CHARS - 1).trimEnd()}…`;
+}
+
+// Keep to suppress unused-variable TS error — decisionReason used in ExpandedEventRow
+void decisionReason;
 
 function ExpandedEventRow({ event, detail, loading, error }: {
   event: AuditEvent;
@@ -236,7 +215,7 @@ function ExpandedEventRow({ event, detail, loading, error }: {
   const resourceText = displayResource(data);
   return (
     <tr className="event-row-expanded">
-      <td colSpan={6}>
+      <td colSpan={2}>
         <div className="expanded-block">
           {loading ? <p className="muted">Loading details…</p> : null}
           {error ? <p className="panel-error">Could not load detail — {error}</p> : null}
@@ -282,56 +261,34 @@ type RowOptions = {
 
 function EventRow({ event, options }: { event: AuditEvent; options: RowOptions }) {
   const actor = displayActor(event);
-  const reason = decisionReason(event);
-  const triaged = event.triage_status && event.triage_status !== "open";
   const resourceText = displayResource(event);
   const plainEng = plainEnglishSummary(event, resourceText);
   const isExpanded = options.expandedId === event.id;
   const childClass = options.groupedChild ? " event-row-grouped-child" : "";
   const onActor = options.onActorClick;
+  const borderColor = signalBorderColor(event.signal_type);
   return (
     <Fragment>
       <tr onClick={() => options.onToggleExpand(event)} className={`event-row signal-${event.signal_type}${isExpanded ? " expanded" : ""}${childClass}`}>
-        <td className="nowrap">{new Date(event.timestamp).toLocaleString()}</td>
-        <td className="decision-cell">
-          <span className={`status ${statusClass(event)}`}>{impactLabel(event)}</span>
-          {triaged ? (
-            <span className="decision-reason">triaged</span>
-          ) : reason ? (
-            <span className="decision-reason" title={event.decision_reason || event.signal_reason || ""}>{reason}</span>
-          ) : null}
+        <td className="event-what-cell" style={{ borderLeft: `3px solid ${borderColor}` }}>
+          <strong className="event-what-title">{plainEng || event.event_title || event.normalized_action}</strong>
+          <div className="event-resource-secondary">{resourceText}</div>
         </td>
-        <td
-          className={`identity-cell${actor.unenriched ? " unenriched" : ""}${onActor ? " identity-clickable" : ""}`}
-          title={actor.secondary || actor.primary}
-          onClick={onActor ? (e) => { e.stopPropagation(); onActor(event); } : undefined}
-        >
-          <strong>
+        <td className="event-actor-time-cell">
+          <div
+            className={`event-actor-name${actor.unenriched ? " unenriched" : ""}${onActor ? " identity-clickable" : ""}`}
+            title={actor.secondary || actor.primary}
+            onClick={onActor ? (e) => { e.stopPropagation(); onActor(event); } : undefined}
+          >
             {actor.primary}
             {actor.isServiceAccount ? <span className="actor-badge sa" title="Service account">SA</span> : null}
-          </strong>
-          {actor.secondary ? <span>{actor.secondary}</span> : null}
+          </div>
+          <div className="event-relative-time">{formatRelativeCompact(event.timestamp)}</div>
+          <div className="event-source-ip">{displaySourceIp(event)}</div>
         </td>
-        <td className="summary-cell">
-          {plainEng ? (
-            <strong>{plainEng}</strong>
-          ) : (
-            <>
-              <strong>{event.event_title || event.normalized_action}</strong>
-              <span>{displaySummary(event)}</span>
-            </>
-          )}
-        </td>
-        <td className="resource-cell" title={event.resource_scope ? `${resourceText}\n${event.resource_scope}` : resourceText}>{resourceText}</td>
-        <td className="truncate-cell" title={displaySourceIp(event)}>{displaySourceIp(event)}</td>
       </tr>
       {isExpanded ? (
-        <ExpandedEventRow
-          event={event}
-          detail={options.expandedDetail}
-          loading={options.expandedLoading}
-          error={options.expandedError}
-        />
+        <ExpandedEventRow event={event} detail={options.expandedDetail} loading={options.expandedLoading} error={options.expandedError} />
       ) : null}
     </Fragment>
   );
@@ -347,47 +304,28 @@ function GroupRow({ group, expanded, onToggle, onActorClick }: {
   const actor = displayActor(head);
   const resourceText = displayResource(head);
   const plainEng = plainEnglishSummary(head, resourceText);
-  const reason = decisionReason(head);
-  const triaged = head.triage_status && head.triage_status !== "open";
+  const borderColor = signalBorderColor(head.signal_type);
   const onActor = onActorClick;
   return (
     <tr onClick={onToggle} className={`event-row event-row-group signal-${head.signal_type}${expanded ? " expanded" : ""}`}>
-      <td className="nowrap">
+      <td className="event-what-cell" style={{ borderLeft: `3px solid ${borderColor}` }}>
         <span className="group-toggle" aria-label={expanded ? "Collapse group" : "Expand group"}>{expanded ? "▼" : "▶"}</span>
-        {" "}{formatTimeRange(group.events)}
+        {" "}
+        <strong className="event-what-title">{plainEng || head.event_title || head.normalized_action}</strong>
+        <div className="event-resource-secondary">{formatTimeRange(group.events)}</div>
       </td>
-      <td className="decision-cell">
-        <span className={`status ${statusClass(head)}`}>{impactLabel(head)}</span>
-        {triaged ? (
-          <span className="decision-reason">triaged</span>
-        ) : reason ? (
-          <span className="decision-reason" title={head.decision_reason || head.signal_reason || ""}>{reason}</span>
-        ) : null}
-      </td>
-      <td
-        className={`identity-cell${actor.unenriched ? " unenriched" : ""}${onActor ? " identity-clickable" : ""}`}
-        title={actor.secondary || actor.primary}
-        onClick={onActor ? (e) => { e.stopPropagation(); onActor(head); } : undefined}
-      >
-        <strong>
+      <td className="event-actor-time-cell">
+        <div
+          className={`event-actor-name${actor.unenriched ? " unenriched" : ""}${onActor ? " identity-clickable" : ""}`}
+          title={actor.secondary || actor.primary}
+          onClick={onActor ? (e) => { e.stopPropagation(); onActor(head); } : undefined}
+        >
           {actor.primary}
           <span className="actor-badge group-count" title={`${group.events.length} events grouped`}>×{group.events.length}</span>
           {actor.isServiceAccount ? <span className="actor-badge sa" title="Service account">SA</span> : null}
-        </strong>
-        {actor.secondary ? <span>{actor.secondary}</span> : null}
+        </div>
+        <div className="event-relative-time">{formatRelativeCompact(head.timestamp)}</div>
       </td>
-      <td className="summary-cell">
-        {plainEng ? (
-          <strong>{plainEng}</strong>
-        ) : (
-          <>
-            <strong>{head.event_title || head.normalized_action}</strong>
-            <span>{displaySummary(head)}</span>
-          </>
-        )}
-      </td>
-      <td className="resource-cell" title={head.resource_scope ? `${resourceText}\n${head.resource_scope}` : resourceText}>{resourceText}</td>
-      <td className="truncate-cell" title={displaySourceIp(head)}>{displaySourceIp(head)}</td>
     </tr>
   );
 }
@@ -430,12 +368,8 @@ export default function AuditEventTable({
       <table className="event-table">
         <thead>
           <tr>
-            <th>Time</th>
-            <th>Decision</th>
-            <th>Who</th>
-            <th>What happened</th>
-            <th>Resource</th>
-            <th>Source/IP</th>
+            <th>Event</th>
+            <th style={{ textAlign: "right" }}>Who / When</th>
           </tr>
         </thead>
         <tbody>
