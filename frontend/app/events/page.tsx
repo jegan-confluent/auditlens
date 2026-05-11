@@ -11,6 +11,7 @@ import FilterBar from "../../components/FilterBar";
 import LoadingState from "../../components/LoadingState";
 import NarrativeStrip from "../../components/NarrativeStrip";
 import OrientationCards from "../../components/OrientationCards";
+import RecurringPatterns from "../../components/RecurringPatterns";
 import SignalSummaryPanel from "../../components/SignalSummaryPanel";
 import {
   getEvent,
@@ -318,6 +319,7 @@ function EventsPageInner() {
         </>
       ) : summaryLoading ? <LoadingState label="Loading decision summary" /> : summaryError ? <p className="active-filters">Decision summary unavailable: {summaryError}</p> : null}
       <OrientationCards summary={orientation} loading={orientationLoading} error={orientationError} />
+      <RecurringPatterns />
       <FilterBar filters={filters} options={options} onChange={updateFilters} onReset={resetFilters} />
       <p className="active-filters">
         {isDecisionMode

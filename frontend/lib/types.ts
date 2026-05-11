@@ -224,6 +224,26 @@ export type ForwarderHealth = {
   };
 };
 
+export type EventPattern = {
+  id: number;
+  actor: string;
+  action: string;
+  resource_name: string | null;
+  occurrence_count: number;
+  window_count: number;
+  first_seen_at: string | null;
+  last_seen_at: string | null;
+  status: string;
+  suppressed_until: string | null;
+  suppressed_by: string | null;
+  suppression_reason: string | null;
+};
+
+export type PatternListResponse = {
+  patterns: EventPattern[];
+  total: number;
+};
+
 export type VacuumResult = {
   status: "success" | "failure" | string;
   trigger?: string;

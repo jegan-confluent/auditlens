@@ -1,4 +1,4 @@
-import type { AuditEvent, EventListResponse, FilterOptions, ForwarderHealth, SummaryResponse, SystemStatus, VacuumResult } from "./types";
+import type { AuditEvent, EventListResponse, FilterOptions, ForwarderHealth, PatternListResponse, SummaryResponse, SystemStatus, VacuumResult } from "./types";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8080";
 
@@ -71,6 +71,37 @@ export async function runForwarderVacuum(signal?: AbortSignal): Promise<VacuumRe
     throw new Error(`${response.status} ${response.statusText}`);
   }
   return body;
+}
+
+export function getPatterns(status?: string, signal?: AbortSignal) {
+  const params = new URLSearchParams();
+  if (status) params.set("status", status);
+  const query = params.toString();
+  return request<PatternListResponse>(`/patterns${query ? `?${query}` : ""}`, signal);
+}
+
+export async function suppressPattern(id: number, durationHours: number = 24, reason: string = ""): Promise<{ status: string; id: number }> {
+  const response = await fetch(`${API_BASE}/patterns/${id}/suppress`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ duration_hours: durationHours, reason }),
+  });
+  if (!response.ok) {
+    throw new Error(`${response.status} ${response.statusText}`);
+  }
+  return response.json() as Promise<{ status: string; id: number }>;
+}
+
+export async function markPatternExpected(id: number, reason: string = ""): Promise<{ status: string; id: number }> {
+  const response = await fetch(`${API_BASE}/patterns/${id}/mark-expected`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ reason }),
+  });
+  if (!response.ok) {
+    throw new Error(`${response.status} ${response.statusText}`);
+  }
+  return response.json() as Promise<{ status: string; id: number }>;
 }
 
 export type ReadinessSnapshot = {

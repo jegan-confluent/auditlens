@@ -1819,3 +1819,115 @@ pre {
   color: var(--warn);
   font-weight: 600;
 }
+
+/* Phase 7 — Recurring Patterns section */
+.recurring-patterns-section {
+  margin: 12px 0 16px;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  overflow: hidden;
+}
+.recurring-patterns-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 14px;
+  background: #f9fafb;
+  border: none;
+  cursor: pointer;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: #374151;
+  text-align: left;
+}
+.recurring-patterns-header:hover {
+  background: #f3f4f6;
+}
+.recurring-patterns-chevron {
+  font-size: 11px;
+  color: #6b7280;
+}
+.recurring-patterns-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  background: #ef4444;
+  color: #fff;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 700;
+}
+.recurring-patterns-hint {
+  font-weight: 400;
+  font-size: 12px;
+}
+.recurring-patterns-body {
+  padding: 12px 14px;
+  background: #fff;
+}
+.recurring-patterns-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.recurring-patterns-table th {
+  text-align: left;
+  padding: 6px 10px;
+  border-bottom: 1px solid #e5e7eb;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: #6b7280;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.recurring-patterns-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid #f3f4f6;
+  vertical-align: middle;
+}
+.recurring-patterns-table tr:last-child td {
+  border-bottom: none;
+}
+.pattern-count {
+  font-weight: 700;
+  color: #dc2626;
+  white-space: nowrap;
+}
+.pattern-action-buttons {
+  display: flex;
+  gap: 6px;
+  white-space: nowrap;
+}
+.btn-suppress {
+  padding: 3px 10px;
+  font-size: 12px;
+  border: 1px solid #d97706;
+  border-radius: 4px;
+  background: #fffbeb;
+  color: #92400e;
+  cursor: pointer;
+}
+.btn-suppress:hover:not(:disabled) {
+  background: #fef3c7;
+}
+.btn-expected {
+  padding: 3px 10px;
+  font-size: 12px;
+  border: 1px solid #6b7280;
+  border-radius: 4px;
+  background: #f9fafb;
+  color: #374151;
+  cursor: pointer;
+}
+.btn-expected:hover:not(:disabled) {
+  background: #f3f4f6;
+}
+.btn-suppress:disabled,
+.btn-expected:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
