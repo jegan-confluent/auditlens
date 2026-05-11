@@ -51,9 +51,8 @@ function displaySummary(event: AuditEvent) {
 }
 
 function displaySource(event: AuditEvent) {
-  if (event.source_ip) return event.source_ip;
-  if (event.source_context) return `No source IP / context: ${event.source_context}`;
-  return "No source IP in audit event";
+  if (event.source_ip && event.source_ip.trim()) return event.source_ip;
+  return "—";
 }
 
 function displayContext(value?: string | null) {
