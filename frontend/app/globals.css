@@ -678,6 +678,18 @@ th {
   font-size: 13px;
 }
 
+button.narrative-item {
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+}
+
+button.narrative-item:hover {
+  border-color: var(--primary, #1d4ed8);
+  background: #eff6ff;
+}
+
 .signal-panel {
   margin-bottom: 16px;
   padding: 16px;

@@ -328,7 +328,7 @@ function EventsPageInner() {
       {summary ? (
         <>
           <DecisionBanner summary={summary} timeWindowLabel={timeWindowLabel} onApplyDecision={applyDecisionFilters} />
-          <NarrativeStrip summary={summary} />
+          <NarrativeStrip summary={summary} onApplyFilter={applyFlowFilters} />
           <SignalSummaryPanel summary={summary} onApplyFlow={applyFlowFilters} currentSignal={filters.signal} />
         </>
       ) : summaryLoading ? <LoadingState label="Loading decision summary" /> : summaryError ? <p className="active-filters">Decision summary unavailable: {summaryError}</p> : null}
