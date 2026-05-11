@@ -10,6 +10,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
 from backend.app.api.routes import actors, admin, events, filters, health, patterns, readiness, summary, system
+from backend.app.api.routes import settings as settings_routes
 from backend.app.core.config import get_settings
 from backend.app.core.limiter import limiter
 from backend.app.db.database import check_db_health, init_db
@@ -126,6 +127,7 @@ def create_app() -> FastAPI:
     app.include_router(admin.router)
     app.include_router(patterns.router)
     app.include_router(actors.router)
+    app.include_router(settings_routes.router)
     return app
 
 
