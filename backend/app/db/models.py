@@ -2,6 +2,7 @@ import json
 import logging
 from datetime import datetime, timezone
 
+import sqlalchemy as sa
 from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, object_session
 
@@ -653,3 +654,28 @@ Index(
     postgresql_where=(AuditEvent.actor.isnot(None)) & (AuditEvent.actor != ""),
     sqlite_where=(AuditEvent.actor.isnot(None)) & (AuditEvent.actor != ""),
 )
+
+
+class AppSettings(Base):
+    __tablename__ = "app_settings"
+    __table_args__ = (
+        UniqueConstraint("category", "key", name="uq_app_settings_category_key"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    category: Mapped[str] = mapped_column(String(64), nullable=False)
+    key: Mapped[str] = mapped_column(String(128), nullable=False)
+    value: Mapped[str | None] = mapped_column(Text, nullable=True)
+    value_enc: Mapped[bytes | None] = mapped_column(sa.LargeBinary(), nullable=True)
+    is_secret: Mapped[bool] = mapped_column(default=False, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    updated_by: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+Index("idx_app_settings_category", AppSettings.category)
