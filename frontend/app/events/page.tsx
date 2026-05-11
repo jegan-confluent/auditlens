@@ -299,7 +299,10 @@ function EventsPageInner() {
   };
   const resetFilters = () => updateFilters(defaultFilters);
   const showAllActivity = () => updateFilters(allActivityFilters);
-  const applyFlowFilters = (patch: Partial<EventFilters>) => updateFilters({ ...filters, ...patch });
+  const applyFlowFilters = (patch: Partial<EventFilters>) => {
+    updateFilters({ ...filters, ...patch });
+    tableRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
   const applyDecisionFilters = (patch: Partial<EventFilters>) => {
     updateFilters({ ...filters, ...patch });
     tableRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
