@@ -532,8 +532,15 @@ function EventsPageInner() {
           updateFilters({ ...filters, ...patch });
           tableRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
         }}
-        onInvestigateActor={(actor) => { closeActorPanel(); updateFilters({ ...filters, actor }); }}
-        onSeeAll={() => updateFilters({ ...filters, signal: "action_required" })}
+        onInvestigateActor={(actor) => {
+          closeActorPanel();
+          updateFilters({ ...filters, actor });
+          tableRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+        }}
+        onSeeAll={() => {
+          updateFilters({ ...filters, signal: "action_required" });
+          tableRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+        }}
       />
       <FilterToolbar
         filters={filters}
