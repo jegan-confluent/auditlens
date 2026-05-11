@@ -371,10 +371,10 @@ function EventsPageInner() {
   const [expandedLoading, setExpandedLoading] = useState(false);
   const [expandedError, setExpandedError] = useState<string | null>(null);
 
-  // Auto-open filter panel if URL has any query params
-  const [filterOpen, setFilterOpen] = useState(
-    () => new URLSearchParams(searchParams.toString()).size > 0
-  );
+  // Filter panel open by default so controls are visible on first load.
+  // URL params still auto-expand it (it was already open), and the user
+  // can collapse it with the toggle button if they want less chrome.
+  const [filterOpen, setFilterOpen] = useState(true);
 
   useEffect(() => {
     const controller = new AbortController();
