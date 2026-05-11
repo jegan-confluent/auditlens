@@ -214,7 +214,7 @@ function IncidentCard({
         </div>
         {criticalFlows.map((flow, i) => (
           <div key={i} className="incident-card-flow">
-            {formatSubject(flow.subject)} — {flow.group_title}
+            {flow.subject ? flow.group_title.replace(flow.subject, formatSubject(flow.subject)) : flow.group_title}
           </div>
         ))}
         <div className="incident-card-actions">
@@ -244,7 +244,7 @@ function IncidentCard({
         </div>
         {attentionFlows.map((flow, i) => (
           <div key={i} className="incident-card-flow">
-            {formatSubject(flow.subject)} — {flow.group_title}
+            {flow.subject ? flow.group_title.replace(flow.subject, formatSubject(flow.subject)) : flow.group_title}
           </div>
         ))}
         <div className="incident-card-actions">
