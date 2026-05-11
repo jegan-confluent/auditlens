@@ -1,7 +1,7 @@
 "use client";
 
 import { Suspense, useEffect, useMemo, useRef, useState } from "react";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import ActorActivityPanel from "../../components/ActorActivityPanel";
 import AuditEventTable from "../../components/AuditEventTable";
 import EmptyState from "../../components/EmptyState";
@@ -334,6 +334,7 @@ export default function EventsPage() {
 }
 
 function EventsPageInner() {
+  const router = useRouter();
   const searchParams = useSearchParams();
   const initialFilters = useMemo(
     () => filtersFromSearchParams(new URLSearchParams(searchParams.toString()), defaultFilters),
@@ -480,6 +481,15 @@ function EventsPageInner() {
     setFilters(next);
     setExpandedId(null);
     setExpandedDetail(null);
+    // Persist filter state in URL so views are shareable and the back button
+    // restores the previous filter set within the session.
+    const params = new URLSearchParams();
+    for (const key of URL_STRING_KEYS) {
+      const value = next[key];
+      if (value) params.set(key, value);
+    }
+    if (next.mode !== "decision") params.set("mode", next.mode);
+    router.replace(`?${params.toString()}`, { scroll: false });
   };
   const onActorClick = (event: AuditEvent) => {
     const id = (event.actor_raw_id || event.actor || "").trim();
