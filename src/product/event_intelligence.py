@@ -147,7 +147,10 @@ def _resource_family_from_text(value: str) -> str:
         ("service_account", ("serviceaccount", "service-account", "service account")),
         ("api_key", ("apikey", "api-key", "api key")),
         ("rbac", ("rolebinding", "role-binding", "rbac", "role binding")),
-        ("acl", ("acl",)),
+        # Word-boundary-safe markers: plain "acl" is a substring of
+        # "kafkacluster" (kafk**acl**uster), causing false ACL matches on
+        # CreateKafkaCluster. Use method-prefixed forms that won't match there.
+        ("acl", ("createacl", "deleteacl", "describeacl", "listacl", " acl", "/acl=")),
         ("topic", ("topic",)),
         ("ksql", ("ksql",)),
         ("flink", ("flink", "compute-pool", "workspace", "statement")),

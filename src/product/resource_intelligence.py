@@ -68,6 +68,8 @@ RESOURCE_TYPE_ALIASES = {
     "healthpluscluster": "cluster",
     "usmkafkacluster": "cluster",
     "usmconnectcluster": "cluster",
+    # camelCase variant emitted by some Confluent control-plane events
+    "kafkacluster": "cluster",
     "computepool": "compute_pool",
     "flink_workspace": "workspace",
     "privatelinkattachment": "private_link",
@@ -723,14 +725,28 @@ def extract_resource_context(payload: dict[str, Any], event: Any | None = None) 
             elif cluster_id:
                 resource_name = cluster_id
 
-    if cluster_id is None and _resource_from_scope(payload, "KAFKA") and _resource_from_scope(payload, "KAFKA") not in {"", "-"}:
-        cluster_id = _resource_from_scope(payload, "KAFKA")
+    if cluster_id is None:
+        # Confluent scopes use "KAFKA_CLUSTER" (schema) and "KAFKA" (older events).
+        _scope_cluster = _resource_from_scope(payload, "KAFKA") or _resource_from_scope(payload, "KAFKA_CLUSTER")
+        if _scope_cluster and _scope_cluster not in {"", "-"}:
+            cluster_id = _scope_cluster
     if environment_id is None:
         scope_env = _resource_from_scope(payload, "ENVIRONMENT")
         if scope_env:
             environment_id = scope_env
     if resource_type == "statement" and not cluster_id and flink_region:
         cluster_id = None
+
+    # CreateKafkaCluster (and similar methods) target a cluster, but the
+    # resourceName CRN may only reference the parent environment (the cluster
+    # doesn't yet exist at request time). If we now have the cluster_id from
+    # scope or the cloudResources.resource block, promote to cluster type so
+    # resource_name and event_summary reflect the cluster, not its parent env.
+    if resource_type == "environment" and cluster_id:
+        _m = _as_text(payload.get("methodName") or payload.get("method_name")).lower().replace("_", "").replace("-", "")
+        if any(op in _m for op in ("kafkacluster", "createcluster", "deletecluster", "updatecluster", "resumecluster", "pausecluster")):
+            resource_type = "cluster"
+            resource_name = cluster_id
 
     parent_resource = _parent_resource(resource_type, environment_id, cluster_id, flink_region)
     resource_scope = _scope_path(resource_type, environment_id, cluster_id, flink_region)

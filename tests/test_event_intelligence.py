@@ -402,3 +402,69 @@ def test_model_digest_uses_existing_columns_and_shortens_resource():
     assert digest["resource_display_short"] == "orders"
     assert digest["source_ip"] == "10.0.0.1"
     assert digest["source_context"] == "lkc-1"
+
+
+def test_create_kafka_cluster_title_and_family():
+    # "kafkacluster" contains the substring "acl" (kafkacl-uster), which
+    # previously caused a false ACL-family match and produced "ACL created".
+    payload = {
+        "methodName": "CreateKafkaCluster",
+        "resourceName": "crn://confluent.cloud/organization=org-1/environment=env-1/cloud-cluster=lkc-new",
+        "principal": "User:admin@example.com",
+        "resultStatus": "SUCCESS",
+    }
+    digest = event_digest(payload)
+    assert digest["resource_family"] == "cluster", digest["resource_family"]
+    assert digest["event_title"] == "Cluster created"
+    assert "lkc-new" in digest["event_summary"]
+    assert digest["change_type"] == "created"
+
+
+def test_create_kafka_cluster_camel_case_resource_type():
+    # cloudResources.resource.resourceType="KafkaCluster" (camelCase) must map
+    # to "cluster" so resource_name = cluster ID, not the parent environment ID.
+    payload = {
+        "methodName": "CreateKafkaCluster",
+        "resourceName": "crn://confluent.cloud/organization=org-1/environment=env-1",
+        "principal": "User:admin@example.com",
+        "resultStatus": "SUCCESS",
+        "cloudResources": {
+            "resource": {
+                "resourceType": "KafkaCluster",
+                "resourceId": "lkc-zzz",
+                "displayName": "my-cluster",
+            },
+            "scope": {
+                "resources": [
+                    {"resourceType": "ORGANIZATION", "resourceId": "org-1"},
+                    {"resourceType": "ENVIRONMENT", "resourceId": "env-1"},
+                ],
+            },
+        },
+    }
+    normalized = normalize_event(payload)
+    assert normalized["resource_name"] == "lkc-zzz", normalized["resource_name"]
+    assert normalized["resource_type"] == "cluster", normalized["resource_type"]
+
+
+def test_create_kafka_cluster_scope_only():
+    # When cloudResources has only scope (no resource) and KAFKA_CLUSTER scope
+    # entry provides the cluster_id, resource_name must be the cluster, not env.
+    payload = {
+        "methodName": "CreateKafkaCluster",
+        "resourceName": "crn://confluent.cloud/organization=org-1/environment=env-1",
+        "principal": "User:admin@example.com",
+        "resultStatus": "SUCCESS",
+        "cloudResources": {
+            "scope": {
+                "resources": [
+                    {"resourceType": "ORGANIZATION", "resourceId": "org-1"},
+                    {"resourceType": "ENVIRONMENT", "resourceId": "env-1"},
+                    {"resourceType": "KAFKA_CLUSTER", "resourceId": "lkc-scope"},
+                ],
+            },
+        },
+    }
+    normalized = normalize_event(payload)
+    assert normalized["resource_name"] == "lkc-scope", normalized["resource_name"]
+    assert normalized["resource_type"] == "cluster", normalized["resource_type"]
