@@ -1,3 +1,5 @@
+"use client";
+
 import type { SummaryResponse } from "../lib/types";
 import type { EventFilters } from "../lib/eventFilters";
 
@@ -19,17 +21,18 @@ function derivePatch(field: CountField): Partial<EventFilters> {
 }
 
 function ClickableCount({ value, field, onApply }: {
-  value: number;
+  value: number | undefined;
   field: CountField;
   onApply?: (patch: Partial<EventFilters>) => void;
 }) {
+  const n = value ?? 0;
   return (
     <button
       type="button"
-      className={`count-link${value === 0 ? " zero" : ""}`}
+      className={`count-link${n === 0 ? " zero" : ""}`}
       onClick={() => onApply?.(derivePatch(field))}
     >
-      {value.toLocaleString()}
+      {n.toLocaleString()}
     </button>
   );
 }
