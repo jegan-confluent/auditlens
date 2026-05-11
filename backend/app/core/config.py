@@ -11,6 +11,8 @@ class Settings(BaseSettings):
     database_url: str = Field(default="sqlite:///./data/auditlens.db", alias="DATABASE_URL")
     forwarder_health_url: str = Field(default="http://localhost:8003/health", alias="FORWARDER_HEALTH_URL")
     event_retention_days: int = Field(default=7, alias="EVENT_RETENTION_DAYS")
+    raw_payload_retention_days: int = Field(default=7, alias="RAW_PAYLOAD_RETENTION_DAYS")
+    noise_retention_days: int = Field(default=3, alias="NOISE_RETENTION_DAYS")
     cors_origins: str = Field(default="http://localhost:3000,http://127.0.0.1:3000", alias="CORS_ORIGINS")
     slow_query_ms: int = Field(default=250, alias="SLOW_QUERY_MS")
     api_title: str = "AuditLens Backend API"

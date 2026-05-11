@@ -38,8 +38,15 @@ def retention_cleanup(
     _: None = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> dict:
-    days = retention_days or get_settings().event_retention_days
-    return cleanup_retention(db, days, dry_run=dry_run)
+    settings = get_settings()
+    days = retention_days or settings.event_retention_days
+    return cleanup_retention(
+        db,
+        days,
+        dry_run=dry_run,
+        raw_payload_retention_days=settings.raw_payload_retention_days,
+        noise_retention_days=settings.noise_retention_days,
+    )
 
 
 @router.post("/admin/backfill/actor-display-names")

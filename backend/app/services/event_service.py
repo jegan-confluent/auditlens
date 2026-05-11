@@ -578,8 +578,64 @@ def list_deletions(db: Session, *, limit: int = 100, offset: int = 0) -> tuple[l
     return list_events(db, limit=limit, offset=offset, action_category="Delete")
 
 
-def cleanup_retention(db: Session, retention_days: int, *, dry_run: bool = False) -> dict[str, Any]:
+def cleanup_retention(
+    db: Session,
+    retention_days: int,
+    *,
+    dry_run: bool = False,
+    raw_payload_retention_days: int | None = None,
+    noise_retention_days: int | None = None,
+) -> dict[str, Any]:
     cutoff = datetime.now(timezone.utc) - timedelta(days=max(retention_days, 1))
+
+    raw_payloads_nulled = 0
+    noise_deleted = 0
+
+    # Step 1 — Null raw payloads older than raw_payload_retention_days
+    if raw_payload_retention_days is not None and raw_payload_retention_days > 0:
+        raw_cutoff = datetime.now(timezone.utc) - timedelta(days=raw_payload_retention_days)
+        raw_count_q = select(func.count(AuditEvent.id)).where(
+            AuditEvent.timestamp < raw_cutoff,
+            AuditEvent.raw_payload_json.isnot(None),
+            AuditEvent.raw_payload_json != "{}",
+            AuditEvent.raw_payload_json != "",
+        )
+        raw_payloads_nulled = int(db.scalar(raw_count_q) or 0)
+        if not dry_run and raw_payloads_nulled:
+            batch_size = 1000
+            total_nulled = 0
+            while True:
+                ids = list(db.scalars(
+                    select(AuditEvent.id)
+                    .where(
+                        AuditEvent.timestamp < raw_cutoff,
+                        AuditEvent.raw_payload_json.isnot(None),
+                        AuditEvent.raw_payload_json != "{}",
+                        AuditEvent.raw_payload_json != "",
+                    )
+                    .limit(batch_size)
+                ).all())
+                if not ids:
+                    break
+                if db.get_bind().dialect.name == "postgresql":
+                    db.execute(
+                        text("UPDATE audit_events SET raw_payload_json = NULL WHERE id = ANY(:ids)"),
+                        {"ids": ids},
+                    )
+                else:
+                    db.execute(
+                        text("UPDATE audit_events SET raw_payload_json = NULL WHERE id IN :ids"),
+                        {"ids": tuple(ids)},
+                    )
+                db.commit()
+                total_nulled += len(ids)
+                if len(ids) < batch_size:
+                    break
+                import time as _time
+                _time.sleep(0.01)
+            raw_payloads_nulled = total_nulled
+
+    # Step 2 — Delete old signal events (existing logic)
     count_query = select(func.count(AuditEvent.id)).where(AuditEvent.timestamp < cutoff)
     deleted_count = int(db.scalar(count_query) or 0)
     if not dry_run and deleted_count:
@@ -603,14 +659,44 @@ def cleanup_retention(db: Session, retention_days: int, *, dry_run: bool = False
             .execution_options(synchronize_session=False)
         )
         db.commit()
+
+    # Step 3 — Delete old noise rows
+    if noise_retention_days is not None and noise_retention_days > 0:
+        try:
+            noise_cutoff = datetime.now(timezone.utc) - timedelta(days=noise_retention_days)
+            noise_count_result = db.scalar(
+                text("SELECT COUNT(*) FROM audit_events_noise WHERE timestamp < :cutoff"),
+                {"cutoff": noise_cutoff},
+            )
+            noise_deleted = int(noise_count_result or 0)
+            if not dry_run and noise_deleted:
+                if db.get_bind().dialect.name == "postgresql":
+                    db.execute(text("SET LOCAL statement_timeout = 30000"))
+                db.execute(
+                    text("DELETE FROM audit_events_noise WHERE timestamp < :cutoff"),
+                    {"cutoff": noise_cutoff},
+                )
+                db.commit()
+        except Exception as exc:
+            err = str(exc).lower()
+            if "no such table" in err or "does not exist" in err:
+                noise_deleted = 0
+            else:
+                logger.warning("noise retention cleanup failed: %s", exc)
+                noise_deleted = 0
+
     logger.info(
-        "retention cleanup complete dry_run=%s retention_days=%s cutoff=%s deleted_count=%s",
-        dry_run,
-        retention_days,
-        cutoff.isoformat(),
-        deleted_count,
+        "retention cleanup complete dry_run=%s retention_days=%s deleted=%s raw_nulled=%s noise_deleted=%s",
+        dry_run, retention_days, deleted_count, raw_payloads_nulled, noise_deleted,
     )
-    return {"dry_run": dry_run, "retention_days": retention_days, "cutoff": cutoff.isoformat(), "deleted_count": deleted_count}
+    return {
+        "dry_run": dry_run,
+        "retention_days": retention_days,
+        "cutoff": cutoff.isoformat(),
+        "deleted_count": deleted_count,
+        "raw_payloads_nulled": raw_payloads_nulled,
+        "noise_deleted": noise_deleted,
+    }
 
 
 def upsert_events(db: Session, payloads: list[dict[str, Any]]) -> int:
