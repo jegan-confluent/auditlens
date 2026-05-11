@@ -553,7 +553,30 @@ def normalize_event(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _is_management_plane(payload: dict[str, Any]) -> bool:
+    data = _data(payload)
+    method = _as_text(
+        payload.get("methodName") or payload.get("method_name")
+        or data.get("methodName") or ""
+    ).lower()
+    return not method.startswith("kafka.")
+
+
 def event_fingerprint(payload: dict[str, Any]) -> str:
+    # Management-plane events (non-kafka) use a content fingerprint so
+    # Confluent double-emits (same operation, different message IDs) collapse
+    # to a single row. The fingerprint covers actor+action+resource+second so
+    # rapid-but-distinct operations are not incorrectly merged.
+    if _is_management_plane(payload):
+        normalized = normalize_event(payload)
+        ts_second = parse_event_timestamp(payload).replace(microsecond=0).isoformat()
+        stable = {
+            "actor": normalized["actor"],
+            "action": normalized["action"],
+            "resource_name": normalized["resource_name"],
+            "timestamp": ts_second,
+        }
+        return hashlib.sha256(json.dumps(stable, sort_keys=True, default=str).encode("utf-8")).hexdigest()
     for field in ("id", "event_id", "eventId", "requestId", "correlation_id", "correlationId"):
         value = payload.get(field)
         if value not in (None, ""):

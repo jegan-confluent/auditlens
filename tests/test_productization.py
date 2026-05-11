@@ -150,6 +150,35 @@ def test_fingerprint_for_timestamp_missing_event_is_stable():
     assert event_fingerprint(event) == event_fingerprint(dict(event))
 
 
+def test_fingerprint_management_plane_deduplicates_double_emit():
+    # Two events representing the same IAM operation (same actor, action,
+    # resource, timestamp-second) but different message IDs (Confluent
+    # double-emit). They must produce the same fingerprint.
+    base = {
+        "methodName": "CreateAPIKey",
+        "user": "u-12g806",
+        "resourceName": "76NATGA2SWTNEZX5",
+        "time": "2026-05-04T13:06:37.100000Z",
+    }
+    emit1 = {**base, "id": "msg-id-aaa", "source_offset": 101}
+    emit2 = {**base, "id": "msg-id-bbb", "source_offset": 102}
+    assert event_fingerprint(emit1) == event_fingerprint(emit2)
+
+
+def test_fingerprint_kafka_data_plane_uses_unique_id():
+    # Kafka data-plane events (kafka. prefix) use the message ID so two
+    # different Produce calls with the same payload are not collapsed.
+    base = {
+        "methodName": "kafka.Produce",
+        "user": "sa-abc",
+        "resourceName": "crn://confluent.cloud/topic=orders",
+        "time": "2026-05-04T13:06:37.100000Z",
+    }
+    emit1 = {**base, "id": "msg-id-aaa"}
+    emit2 = {**base, "id": "msg-id-bbb"}
+    assert event_fingerprint(emit1) != event_fingerprint(emit2)
+
+
 def test_forwarder_db_writer_retention_cleanup_deletes_old_rows(tmp_path):
     writer = AuditEventDbWriter(f"sqlite:///{tmp_path / 'auditlens_api.db'}", retention_days=7)
     old_event = {
