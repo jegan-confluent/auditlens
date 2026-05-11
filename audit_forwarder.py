@@ -3346,6 +3346,18 @@ def main():
     else:
         metrics.set_db_writer_state("disabled")
 
+    pattern_detector = None
+    if ENABLE_DB_WRITER:
+        try:
+            from src.product.pattern_detector import PatternDetector
+            pattern_detector = PatternDetector(DATABASE_URL)
+            logger.info("PatternDetector initialized for recurring pattern detection")
+        except Exception as exc:
+            logger.warning(
+                "PatternDetector init failed; pattern detection disabled: %s",
+                mask_sensitive_text(str(exc)),
+            )
+
     # Optional Schema Registry check
     if SCHEMA_REGISTRY_URL:
         logger.info("Schema Registry configured: %s", SCHEMA_REGISTRY_URL)
@@ -3945,6 +3957,11 @@ def main():
                         # crash between offset-commit and async-write is
                         # recoverable via replay.
                         _route_to_queue(enriched_event)
+
+                    if pattern_detector is not None:
+                        _method = str(enriched_event.get("methodName", "")).lower()
+                        if _method not in BULK_NOISE_METHODS:
+                            pattern_detector.record(enriched_event)
 
                     safe_produce(producer, AUDIT_NORMALIZED_TOPIC, event_key, orjson.dumps(normalized_event))
                     safe_produce(producer, AUDIT_ENRICHED_TOPIC, event_key, orjson.dumps(enriched_event))
