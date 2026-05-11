@@ -142,6 +142,13 @@ def _enrich_actor_display_names(
     if not actor_values:
         return {}
     try:
+        # Restore a generous timeout before the per-actor loop.  list_patterns
+        # set statement_timeout=2000 for its main queries; N per-actor LIMIT 1
+        # queries each take <10ms but together can exceed 2s in the same
+        # transaction window on a busy Postgres host.
+        if db.get_bind().dialect.name == "postgresql":
+            db.execute(text("SET LOCAL statement_timeout = 10000"))
+
         # One LIMIT 1 query per actor — uses idx_audit_events_actor_display_enrichment
         # on PostgreSQL (~0.6ms per actor), falls back to sequential GROUP BY on SQLite.
         result: dict[str, tuple[str | None, str | None]] = {}
