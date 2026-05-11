@@ -1,0 +1,152 @@
+{
+  "__inputs": [],
+  "__requires": [],
+  "annotations": {"list": []},
+  "description": "AuditLens Postgres database size, connections, and table health",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": {"type": "prometheus", "uid": "auditlens-prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "id": 1,
+      "options": {},
+      "description": "Total size of the auditlens database in bytes",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "auditlens-prometheus"},
+          "expr": "pg_database_size_bytes{datname=\"auditlens\"}",
+          "legendFormat": "DB Size",
+          "refId": "A"
+        }
+      ],
+      "title": "Database Size",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "auditlens-prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "displayName": "connections"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "id": 2,
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "orientation": "auto", "textMode": "auto", "colorMode": "value", "graphMode": "area"},
+      "description": "Active client connections to auditlens database",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "auditlens-prometheus"},
+          "expr": "pg_stat_activity_count{datname=\"auditlens\"}",
+          "legendFormat": "Active Connections",
+          "refId": "A"
+        }
+      ],
+      "title": "Active Connections",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "auditlens-prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "id": 3,
+      "options": {},
+      "description": "Sum of dead tuples across all user tables — high values indicate need for VACUUM",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "auditlens-prometheus"},
+          "expr": "sum(pg_stat_user_tables_n_dead_tup)",
+          "legendFormat": "Dead Tuples",
+          "refId": "A"
+        }
+      ],
+      "title": "Dead Tuples",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "auditlens-prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "id": 4,
+      "options": {"frameIndex": 0, "showHeader": true},
+      "description": "Live tuple counts per user table",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "auditlens-prometheus"},
+          "expr": "pg_stat_user_tables_n_live_tup",
+          "legendFormat": "{{relname}}",
+          "refId": "A",
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "title": "Table Bloat (Live Tuples)",
+      "type": "table"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "auditlens-prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 70},
+              {"color": "red", "value": 85}
+            ]
+          },
+          "displayName": "Disk Usage %"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 16},
+      "id": 5,
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "orientation": "auto", "showThresholdLabels": false, "showThresholdMarkers": true},
+      "description": "Database size as a percentage of 40 GB; yellow at 70%, red at 85%",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "auditlens-prometheus"},
+          "expr": "pg_database_size_bytes{datname=\"auditlens\"} / (40 * 1024 * 1024 * 1024) * 100",
+          "legendFormat": "Disk Usage %",
+          "refId": "A"
+        }
+      ],
+      "title": "Disk Usage (% of 40 GB)",
+      "type": "gauge"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["auditlens"],
+  "templating": {"list": []},
+  "time": {"from": "now-3h", "to": "now"},
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "AuditLens — Postgres Health",
+  "uid": "auditlens-postgres",
+  "version": 1
+}

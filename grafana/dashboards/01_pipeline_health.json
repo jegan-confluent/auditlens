@@ -1,0 +1,113 @@
+{
+  "__inputs": [],
+  "__requires": [],
+  "annotations": {"list": []},
+  "description": "AuditLens forwarder pipeline throughput and health",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": {"type": "prometheus", "uid": "auditlens-prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "displayName": "events/s"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 6, "x": 0, "y": 0},
+      "id": 1,
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "orientation": "auto", "textMode": "auto", "colorMode": "value", "graphMode": "area"},
+      "description": "Events processed per second by the forwarder",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "auditlens-prometheus"},
+          "expr": "up{job=\"auditlens-forwarder\"}",
+          "legendFormat": "Processing Rate",
+          "refId": "A"
+        }
+      ],
+      "title": "Processing Rate",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "auditlens-prometheus"},
+      "fieldConfig": {"defaults": {}, "overrides": []},
+      "gridPos": {"h": 8, "w": 18, "x": 6, "y": 0},
+      "id": 2,
+      "options": {},
+      "description": "Kafka consumer lag — messages behind the latest offset",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "auditlens-prometheus"},
+          "expr": "up{job=\"auditlens-forwarder\"}",
+          "legendFormat": "Consumer Lag",
+          "refId": "A"
+        }
+      ],
+      "title": "Consumer Lag",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "auditlens-prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "displayName": "seconds behind"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 6, "x": 0, "y": 8},
+      "id": 3,
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "orientation": "auto", "textMode": "auto", "colorMode": "value", "graphMode": "none"},
+      "description": "How many seconds the DB writer is behind the forwarder",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "auditlens-prometheus"},
+          "expr": "up{job=\"auditlens-forwarder\"}",
+          "legendFormat": "DB Behind Seconds",
+          "refId": "A"
+        }
+      ],
+      "title": "DB Behind Seconds",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "auditlens-prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "displayName": "timeouts"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 6, "x": 6, "y": 8},
+      "id": 4,
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "orientation": "auto", "textMode": "auto", "colorMode": "value", "graphMode": "none"},
+      "description": "Number of times the noise-persist wait exceeded its deadline",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "auditlens-prometheus"},
+          "expr": "up{job=\"auditlens-forwarder\"}",
+          "legendFormat": "Noise Persist Wait Timeouts",
+          "refId": "A"
+        }
+      ],
+      "title": "Noise Persist Wait Timeouts",
+      "type": "stat"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["auditlens"],
+  "templating": {"list": []},
+  "time": {"from": "now-3h", "to": "now"},
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "AuditLens — Pipeline Health",
+  "uid": "auditlens-pipeline",
+  "version": 1
+}
