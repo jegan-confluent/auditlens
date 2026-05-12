@@ -49,7 +49,7 @@ def put_setting(
     _: None = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> dict:
-    if not payload.value and not payload.value.strip() if isinstance(payload.value, str) else not payload.value:
+    if not (payload.value.strip() if isinstance(payload.value, str) else payload.value):
         raise HTTPException(status_code=400, detail="value must not be empty")
     # Determine is_secret from known schema, or use caller-provided flag
     is_secret = payload.is_secret or _is_secret(category, key)
