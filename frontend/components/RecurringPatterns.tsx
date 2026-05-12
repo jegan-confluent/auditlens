@@ -38,7 +38,7 @@ export default function RecurringPatterns() {
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsed, setCollapsed] = useState(true);
   const [acting, setActing] = useState<number | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
