@@ -8,6 +8,13 @@ import type { AuditEvent, EventListResponse } from "../lib/types";
 const SERVICE_ACCOUNT_TYPES = new Set(["service_account", "serviceaccount", "service-account"]);
 const UNKNOWN_PRINCIPAL_LABELS = new Set(["unknown actor", "unknown user", "unknown service account", "unknown principal"]);
 
+function normalizeActorDisplay(value: string): string {
+  if (value.includes('"externalAccount"') && value.includes('"Confluent"')) return "Confluent (internal)";
+  if (value.startsWith("User:")) return value.slice(5);
+  if (value.startsWith("ServiceAccount:")) return value.slice(15);
+  return value;
+}
+
 type ActorSummary = {
   key: string;        // raw id, used for filter param
   display: string;    // primary label shown to user
@@ -53,7 +60,7 @@ function aggregate(events: AuditEvent[], limit = 5): ActorSummary[] {
     if (!existing) {
       buckets.set(key, {
         rawId: raw,
-        display: enriched ? display : (email || raw || "unknown"),
+        display: enriched ? display : (email || normalizeActorDisplay(raw) || "unknown"),
         email,
         isSA,
         unenriched: !enriched && !email,
@@ -70,7 +77,7 @@ function aggregate(events: AuditEvent[], limit = 5): ActorSummary[] {
     // Promote a richer label if a later event provides one (some events are
     // enriched, others aren't; pick the best one we've seen).
     if (enriched && (existing.unenriched || !existing.display.includes(display))) {
-      existing.display = display;
+      existing.display = normalizeActorDisplay(display);
       existing.unenriched = false;
     } else if (!existing.email && email) {
       existing.email = email;
