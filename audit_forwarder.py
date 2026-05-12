@@ -2641,7 +2641,7 @@ def flatten_audit(event):
 
 # ──────────── delivery callback ────────────
 delivery_errors = {"count": 0, "last_error": None}
-dlq_stats = {"sent": 0, "failed": 0}
+dlq_stats = {"sent": 0, "failed": 0, "enqueued": 0}
 
 def delivery_callback(err, msg):
     """Track delivery errors."""
@@ -2683,7 +2683,7 @@ def send_to_dlq(producer, raw_value: bytes, error_msg: str, source_topic: str, p
             value=orjson.dumps(dlq_event),
             callback=lambda err, msg: dlq_stats.update({"sent": dlq_stats["sent"] + 1}) if not err else dlq_stats.update({"failed": dlq_stats["failed"] + 1})
         )
-        dlq_stats["sent"] += 1
+        dlq_stats["enqueued"] += 1
     except Exception as e:
         dlq_stats["failed"] += 1
         logger.warning("Failed to send to DLQ: %s", e)
