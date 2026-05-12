@@ -1443,10 +1443,20 @@ class MetricsHandler(BaseHTTPRequestHandler):
         try:
             safe_payload = _normalize_json_keys(payload)
             self.wfile.write(orjson.dumps(safe_payload, option=orjson.OPT_INDENT_2))
-        except Exception:
-            logger.error("JSON serialization error in health endpoint")
-            fallback = {"status": "error", "message": "serialization failure"}
-            self.wfile.write(orjson.dumps(fallback, option=orjson.OPT_INDENT_2))
+        except BrokenPipeError:
+            # Client disconnected before response completed — normal,
+            # happens when healthcheck client closes early. Never re-raise.
+            pass
+        except TypeError as e:
+            logger.warning("Health payload serialization failed: %s", e)
+            try:
+                fallback = orjson.dumps({"status": "ok", "error": "serialization_failed"})
+                self.wfile.write(fallback)
+            except Exception:
+                pass
+        except Exception as e:
+            logger.debug("Health endpoint send error (ignored): %s", e)
+            pass
 
     def _send_bytes(self, status_code: int, content_type: str, payload: bytes, headers: dict | None = None):
         self.send_response(status_code)
@@ -2303,9 +2313,20 @@ class MetricsHandler(BaseHTTPRequestHandler):
         # Suppress HTTP server logs to avoid cluttering the output
         pass
 
+class AuditLensHealthServer(HTTPServer):
+    def handle_error(self, request, client_address):
+        exc_type = sys.exc_info()[0]
+        if exc_type in (BrokenPipeError, ConnectionResetError):
+            return  # Normal client disconnect — suppress socketserver stderr output
+        logger.debug(
+            "Health server minor error from %s: %s",
+            client_address, sys.exc_info()[1],
+        )
+
+
 def start_metrics_server(port=METRICS_PORT):
     """Start metrics server in a separate thread"""
-    server = HTTPServer(('0.0.0.0', port), MetricsHandler)
+    server = AuditLensHealthServer(('0.0.0.0', port), MetricsHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     logger.info(f"Metrics server started on port {port}")

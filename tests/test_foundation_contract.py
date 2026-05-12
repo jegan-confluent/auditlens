@@ -181,9 +181,12 @@ def test_send_json_falls_back_without_dumping_payload(monkeypatch, caplog):
 
     forwarder.MetricsHandler._send_json(handler, 200, secret_payload)
 
+    # Behavioral assertion change: new fallback is {"status": "ok", "error":
+    # "serialization_failed"} and the log is WARNING-level, not ERROR. The
+    # critical invariant — secret payload never appears in logs — is unchanged.
     fallback = orjson.loads(handler.writes[-1])
-    assert fallback == {"status": "error", "message": "serialization failure"}
-    assert "JSON serialization error in health endpoint" in caplog.text
+    assert fallback == {"status": "ok", "error": "serialization_failed"}
+    assert "Health payload serialization failed" in caplog.text
     assert "do-not-log" not in caplog.text
 
 
