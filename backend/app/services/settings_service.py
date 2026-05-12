@@ -64,7 +64,11 @@ def get_masked(db: Session, category: str, key: str) -> str | None:
     if row is None:
         return None
     if row.is_secret:
-        return _mask(row.value or "****")
+        try:
+            decrypted = decrypt(row.value_enc) if row.value_enc else ""
+        except Exception:
+            decrypted = ""
+        return _mask(decrypted or "****")
     return row.value
 
 
