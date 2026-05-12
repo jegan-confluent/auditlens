@@ -190,10 +190,14 @@ export default function ActionFeed({ timeWindow = "24h" }: { timeWindow?: string
 
   const allLoaded = categories.every((cat) => state[cat.key].status !== "loading");
   const allEmpty = allLoaded && categories.every((cat) => state[cat.key].status === "loaded" && state[cat.key].total === 0);
+  // "Needs attention" header only when action_required categories have items.
+  const hasAttentionItems = allLoaded && (
+    (state["deletes"]?.total ?? 0) > 0 || (state["access"]?.total ?? 0) > 0
+  );
 
   return (
     <section className="action-feed panel">
-      <h2>Today&apos;s briefing</h2>
+      <h2>{allLoaded && hasAttentionItems ? "⚠️ Needs attention" : "✅ Recent activity"}</h2>
       <p className="muted">Grouped activity from the last 24 hours that may need your attention.</p>
       {allEmpty ? (
         <p className="action-feed-allclear">✅ Nothing unusual in the last 24h. Continue monitoring.</p>

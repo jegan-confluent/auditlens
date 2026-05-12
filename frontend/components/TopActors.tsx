@@ -136,7 +136,7 @@ export default function TopActors({ timeWindow = "24h" }: { timeWindow?: string 
   if (error) {
     return (
       <section className="top-actors panel">
-        <h2>Top actors today</h2>
+        <h2>Who was active — last {timeWindow}</h2>
         <p className="panel-error">Could not load top actors — {error}</p>
       </section>
     );
@@ -144,7 +144,7 @@ export default function TopActors({ timeWindow = "24h" }: { timeWindow?: string 
   if (!actors) {
     return (
       <section className="top-actors panel">
-        <h2>Top actors today</h2>
+        <h2>Who was active — last {timeWindow}</h2>
         <p className="muted">Loading…</p>
       </section>
     );
@@ -152,7 +152,7 @@ export default function TopActors({ timeWindow = "24h" }: { timeWindow?: string 
   if (!actors.length) {
     return (
       <section className="top-actors panel">
-        <h2>Top actors today</h2>
+        <h2>Who was active — last {timeWindow}</h2>
         <p className="muted">No actor activity in the last 24 hours.</p>
       </section>
     );
@@ -160,7 +160,7 @@ export default function TopActors({ timeWindow = "24h" }: { timeWindow?: string 
 
   return (
     <section className="top-actors panel">
-      <h2>Top actors today</h2>
+      <h2>Who was active — last {timeWindow}</h2>
       <p className="muted">Most active principals in the last 24 hours (sample of {scanned.toLocaleString()} events).</p>
       <ul className="top-actors-list">
         {actors.map((actor) => {
