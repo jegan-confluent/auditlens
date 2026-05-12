@@ -3352,13 +3352,29 @@ _BACKFILL_BATCH_SIZE = 100
 _BACKFILL_BATCH_SLEEP = 0.05  # seconds between batches — keeps row-lock windows short
 
 
-def _backfill_batched(conn_factory, sql: str, params: dict, label: str) -> int:
-    """Run a UPDATE ... WHERE ... LIMIT batch loop, committing each batch
-    separately.  Short per-batch transactions avoid deadlocks with the live
-    DB writer.  Returns total rows updated."""
+def _backfill_batched(conn_factory, where_clause: str, set_clause: str, params: dict) -> int:
+    """Batched UPDATE using CTE + FOR UPDATE SKIP LOCKED.
+
+    Postgres does not support LIMIT inside UPDATE directly.  The CTE pattern
+    selects a batch of row IDs (skipping any rows currently locked by the live
+    DB writer) and then updates only those IDs.  Each batch is its own
+    committed transaction so lock windows stay small.  Returns total rows
+    updated.
+    """
     from sqlalchemy import text as sa_text  # noqa: PLC0415
+    batch_sql = sa_text(f"""
+        WITH batch AS (
+            SELECT id FROM audit_events
+            WHERE {where_clause}
+            LIMIT :limit
+            FOR UPDATE SKIP LOCKED
+        )
+        UPDATE audit_events
+        SET {set_clause}
+        FROM batch
+        WHERE audit_events.id = batch.id
+    """)
     total = 0
-    batch_sql = sa_text(sql)
     while True:
         with conn_factory() as conn:
             r = conn.execute(batch_sql, {**params, "limit": _BACKFILL_BATCH_SIZE})
@@ -3381,13 +3397,13 @@ def _run_startup_display_name_backfill() -> None:
       2. JSON blobs stored as display names (Confluent internal events).
       3. Stored display names that still carry the "User:" prefix.
 
-    Uses small batched UPDATEs (LIMIT :limit) with brief sleeps between
-    batches to avoid deadlocking the live DB writer.
+    Uses CTE + FOR UPDATE SKIP LOCKED batches so it never deadlocks the live
+    DB writer — locked rows are skipped, not waited on.
     """
     if not ENABLE_DB_WRITER or db_writer is None:
         return
     if not PRODUCT_MODE:
-        # SQLite-only demo mode — SUBSTRING / LIMIT in UPDATE is Postgres-specific; skip.
+        # SQLite-only demo mode — CTE/SUBSTRING is Postgres-specific; skip.
         return
 
     from src.product.actor_enrichment import _confluent_identity_enricher  # noqa: PLC0415
@@ -3417,18 +3433,15 @@ def _run_startup_display_name_backfill() -> None:
                     continue
                 n = _backfill_batched(
                     conn_factory,
-                    """
-                        UPDATE audit_events
-                        SET actor_display_name = :dn
-                        WHERE actor = :actor
-                          AND (actor_display_name IS NULL
-                               OR actor_display_name = actor
-                               OR actor_display_name LIKE 'User:%'
-                               OR actor_display_name LIKE '{%')
-                        LIMIT :limit
-                    """,
-                    {"dn": display_name, "actor": actor_id},
-                    f"IAM/{actor_id}",
+                    where_clause=(
+                        "actor = :actor"
+                        " AND (actor_display_name IS NULL"
+                        "      OR actor_display_name = actor"
+                        "      OR actor_display_name LIKE 'User:%'"
+                        "      OR actor_display_name LIKE '{%')"
+                    ),
+                    set_clause="actor_display_name = :dn",
+                    params={"dn": display_name, "actor": actor_id},
                 )
                 iam_total += n
             if iam_total:
@@ -3437,14 +3450,9 @@ def _run_startup_display_name_backfill() -> None:
         # Fix 2: normalize stored Confluent JSON blob display names.
         n2 = _backfill_batched(
             conn_factory,
-            """
-                UPDATE audit_events
-                SET actor_display_name = 'Confluent (internal)'
-                WHERE actor_display_name LIKE '{%"externalAccount"%'
-                LIMIT :limit
-            """,
-            {},
-            "json-blob",
+            where_clause="actor_display_name LIKE '{%\"externalAccount\"%'",
+            set_clause="actor_display_name = 'Confluent (internal)'",
+            params={},
         )
         if n2:
             logger.info("Startup backfill: fixed %d Confluent JSON blob rows", n2)
@@ -3452,15 +3460,12 @@ def _run_startup_display_name_backfill() -> None:
         # Fix 3: strip stored 'User:' prefix (Postgres SUBSTRING syntax).
         n3 = _backfill_batched(
             conn_factory,
-            """
-                UPDATE audit_events
-                SET actor_display_name = SUBSTRING(actor_display_name FROM 6)
-                WHERE actor_display_name LIKE 'User:u-%'
-                   OR actor_display_name LIKE 'User:sa-%'
-                LIMIT :limit
-            """,
-            {},
-            "user-prefix",
+            where_clause=(
+                "actor_display_name LIKE 'User:u-%'"
+                " OR actor_display_name LIKE 'User:sa-%'"
+            ),
+            set_clause="actor_display_name = SUBSTRING(actor_display_name FROM 6)",
+            params={},
         )
         if n3:
             logger.info("Startup backfill: stripped User: prefix from %d rows", n3)
