@@ -112,6 +112,10 @@ class PatternDetector:
             or event.get("authzResourceName")
             or ""
         )
+        if resource.startswith("crn://"):
+            parts = resource.rstrip("/").split("/")
+            last = parts[-1] if parts else ""
+            resource = last.split("=")[-1] if "=" in last else last
         if not actor or not action:
             return
 

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { getPatterns, markPatternExpected, suppressPattern } from "../lib/api";
+import { formatResourceName } from "../lib/utils";
 import type { EventPattern } from "../lib/types";
 
 function relativeTime(iso: string | null | undefined): string {
@@ -130,7 +131,7 @@ export default function RecurringPatterns() {
                       {isServiceAccount(p.actor_type) && <span className="actor-badge">SA</span>}
                     </td>
                     <td title={p.action}>{truncate(p.action, 50)}</td>
-                    <td title={p.resource_name ?? ""}>{p.resource_name ? truncate(p.resource_name, 40) : <span className="muted">—</span>}</td>
+                    <td title={p.resource_name ?? ""}>{p.resource_name ? truncate(formatResourceName(p.resource_name), 40) : <span className="muted">—</span>}</td>
                     <td className="pattern-count">{p.occurrence_count.toLocaleString()}×</td>
                     <td className="muted">{relativeTime(p.last_seen_at)}</td>
                     <td className="pattern-action-buttons">
