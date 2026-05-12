@@ -13,9 +13,9 @@ export type EventFilters = {
   impact_type: string;
 };
 
-// Default landing state = "Needs Attention": last 12h, decision-mode, only
-// action_required + attention signals, with routine noise hidden. The user
-// can switch to the full audit trail with a single click.
+// Default landing state = "Action Required": last 12h, decision-mode, only
+// action_required events (the ones that need immediate attention). The user
+// can widen to attention/all via the filter chips or FilterBar.
 export const defaultFilters: EventFilters = {
   mode: "decision",
   time_window: "12h",
@@ -26,7 +26,7 @@ export const defaultFilters: EventFilters = {
   action_category: "",
   actor: "",
   result: "",
-  signal: "action_required,attention",
+  signal: "action_required",
   hide_noise: "true",
   impact_type: ""
 };
@@ -146,7 +146,7 @@ export function activeFilterLabels(filters: EventFilters) {
     if (key === "time_window" && value.endsWith("h")) return `Last ${value.slice(0, -1)} hours`;
     if (key === "time_window" && value.endsWith("d")) return `Last ${value.slice(0, -1)} days`;
     if (key === "signal" && value === "action_required,attention") return "Needs attention";
-    if (key === "signal" && value === "action_required") return "Action needed";
+    if (key === "signal" && value === "action_required") return "Action Required";
     if (key === "signal" && value === "attention") return "Needs review";
     if (key === "signal" && value === "informational") return "Informational";
     if (key === "signal" && value === "noise") return "Noise";
