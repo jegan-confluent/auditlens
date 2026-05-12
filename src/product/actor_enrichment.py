@@ -102,6 +102,8 @@ def _normalize_identity(raw_id: str, value: Any, *, source: str, default_confide
     if actor_type not in ACTOR_TYPES:
         actor_type = "unknown"
     display_name = _as_text(value.get("display_name") or value.get("name") or value.get("label") or value.get("email"))
+    if display_name.startswith(("{", "[")):
+        display_name = ""
     output = {
         "actor_id": actor_raw_id(_as_text(value.get("actor_id") or value.get("id") or raw_id)),
         "actor_display_name": display_name,
