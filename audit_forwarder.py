@@ -3348,6 +3348,28 @@ def replay_events(
         replay_consumer.close()
 
 # ──────────── main ────────────
+_BACKFILL_BATCH_SIZE = 100
+_BACKFILL_BATCH_SLEEP = 0.05  # seconds between batches — keeps row-lock windows short
+
+
+def _backfill_batched(conn_factory, sql: str, params: dict, label: str) -> int:
+    """Run a UPDATE ... WHERE ... LIMIT batch loop, committing each batch
+    separately.  Short per-batch transactions avoid deadlocks with the live
+    DB writer.  Returns total rows updated."""
+    from sqlalchemy import text as sa_text  # noqa: PLC0415
+    total = 0
+    batch_sql = sa_text(sql)
+    while True:
+        with conn_factory() as conn:
+            r = conn.execute(batch_sql, {**params, "limit": _BACKFILL_BATCH_SIZE})
+            n = r.rowcount
+        total += n
+        if n < _BACKFILL_BATCH_SIZE:
+            break
+        time.sleep(_BACKFILL_BATCH_SLEEP)
+    return total
+
+
 def _run_startup_display_name_backfill() -> None:
     """One-time backfill of historical enrichment gaps — runs once in a daemon
     thread after startup so it never blocks the consume loop.
@@ -3358,15 +3380,17 @@ def _run_startup_display_name_backfill() -> None:
          from the IAM cache once it is warm.
       2. JSON blobs stored as display names (Confluent internal events).
       3. Stored display names that still carry the "User:" prefix.
+
+    Uses small batched UPDATEs (LIMIT :limit) with brief sleeps between
+    batches to avoid deadlocking the live DB writer.
     """
     if not ENABLE_DB_WRITER or db_writer is None:
         return
     if not PRODUCT_MODE:
-        # SQLite-only demo mode — SUBSTRING syntax is Postgres-specific; skip.
+        # SQLite-only demo mode — SUBSTRING / LIMIT in UPDATE is Postgres-specific; skip.
         return
 
     from src.product.actor_enrichment import _confluent_identity_enricher  # noqa: PLC0415
-    from sqlalchemy import text as sa_text  # noqa: PLC0415
 
     try:
         # Wait up to 60 s for the IAM cache to warm before using it.
@@ -3374,56 +3398,72 @@ def _run_startup_display_name_backfill() -> None:
     except Exception:
         pass
 
+    conn_factory = db_writer.engine.begin
+
     try:
         enricher = _confluent_identity_enricher()
 
-        with db_writer.engine.begin() as conn:
-            # Fix 1: backfill actors the IAM cache now knows about.
-            if enricher is not None:
-                identities = (
-                    list(enricher.get_all_service_accounts()) +
-                    list(enricher.get_all_users())
+        # Fix 1: backfill actors the IAM cache now knows about.
+        if enricher is not None:
+            identities = (
+                list(enricher.get_all_service_accounts()) +
+                list(enricher.get_all_users())
+            )
+            iam_total = 0
+            for info in identities:
+                actor_id = info.id
+                display_name = info.display_name
+                if not display_name or display_name == actor_id:
+                    continue
+                n = _backfill_batched(
+                    conn_factory,
+                    """
+                        UPDATE audit_events
+                        SET actor_display_name = :dn
+                        WHERE actor = :actor
+                          AND (actor_display_name IS NULL
+                               OR actor_display_name = actor
+                               OR actor_display_name LIKE 'User:%'
+                               OR actor_display_name LIKE '{%')
+                        LIMIT :limit
+                    """,
+                    {"dn": display_name, "actor": actor_id},
+                    f"IAM/{actor_id}",
                 )
-                iam_total = 0
-                for info in identities:
-                    actor_id = info.id
-                    display_name = info.display_name
-                    if not display_name or display_name == actor_id:
-                        continue
-                    r = conn.execute(
-                        sa_text("""
-                            UPDATE audit_events
-                            SET actor_display_name = :dn
-                            WHERE actor = :actor
-                              AND (actor_display_name IS NULL
-                                   OR actor_display_name = actor
-                                   OR actor_display_name LIKE 'User:%'
-                                   OR actor_display_name LIKE '{%')
-                        """),
-                        {"dn": display_name, "actor": actor_id},
-                    )
-                    iam_total += r.rowcount
-                if iam_total:
-                    logger.info("Startup backfill: updated %d rows from IAM cache", iam_total)
+                iam_total += n
+            if iam_total:
+                logger.info("Startup backfill: updated %d rows from IAM cache", iam_total)
 
-            # Fix 2: normalize stored Confluent JSON blob display names.
-            r2 = conn.execute(sa_text("""
+        # Fix 2: normalize stored Confluent JSON blob display names.
+        n2 = _backfill_batched(
+            conn_factory,
+            """
                 UPDATE audit_events
                 SET actor_display_name = 'Confluent (internal)'
                 WHERE actor_display_name LIKE '{%"externalAccount"%'
-            """))
-            if r2.rowcount:
-                logger.info("Startup backfill: fixed %d Confluent JSON blob rows", r2.rowcount)
+                LIMIT :limit
+            """,
+            {},
+            "json-blob",
+        )
+        if n2:
+            logger.info("Startup backfill: fixed %d Confluent JSON blob rows", n2)
 
-            # Fix 3: strip stored 'User:' prefix (Postgres SUBSTRING syntax).
-            r3 = conn.execute(sa_text("""
+        # Fix 3: strip stored 'User:' prefix (Postgres SUBSTRING syntax).
+        n3 = _backfill_batched(
+            conn_factory,
+            """
                 UPDATE audit_events
                 SET actor_display_name = SUBSTRING(actor_display_name FROM 6)
                 WHERE actor_display_name LIKE 'User:u-%'
                    OR actor_display_name LIKE 'User:sa-%'
-            """))
-            if r3.rowcount:
-                logger.info("Startup backfill: stripped User: prefix from %d rows", r3.rowcount)
+                LIMIT :limit
+            """,
+            {},
+            "user-prefix",
+        )
+        if n3:
+            logger.info("Startup backfill: stripped User: prefix from %d rows", n3)
 
         logger.info("Startup display name backfill complete")
     except Exception as exc:
