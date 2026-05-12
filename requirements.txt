@@ -46,3 +46,6 @@ orjson==3.10.12
 
 # YAML config parsing (for classification rules)
 PyYAML==6.0.2
+
+# Process memory stats for OOM detection logging (optional — graceful fallback if absent)
+psutil==6.1.1

@@ -38,6 +38,13 @@ from pathlib import Path
 from io import StringIO
 from urllib.parse import parse_qs, urlparse
 from dotenv import load_dotenv
+
+try:
+    import psutil as _psutil
+    _PSUTIL_AVAILABLE = True
+except ImportError:
+    _psutil = None  # type: ignore[assignment]
+    _PSUTIL_AVAILABLE = False
 from confluent_kafka import Consumer, Producer, KafkaError, TopicPartition
 from confluent_kafka.schema_registry import SchemaRegistryClient
 from confluent_kafka.schema_registry.json_schema import JSONSerializer
@@ -3327,6 +3334,8 @@ def main():
     logger.info(f"Version: {VERSION}")
     logger.info("Mode: Kafka-native foundation pipeline")
     logger.info("=" * 70)
+    _mem_limit = os.getenv("MEMORY_LIMIT_MB", "unknown")
+    logger.info("Starting PID=%d mem_limit=%sMB", os.getpid(), _mem_limit)
 
     startup_config = validate_startup_config()
     if not startup_config["valid"]:
@@ -4270,14 +4279,22 @@ def main():
         nonlocal last_heartbeat, last_lag_ts
         if now - last_heartbeat >= 30:
             _refresh_queue_depths()
+            _mem_mb_part = ""
+            if _PSUTIL_AVAILABLE:
+                try:
+                    _mem_mb = _psutil.Process().memory_info().rss / 1024 / 1024
+                    _mem_mb_part = f" memory_mb={_mem_mb:.0f}"
+                except Exception:
+                    pass
             logger.info(
                 "Forwarder is alive at %s. Processed: %d, Errors: %d, Delivery failures: %d, "
-                "DLQ: %d sent/%d failed, queue=%d/%d, lanes critical=%d normal=%d bulk=%d catalog=%d",
+                "DLQ: %d sent/%d failed, queue=%d/%d, lanes critical=%d normal=%d bulk=%d catalog=%d%s",
                 time.ctime(), metrics.processed_total, metrics.error_count, delivery_errors["count"],
                 dlq_stats["sent"], dlq_stats["failed"],
                 record_queue.qsize(), RECORD_QUEUE_SIZE,
                 metrics.critical_queue_depth, metrics.normal_queue_depth,
                 metrics.bulk_queue_depth, metrics.catalog_queue_depth,
+                _mem_mb_part,
             )
             if delivery_errors["last_error"]:
                 logger.info(

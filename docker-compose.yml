@@ -56,6 +56,7 @@ services:
       - API_MAX_SEARCH_RESULTS=${API_MAX_SEARCH_RESULTS:-500}
       - API_EXPORT_MAX_ROWS=${API_EXPORT_MAX_ROWS:-5000}
       - API_EXPORT_MAX_HOURS=${API_EXPORT_MAX_HOURS:-168}
+      - MEMORY_LIMIT_MB=512
     volumes:
       - ./audit_forwarder.py:/app/audit_forwarder.py:ro
       - ./src:/app/src:ro
@@ -87,12 +88,12 @@ services:
       resources:
         limits:
           cpus: '0.25'
-          memory: 384M
+          memory: 512M
         reservations:
           cpus: '0.10'
           memory: 128M
     cpus: "0.25"
-    mem_limit: 384m
+    mem_limit: 512m
     # Security options
     security_opt:
       - no-new-privileges:true
