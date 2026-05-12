@@ -23,6 +23,8 @@ function truncate(value: string, max: number): string {
 
 function formatPatternActor(actor: string): string {
   if (actor.startsWith("{") || actor.startsWith("[")) return "Confluent (platform)";
+  if (actor.startsWith("User:")) return truncate(actor.slice(5), 40);
+  if (actor.startsWith("ServiceAccount:")) return truncate(actor.slice(15), 40);
   return truncate(actor, 40);
 }
 

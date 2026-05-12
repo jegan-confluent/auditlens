@@ -101,10 +101,17 @@ function looksLikeJson(v: string): boolean {
   return v.startsWith("{") || v.startsWith("[");
 }
 
-function formatSubject(subject: string): string {
+function stripActorPrefix(subject: string): string {
+  if (subject.startsWith("User:")) return subject.slice(5);
+  if (subject.startsWith("ServiceAccount:")) return subject.slice(15);
+  return subject;
+}
+
+function formatSubject(subject: string, displayName?: string | null): string {
   if (!subject) return "—";
   if (looksLikeJson(subject)) return "Confluent (platform)";
-  return subject;
+  if (displayName) return displayName;
+  return stripActorPrefix(subject);
 }
 
 export default function SignalSummaryPanel({ summary, onApplyFlow, currentSignal }: {
@@ -158,9 +165,9 @@ export default function SignalSummaryPanel({ summary, onApplyFlow, currentSignal
               >
                 <span className="flow-icon" aria-hidden>{iconForSignal(group.signal_type)}</span>
                 <span className="flow-body">
-                  <span className="flow-title">{group.subject ? group.group_title.replace(group.subject, formatSubject(group.subject)) : group.group_title}</span>
+                  <span className="flow-title">{group.subject ? group.group_title.replace(group.subject, formatSubject(group.subject, group.subject_display_name)) : group.group_title}</span>
                   <span className="flow-meta">
-                    {formatSubject(group.subject)} · {formatAge(group.last_seen)}
+                    {formatSubject(group.subject, group.subject_display_name)} · {formatAge(group.last_seen)}
                     {group.event_count > 1 ? ` · ${group.event_count.toLocaleString()} events` : ""}
                   </span>
                 </span>
