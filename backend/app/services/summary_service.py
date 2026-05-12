@@ -175,11 +175,18 @@ def _flow_groups(events: list[AuditEvent], limit: int = 5) -> list[dict[str, Any
         subject = representative.subject
         family = representative.resource_family
         _raw_dn = representative._actor_display_name or ""
-        subject_display_name: str | None = (
-            _raw_dn
-            if _raw_dn and _raw_dn != subject and _raw_dn != representative.actor
-            else None
+        _PRINCIPAL_PREFIXES = ("user:", "u-", "sa-", "api-key-", "apikey", "pool-", "org-", "lkc-", "env-")
+        _dn_ok = (
+            bool(_raw_dn)
+            and _raw_dn != subject
+            and _raw_dn != representative.actor
+            and not _raw_dn.startswith("{")
+            and (
+                "@" in _raw_dn
+                or not _raw_dn.lower().startswith(_PRINCIPAL_PREFIXES)
+            )
         )
+        subject_display_name: str | None = _raw_dn if _dn_ok else None
         display = subject_display_name or subject
         if representative.signal_type == "action_required":
             title = f"{len(group)} action-needed events detected for {display}"

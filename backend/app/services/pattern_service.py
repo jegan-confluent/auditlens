@@ -3,7 +3,7 @@
 import logging
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import func, or_, select, text, update
+from sqlalchemy import case, func, or_, select, text, update
 from sqlalchemy.orm import Session
 
 from backend.app.db.models import AuditEvent, AuditEventPattern
@@ -184,8 +184,21 @@ def _enrich_actor_display_names(
                     AuditEvent._actor_display_name.isnot(None),
                     AuditEvent._actor_display_name != "",
                     AuditEvent._actor_display_name != AuditEvent.actor,
+                    AuditEvent._actor_display_name.notlike('{%'),
+                    AuditEvent._actor_display_name.notlike('________-____%'),
                 )
-                .order_by(AuditEvent.id.desc())
+                .order_by(
+                    case(
+                        (
+                            AuditEvent._actor_display_name.notlike('%@%') &
+                            AuditEvent._actor_display_name.notlike('%-%-%-%-%'),
+                            0,
+                        ),
+                        (AuditEvent._actor_display_name.like('%@%'), 1),
+                        else_=2,
+                    ),
+                    AuditEvent.id.desc(),
+                )
                 .limit(1)
             ).first()
             if row:

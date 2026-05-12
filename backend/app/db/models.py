@@ -16,6 +16,21 @@ from src.product.triage_store import get_triage
 logger = logging.getLogger("auditlens.backend.models")
 
 
+_PRINCIPAL_PREFIXES = ("user:", "u-", "sa-", "api-key-", "apikey", "pool-", "org-", "lkc-", "env-")
+
+
+def _is_enriched_display_name(value: str | None) -> bool:
+    """Return True only when value looks like a real name or email, not a raw ID or JSON blob."""
+    if not value:
+        return False
+    if value.startswith(("{", "[")):
+        return False
+    lowered = value.strip().lower()
+    if "@" in lowered:
+        return True
+    return not lowered.startswith(_PRINCIPAL_PREFIXES)
+
+
 class Base(DeclarativeBase):
     pass
 
@@ -383,14 +398,11 @@ class AuditEvent(Base):
 
     @property
     def actor_display_name(self) -> str:
-        # Phase 5: never substitute a placeholder. Fall back through stored
-        # display_name → enrichment result → raw actor ID, and only as a
-        # last resort the raw actor field (which may itself be the legacy
-        # column default — but that is the *raw* actor we received, not a
-        # synthetic "Unknown user" label that hides the underlying ID).
+        stored = self._actor_display_name
+        if _is_enriched_display_name(stored):
+            return stored  # type: ignore[return-value]
         return str(
-            self._actor_display_name
-            or self._actor_enrichment()["actor_display_name"]
+            self._actor_enrichment()["actor_display_name"]
             or self.actor
             or ""
         )
