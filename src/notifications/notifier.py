@@ -137,7 +137,7 @@ class AuditLensNotifier:
     def __init__(self, config_path: str = "notifications.yml") -> None:
         self._config_path = config_path
         self._destinations: list[NotificationDestination] = []
-        self._dedup: dict[str, float] = {}
+        self._dedup: dict[tuple[str, str], float] = {}
         self._dedup_lock = threading.Lock()
         self._call_count = 0
         self._mtime: float | None = None
@@ -275,23 +275,19 @@ class AuditLensNotifier:
     # ------------------------------------------------------------------
     # Deduplication
     # ------------------------------------------------------------------
-    def _is_duplicate(self, event_fingerprint: str, destination_name: str) -> bool:
-        """True if (fingerprint, dest) was sent within DEDUP_WINDOW_SECONDS."""
-        key = f"{event_fingerprint}:{destination_name}"
+    def _check_and_record_dedup(self, fingerprint: str, dest: str) -> bool:
+        """Atomically check and record dedup. Returns True if duplicate (skip)."""
         with self._dedup_lock:
+            key = (fingerprint, dest)
             last = self._dedup.get(key)
-            if last is None:
-                return False
-            return (time.time() - last) < DEDUP_WINDOW_SECONDS
-
-    def _record_dedup(self, event_fingerprint: str, destination_name: str) -> None:
-        key = f"{event_fingerprint}:{destination_name}"
-        with self._dedup_lock:
+            if last and (time.time() - last) < DEDUP_WINDOW_SECONDS:
+                return True
             self._dedup[key] = time.time()
             self._call_count += 1
             if self._call_count >= DEDUP_PRUNE_EVERY_N_CALLS:
                 self._prune_dedup_locked()
                 self._call_count = 0
+            return False
 
     def _prune_dedup_locked(self) -> None:
         cutoff = time.time() - DEDUP_WINDOW_SECONDS
@@ -324,9 +320,8 @@ class AuditLensNotifier:
                     continue
                 if not self.should_notify(event, destination):
                     continue
-                if self._is_duplicate(fingerprint, destination.name):
+                if self._check_and_record_dedup(fingerprint, destination.name):
                     continue
-                self._record_dedup(fingerprint, destination.name)
                 t = threading.Thread(
                     target=self._send_with_retry,
                     args=(event, destination),
