@@ -2641,12 +2641,14 @@ def flatten_audit(event):
 
 # ──────────── delivery callback ────────────
 delivery_errors = {"count": 0, "last_error": None}
+_delivery_errors_lock = threading.Lock()
 dlq_stats = {"sent": 0, "failed": 0, "enqueued": 0}
 
 def delivery_callback(err, msg):
     """Track delivery errors."""
     if err:
-        delivery_errors["count"] += 1
+        with _delivery_errors_lock:
+            delivery_errors["count"] += 1
         # Always store the masked form so anything that subsequently reads
         # delivery_errors["last_error"] (the heartbeat log, the /health probe,
         # etc.) cannot inadvertently leak secrets.
