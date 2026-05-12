@@ -885,9 +885,10 @@ def backfill_actor_display_names(
         if not batch:
             break
 
+        batch_last_id: int | None = None
         for event in batch:
             scanned += 1
-            last_id = event.id
+            batch_last_id = event.id
             try:
                 updates = _resolve_actor_display_name(event)
             except Exception as exc:
@@ -928,10 +929,15 @@ def backfill_actor_display_names(
         if not dry_run:
             try:
                 db.commit()
+                # Only advance the cursor after a successful commit so that a
+                # commit failure does not silently skip events in the batch.
+                last_id = batch_last_id
             except Exception as exc:
                 errors += 1
                 logger.warning("actor backfill commit failed: %s", exc)
                 db.rollback()
+        else:
+            last_id = batch_last_id
 
         if scanned and scanned % _ACTOR_BACKFILL_PROGRESS_LOG_EVERY < _ACTOR_BACKFILL_BATCH_SIZE:
             logger.info(
