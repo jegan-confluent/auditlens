@@ -46,7 +46,7 @@ def summary(
             impact_type=impact_type,
             change_type=change_type,
             include_noise=include_noise,
-            noise_retention_days=get_settings().event_retention_days,
+            noise_retention_days=get_settings().noise_retention_days,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

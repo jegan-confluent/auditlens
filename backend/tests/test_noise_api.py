@@ -265,7 +265,7 @@ def test_summary_include_noise_true_returns_block(noise_client):
     assert ns is not None
     assert ns["total_noise_events"] == 72
     assert ns["noise_table_rows"] == 72
-    assert ns["noise_retention_days"] == 7  # default from settings
+    assert ns["noise_retention_days"] == 3  # BUG-004 fix: NOISE_RETENTION_DAYS default (3), not EVENT_RETENTION_DAYS (7)
 
 
 def test_summary_include_noise_true_top_methods_sorted_desc(noise_client):
