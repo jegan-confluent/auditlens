@@ -70,6 +70,7 @@ export type EventListResponse = {
   signal_filter_applied: boolean;
   hide_noise_applied: boolean;
   result_limit_reached: boolean;
+  next_cursor?: string | null;
   debug?: Record<string, unknown> | null;
 };
 
