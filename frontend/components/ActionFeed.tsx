@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { getEvents, isAbortError } from "../lib/api";
 import type { AuditEvent, EventListResponse } from "../lib/types";
@@ -9,6 +9,7 @@ type FeedGroup = {
   action: string;
   count: number;
   lastActor: string;
+  lastActorId: string;
   lastAt: string;
 };
 
@@ -28,76 +29,78 @@ type FeedState = {
   error: string | null;
 };
 
-const CATEGORIES: FeedCategory[] = [
-  {
-    key: "deletes",
-    label: "Deletes",
-    emoji: "🔴",
-    emptyMessage: "No destructive deletes in the last 24h",
-    href: "/events?action_category=Delete&signal=action_required&time_window=24h",
-    fetchParams: new URLSearchParams({
-      time_window: "24h",
-      mode: "audit_trail",
-      action_category: "Delete",
-      signal_type: "action_required",
-      limit: "50"
-    })
-  },
-  {
-    key: "creates",
-    label: "Creates",
-    emoji: "🟡",
-    emptyMessage: "No creates needing review in the last 24h",
-    href: "/events?action_category=Create&signal=attention&time_window=24h",
-    fetchParams: new URLSearchParams({
-      time_window: "24h",
-      mode: "audit_trail",
-      action_category: "Create",
-      signal_type: "attention",
-      limit: "50"
-    })
-  },
-  {
-    key: "api_keys",
-    label: "API Keys",
-    emoji: "🔑",
-    emptyMessage: "No API key activity in the last 24h",
-    href: "/events?action_category=API+Key&time_window=24h",
-    fetchParams: new URLSearchParams({
-      time_window: "24h",
-      mode: "audit_trail",
-      action_category: "API Key",
-      limit: "50"
-    })
-  },
-  {
-    key: "denials",
-    label: "Denials",
-    emoji: "🚫",
-    emptyMessage: "No denials in the last 24h",
-    href: "/events?result=Denied&time_window=24h",
-    fetchParams: new URLSearchParams({
-      time_window: "24h",
-      mode: "audit_trail",
-      is_denied: "true",
-      limit: "50"
-    })
-  },
-  {
-    key: "access",
-    label: "Access changes",
-    emoji: "🛡️",
-    emptyMessage: "No access changes needing action in the last 24h",
-    href: "/events?action_category=Security&signal=action_required&time_window=24h",
-    fetchParams: new URLSearchParams({
-      time_window: "24h",
-      mode: "audit_trail",
-      action_category: "Security",
-      signal_type: "action_required",
-      limit: "50"
-    })
-  }
-];
+function buildCategories(timeWindow: string): FeedCategory[] {
+  return [
+    {
+      key: "deletes",
+      label: "Deletes",
+      emoji: "🔴",
+      emptyMessage: "No destructive deletes in the last 24h",
+      href: `/events?action_category=Delete&signal=action_required&time_window=${timeWindow}`,
+      fetchParams: new URLSearchParams({
+        time_window: timeWindow,
+        mode: "audit_trail",
+        action_category: "Delete",
+        signal_type: "action_required",
+        limit: "50"
+      })
+    },
+    {
+      key: "creates",
+      label: "Creates",
+      emoji: "🟡",
+      emptyMessage: "No creates needing review in the last 24h",
+      href: `/events?action_category=Create&signal=attention&time_window=${timeWindow}`,
+      fetchParams: new URLSearchParams({
+        time_window: timeWindow,
+        mode: "audit_trail",
+        action_category: "Create",
+        signal_type: "attention",
+        limit: "50"
+      })
+    },
+    {
+      key: "api_keys",
+      label: "API Keys",
+      emoji: "🔑",
+      emptyMessage: "No API key activity in the last 24h",
+      href: `/events?action_category=API+Key&time_window=${timeWindow}`,
+      fetchParams: new URLSearchParams({
+        time_window: timeWindow,
+        mode: "audit_trail",
+        action_category: "API Key",
+        limit: "50"
+      })
+    },
+    {
+      key: "denials",
+      label: "Denials",
+      emoji: "🚫",
+      emptyMessage: "No denials in the last 24h",
+      href: `/events?result=Denied&time_window=${timeWindow}`,
+      fetchParams: new URLSearchParams({
+        time_window: timeWindow,
+        mode: "audit_trail",
+        is_denied: "true",
+        limit: "50"
+      })
+    },
+    {
+      key: "access",
+      label: "Access changes",
+      emoji: "🛡️",
+      emptyMessage: "No access changes needing action in the last 24h",
+      href: `/events?action_category=Security&signal=action_required&time_window=${timeWindow}`,
+      fetchParams: new URLSearchParams({
+        time_window: timeWindow,
+        mode: "audit_trail",
+        action_category: "Security",
+        signal_type: "action_required",
+        limit: "50"
+      })
+    }
+  ];
+}
 
 function actorName(event: AuditEvent): string {
   const display = (event.actor_display_name || "").trim();
@@ -141,16 +144,19 @@ function buildGroups(events: AuditEvent[], limit = 5): FeedGroup[] {
       action,
       count: info.count,
       lastActor: actorName(info.latest),
+      lastActorId: (info.latest.actor_raw_id || info.latest.actor || "").trim(),
       lastAt: info.latest.timestamp
     }))
     .sort((a, b) => b.count - a.count)
     .slice(0, limit);
 }
 
-export default function ActionFeed() {
+export default function ActionFeed({ timeWindow = "24h" }: { timeWindow?: string }) {
+  const categories = useMemo(() => buildCategories(timeWindow), [timeWindow]);
+
   const [state, setState] = useState<Record<string, FeedState>>(() => {
     const initial: Record<string, FeedState> = {};
-    for (const cat of CATEGORIES) {
+    for (const cat of buildCategories("24h")) {
       initial[cat.key] = { status: "loading", groups: [], total: 0, error: null };
     }
     return initial;
@@ -158,7 +164,7 @@ export default function ActionFeed() {
 
   useEffect(() => {
     const controller = new AbortController();
-    for (const cat of CATEGORIES) {
+    for (const cat of categories) {
       getEvents(cat.fetchParams, controller.signal)
         .then((response: EventListResponse) => {
           setState((prev) => ({
@@ -180,10 +186,10 @@ export default function ActionFeed() {
         });
     }
     return () => controller.abort();
-  }, []);
+  }, [categories]);
 
-  const allLoaded = CATEGORIES.every((cat) => state[cat.key].status !== "loading");
-  const allEmpty = allLoaded && CATEGORIES.every((cat) => state[cat.key].status === "loaded" && state[cat.key].total === 0);
+  const allLoaded = categories.every((cat) => state[cat.key].status !== "loading");
+  const allEmpty = allLoaded && categories.every((cat) => state[cat.key].status === "loaded" && state[cat.key].total === 0);
 
   return (
     <section className="action-feed panel">
@@ -193,7 +199,7 @@ export default function ActionFeed() {
         <p className="action-feed-allclear">✅ Nothing unusual in the last 24h. Continue monitoring.</p>
       ) : null}
       <div className="action-feed-list">
-        {CATEGORIES.map((cat) => {
+        {categories.map((cat) => {
           const entry = state[cat.key];
           if (entry.status === "loading") {
             return (
@@ -228,15 +234,20 @@ export default function ActionFeed() {
                 <Link className="action-feed-cta" href={cat.href}>View all →</Link>
               </div>
               <ul className="action-feed-items">
-                {entry.groups.map((group) => (
-                  <li key={`${cat.key}-${group.action}`}>
-                    <Link href={cat.href}>
-                      <strong>{group.action}</strong>{" "}
-                      <span className="muted">({group.count.toLocaleString()} event{group.count === 1 ? "" : "s"})</span>
-                      <span className="action-feed-meta"> — last by <strong>{group.lastActor}</strong>, {formatAge(group.lastAt)}</span>
-                    </Link>
-                  </li>
-                ))}
+                {entry.groups.map((group) => {
+                  const itemHref = group.lastActorId
+                    ? `${cat.href}&actor=${encodeURIComponent(group.lastActorId)}`
+                    : cat.href;
+                  return (
+                    <li key={`${cat.key}-${group.action}`}>
+                      <Link href={itemHref}>
+                        <strong>{group.action}</strong>{" "}
+                        <span className="muted">({group.count.toLocaleString()} event{group.count === 1 ? "" : "s"})</span>
+                        <span className="action-feed-meta"> — last by <strong>{group.lastActor}</strong>, {formatAge(group.lastAt)}</span>
+                      </Link>
+                    </li>
+                  );
+                })}
               </ul>
             </div>
           );

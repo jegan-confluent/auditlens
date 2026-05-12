@@ -86,8 +86,8 @@ export default function DashboardPage() {
         <p className="panel-error">Forwarder readiness check failed — {readyError}</p>
       ) : null}
 
-      <ActionFeed />
-      <TopActors />
+      <ActionFeed timeWindow="24h" />
+      <TopActors timeWindow="24h" />
 
       {system.loading ? (
         <LoadingState label="Loading system health" />

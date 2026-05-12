@@ -102,7 +102,7 @@ function aggregate(events: AuditEvent[], limit = 5): ActorSummary[] {
     .slice(0, limit);
 }
 
-export default function TopActors() {
+export default function TopActors({ timeWindow = "24h" }: { timeWindow?: string }) {
   const [actors, setActors] = useState<ActorSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [scanned, setScanned] = useState(0);
@@ -110,7 +110,7 @@ export default function TopActors() {
   useEffect(() => {
     const controller = new AbortController();
     const params = new URLSearchParams({
-      time_window: "24h",
+      time_window: timeWindow,
       mode: "audit_trail",
       limit: "500"
     });
@@ -124,7 +124,7 @@ export default function TopActors() {
         setError(err.message);
       });
     return () => controller.abort();
-  }, []);
+  }, [timeWindow]);
 
   if (error) {
     return (
@@ -158,7 +158,7 @@ export default function TopActors() {
       <ul className="top-actors-list">
         {actors.map((actor) => {
           const filterValue = actor.rawId || actor.key;
-          const href = `/events?actor=${encodeURIComponent(filterValue)}&time_window=24h`;
+          const href = `/events?actor=${encodeURIComponent(filterValue)}&time_window=${timeWindow}`;
           const mostly = actor.topCategories.length ? `mostly: ${actor.topCategories.join(", ")}` : "";
           return (
             <li key={actor.key} className={`top-actor-row${actor.hasDeletes ? " has-deletes" : ""}`}>
