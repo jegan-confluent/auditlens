@@ -42,7 +42,7 @@ def upgrade() -> None:
             "created_at",
             sa.DateTime(timezone=True),
             nullable=False,
-            server_default=sa.text("now()"),
+            server_default=sa.func.now(),
         ),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("actor", "source_ip", name="uq_actor_ip"),
