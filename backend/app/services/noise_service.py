@@ -76,7 +76,11 @@ audit_events_noise = Table(
 
 
 # ──────────────────────────── per-engine flags ─────────────────────────
-_existence_cache: dict[int, bool] = {}
+# True entries are cached permanently (table creation is a one-way transition).
+# False entries expire after _EXISTENCE_FALSE_TTL so that if the table is
+# created after the first probe the cache self-heals within that window.
+_EXISTENCE_FALSE_TTL = 30.0
+_existence_cache: dict[int, tuple[bool, float | None]] = {}
 _existence_lock = threading.Lock()
 
 
@@ -90,19 +94,26 @@ def reset_noise_table_existence_cache() -> None:
 def noise_table_exists(db: Session) -> bool:
     """Cached existence probe. False if the table is absent OR the probe
     itself raises (best-effort — never propagate)."""
+    import time as _time
     bind = db.get_bind()
     key = id(bind)
+    now = _time.monotonic()
     with _existence_lock:
         cached = _existence_cache.get(key)
     if cached is not None:
-        return cached
+        value, expires_at = cached
+        if value or (expires_at is not None and now < expires_at):
+            return value
     try:
         present = "audit_events_noise" in set(inspect(bind).get_table_names())
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("noise table existence probe failed: %s", exc)
         present = False
     with _existence_lock:
-        _existence_cache[key] = present
+        if present:
+            _existence_cache[key] = (True, None)
+        else:
+            _existence_cache[key] = (False, now + _EXISTENCE_FALSE_TTL)
     return present
 
 
