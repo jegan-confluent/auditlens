@@ -81,7 +81,7 @@ from src.product import (
 from src.product.db_writer import AuditEventDbWriter
 from src.product.event_normalization import BULK_NOISE_METHODS, parse_event_timestamp
 from src.product.event_intelligence import decision_snapshot
-from src.product.actor_enrichment import get_actor_mapping_file
+from src.product.actor_enrichment import get_actor_mapping_file, wait_for_iam_cache_ready
 from src.notifications.notifier import AuditLensNotifier
 
 # ──────────── graceful shutdown handler ────────────
@@ -3348,6 +3348,88 @@ def replay_events(
         replay_consumer.close()
 
 # ──────────── main ────────────
+def _run_startup_display_name_backfill() -> None:
+    """One-time backfill of historical enrichment gaps — runs once in a daemon
+    thread after startup so it never blocks the consume loop.
+
+    Fixes three classes of stored display names that the enrichment chain
+    writes incorrectly:
+      1. Known actor IDs where display_name == actor (unenriched) — filled
+         from the IAM cache once it is warm.
+      2. JSON blobs stored as display names (Confluent internal events).
+      3. Stored display names that still carry the "User:" prefix.
+    """
+    if not ENABLE_DB_WRITER or db_writer is None:
+        return
+    if not PRODUCT_MODE:
+        # SQLite-only demo mode — SUBSTRING syntax is Postgres-specific; skip.
+        return
+
+    from src.product.actor_enrichment import _confluent_identity_enricher  # noqa: PLC0415
+    from sqlalchemy import text as sa_text  # noqa: PLC0415
+
+    try:
+        # Wait up to 60 s for the IAM cache to warm before using it.
+        wait_for_iam_cache_ready(timeout_seconds=60.0)
+    except Exception:
+        pass
+
+    try:
+        enricher = _confluent_identity_enricher()
+
+        with db_writer.engine.begin() as conn:
+            # Fix 1: backfill actors the IAM cache now knows about.
+            if enricher is not None:
+                identities = (
+                    list(enricher.get_all_service_accounts()) +
+                    list(enricher.get_all_users())
+                )
+                iam_total = 0
+                for info in identities:
+                    actor_id = info.id
+                    display_name = info.display_name
+                    if not display_name or display_name == actor_id:
+                        continue
+                    r = conn.execute(
+                        sa_text("""
+                            UPDATE audit_events
+                            SET actor_display_name = :dn
+                            WHERE actor = :actor
+                              AND (actor_display_name IS NULL
+                                   OR actor_display_name = actor
+                                   OR actor_display_name LIKE 'User:%'
+                                   OR actor_display_name LIKE '{%')
+                        """),
+                        {"dn": display_name, "actor": actor_id},
+                    )
+                    iam_total += r.rowcount
+                if iam_total:
+                    logger.info("Startup backfill: updated %d rows from IAM cache", iam_total)
+
+            # Fix 2: normalize stored Confluent JSON blob display names.
+            r2 = conn.execute(sa_text("""
+                UPDATE audit_events
+                SET actor_display_name = 'Confluent (internal)'
+                WHERE actor_display_name LIKE '{%"externalAccount"%'
+            """))
+            if r2.rowcount:
+                logger.info("Startup backfill: fixed %d Confluent JSON blob rows", r2.rowcount)
+
+            # Fix 3: strip stored 'User:' prefix (Postgres SUBSTRING syntax).
+            r3 = conn.execute(sa_text("""
+                UPDATE audit_events
+                SET actor_display_name = SUBSTRING(actor_display_name FROM 6)
+                WHERE actor_display_name LIKE 'User:u-%'
+                   OR actor_display_name LIKE 'User:sa-%'
+            """))
+            if r3.rowcount:
+                logger.info("Startup backfill: stripped User: prefix from %d rows", r3.rowcount)
+
+        logger.info("Startup display name backfill complete")
+    except Exception as exc:
+        logger.warning("Startup display name backfill failed (non-fatal): %s", exc)
+
+
 def main():
     global db_writer
     logger.info("=" * 70)
@@ -3374,6 +3456,13 @@ def main():
             masked_exc = mask_sensitive_text(str(exc))
             metrics.record_db_write_error(masked_exc, 0)
             logger.warning("DB writer enabled but initial connection failed; will retry in processing loop: %s", masked_exc)
+        # Run once in background — never blocks startup, never raises.
+        _backfill_thread = threading.Thread(
+            target=_run_startup_display_name_backfill,
+            name="auditlens-startup-dn-backfill",
+            daemon=True,
+        )
+        _backfill_thread.start()
     else:
         metrics.set_db_writer_state("disabled")
 
