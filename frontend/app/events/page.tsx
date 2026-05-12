@@ -212,6 +212,11 @@ function IncidentCard({
         <div className="incident-card-header">
           🔴 <strong>{actionRequired} critical event{actionRequired === 1 ? "" : "s"} need immediate attention</strong>
         </div>
+        <div className="incident-card-subtext muted">
+          {filters.signal === "action_required"
+            ? "Showing these events below ↓"
+            : <button className="incident-card-link" onClick={onSeeAll}>Click to investigate →</button>}
+        </div>
         {criticalFlows.map((flow, i) => (
           <div key={i} className="incident-card-flow">
             {flow.subject ? flow.group_title.replace(flow.subject, formatSubject(flow.subject)) : flow.group_title}
