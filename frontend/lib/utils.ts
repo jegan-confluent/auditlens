@@ -9,6 +9,7 @@
  */
 export function normalizeActorDisplay(value: string): string {
   if (value.includes('"externalAccount"') && value.includes('"Confluent"')) return "Confluent (internal)";
+  if (/^\d+$/.test(value)) return `User #${value}`;
   if (value.startsWith("User:")) {
     const stripped = value.slice(5);
     if (/^\d+$/.test(stripped)) return `User #${stripped}`;

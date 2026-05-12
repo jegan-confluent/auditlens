@@ -2,20 +2,13 @@ import Link from "next/link";
 import type { SummaryResponse } from "../lib/types";
 
 function resolveTopActorDisplay(summary: SummaryResponse): { display: string; rawId: string; count: number } | null {
-  const top = summary.top_subjects?.[0];
-  if (!top) return null;
-  const rawId = top.value;
-  // Prefer a display name from flow_groups where subject matches.
-  const matchingGroup = summary.flow_groups?.find((g) => g.subject === rawId);
-  if (matchingGroup?.subject_display_name) {
-    return { display: matchingGroup.subject_display_name, rawId, count: top.count };
-  }
-  // Normalize raw subject prefixes for fallback display.
-  let display = rawId;
-  if (display.startsWith("User:")) display = display.slice(5);
-  else if (display.startsWith("ServiceAccount:")) display = display.slice(15);
-  else if (display.startsWith("{") || display.includes('"externalAccount"')) display = "Confluent (internal)";
-  return { display, rawId, count: top.count };
+  const group = summary.flow_groups?.[0];
+  if (!group) return null;
+  return {
+    display: group.subject_display_name || group.subject,
+    rawId: group.subject,
+    count: group.event_count,
+  };
 }
 
 function resolveDestructiveActor(summary: SummaryResponse): string | null {
