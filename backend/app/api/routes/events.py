@@ -165,6 +165,7 @@ def events(
             environment_name=environment_name,
             action_category=action_category,
             actor=actor,
+            action=action,
             result=result,
             is_denied=is_denied,
             signal_type=effective_signal_type,

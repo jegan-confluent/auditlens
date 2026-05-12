@@ -244,6 +244,7 @@ def _event_filter_conditions(
     environment_name: str | None = None,
     action_category: str | None = None,
     actor: str | None = None,
+    action: str | None = None,
     result: str | None = None,
     is_denied: bool | None = None,
 ) -> list[Any]:
@@ -294,6 +295,8 @@ def _event_filter_conditions(
         conditions.append(AuditEvent.action_category == action_category.strip())
     if actor and actor.strip():
         conditions.append(func.lower(AuditEvent.actor).like(f"%{actor.strip().lower()}%"))
+    if action and action.strip():
+        conditions.append(func.lower(AuditEvent.action).like(f"%{action.strip().lower()}%"))
     if result and result.strip():
         conditions.append(AuditEvent.result == result.strip())
     if is_denied is True:
