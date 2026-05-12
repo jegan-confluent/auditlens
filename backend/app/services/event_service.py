@@ -442,8 +442,10 @@ def list_events_result(
     if not include_suppressed:
         suppressed_combos = _get_suppressed_combos_cached(db)
     use_suppression = bool(suppressed_combos)
-    # signal_type is applied at DB level (indexed column); only the remaining
-    # derived filters need Python-side scanning.
+    # signal_type is pushed into the SQL WHERE clause (indexed column) so totals
+    # are accurate.  summary_service uses a 5000-row scan window for its digest
+    # counts, so /summary action_required_count will differ from the exact total
+    # returned here — that divergence is by design, not a filter mismatch.
     derived_filter_applied = bool(impact_types or change_types) or hide_noise or (use_suppression and mode == "decision")
     filters = _apply_derived_prefilters(filters, impact_types, change_types)
     active_filters = {key: value for key, value in {**filters, "mode": mode}.items() if isinstance(value, str) and value.strip()}
