@@ -234,10 +234,12 @@ def test_actor_enrichment_audit_event_and_raw_fallbacks(monkeypatch):
     assert service_account["actor_display_name"] == "sa-domx5qd"
     assert service_account["actor_raw_id"] == "sa-domx5qd"
     assert service_account["actor_source"] == "fallback"
-    # Phase 5: empty actor input never produces a placeholder display name
-    # — it returns an empty string so downstream consumers fall through to
-    # the raw actor field rather than collapsing onto "Unknown principal".
-    assert empty["actor_display_name"] == ""
+    # Behavioral assertion change: empty actor input now stores None for
+    # actor_display_name (not "") — consistent with the FIX-2 guard that
+    # converts all empty strings to None at the enrich_actor() boundary.
+    # Downstream JS: `event.actor_display_name || ""` gives the same result;
+    # DB stores NULL instead of "" with equivalent query semantics.
+    assert empty["actor_display_name"] is None
     assert empty["actor_source"] == "fallback"
 
 

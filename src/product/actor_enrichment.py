@@ -535,6 +535,16 @@ def enrich_actor(actor: str, subject: str = "", subject_type: str = "") -> dict[
             "actor_enriched_at": datetime.now(timezone.utc).isoformat(),
         }
 
+    # Normalize actor_display_name at the cache boundary — single gate for
+    # all resolution paths so nothing malformed ever reaches the DB.
+    dn = result.get("actor_display_name") or ""
+    if dn.startswith("{"):
+        # JSON blob (e.g. Confluent internal service account subject).
+        dn = "Confluent (internal)" if "Confluent" in dn else (raw or "")
+    if dn.startswith("User:"):
+        dn = dn[5:]
+    result["actor_display_name"] = dn or None
+
     _CACHE[cache_key] = (now, result)
     return result
 
