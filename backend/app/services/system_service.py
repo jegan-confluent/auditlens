@@ -82,11 +82,13 @@ class _ForwarderHealthCache:
         self._lock = threading.Lock()
         self._last_fetch_monotonic: float | None = None
         self._snapshot: dict[str, Any] | None = None
+        self._fetching: bool = False
 
     def reset(self) -> None:
         with self._lock:
             self._last_fetch_monotonic = None
             self._snapshot = None
+            self._fetching = False
 
     def get(self) -> dict[str, Any]:
         with self._lock:
@@ -95,8 +97,16 @@ class _ForwarderHealthCache:
             last_fetch = self._last_fetch_monotonic
             if cached is not None and last_fetch is not None and (now - last_fetch) < self._ttl:
                 return cached
-        # Cache miss or expired — fetch with a tight timeout.
-        snapshot = self._fetch_now()
+            # Prevent thundering herd: if another thread is already fetching,
+            # return stale snapshot (or empty dict) rather than pile-on.
+            if self._fetching:
+                return cached if cached is not None else _unknown_status("fetching")
+            self._fetching = True
+        try:
+            snapshot = self._fetch_now()
+        finally:
+            with self._lock:
+                self._fetching = False
         with self._lock:
             self._snapshot = snapshot
             self._last_fetch_monotonic = time.monotonic()
@@ -147,10 +157,12 @@ class _DbLatestEventCache:
         # value is (datetime | None) — None means "query attempted but no
         # rows / failed" so the next request stays cached for the TTL.
         self._snapshots: dict[int, tuple[float, datetime | None]] = {}
+        self._fetching: set[int] = set()
 
     def reset(self) -> None:
         with self._lock:
             self._snapshots.clear()
+            self._fetching.clear()
 
     def get(self, db: Session) -> datetime | None:
         bind = db.get_bind()
@@ -160,7 +172,15 @@ class _DbLatestEventCache:
             snapshot = self._snapshots.get(key)
             if snapshot is not None and (now - snapshot[0]) < self._ttl:
                 return snapshot[1]
-        latest = self._fetch_now(db)
+            # Prevent thundering herd: return stale value if another thread is fetching.
+            if key in self._fetching:
+                return snapshot[1] if snapshot is not None else None
+            self._fetching.add(key)
+        try:
+            latest = self._fetch_now(db)
+        finally:
+            with self._lock:
+                self._fetching.discard(key)
         with self._lock:
             self._snapshots[key] = (time.monotonic(), latest)
         return latest
