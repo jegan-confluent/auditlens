@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { getEvents, isAbortError } from "../lib/api";
 import type { AuditEvent, EventListResponse } from "../lib/types";
+import { normalizeActorDisplay } from "../lib/utils";
 
 type FeedGroup = {
   action: string;
@@ -107,7 +108,7 @@ function actorName(event: AuditEvent): string {
   const raw = (event.actor_raw_id || event.subject || event.actor || "").trim();
   if (display && display !== raw) return display;
   if (event.actor_email) return event.actor_email;
-  return raw || event.actor || "unknown";
+  return normalizeActorDisplay(raw || event.actor || "unknown");
 }
 
 function groupKey(event: AuditEvent): string {

@@ -4,16 +4,10 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { getEvents, isAbortError } from "../lib/api";
 import type { AuditEvent, EventListResponse } from "../lib/types";
+import { normalizeActorDisplay } from "../lib/utils";
 
 const SERVICE_ACCOUNT_TYPES = new Set(["service_account", "serviceaccount", "service-account"]);
 const UNKNOWN_PRINCIPAL_LABELS = new Set(["unknown actor", "unknown user", "unknown service account", "unknown principal"]);
-
-function normalizeActorDisplay(value: string): string {
-  if (value.includes('"externalAccount"') && value.includes('"Confluent"')) return "Confluent (internal)";
-  if (value.startsWith("User:")) return value.slice(5);
-  if (value.startsWith("ServiceAccount:")) return value.slice(15);
-  return value;
-}
 
 type ActorSummary = {
   key: string;        // raw id, used for filter param
