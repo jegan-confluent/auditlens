@@ -153,7 +153,7 @@ function groupConsecutive(events: AuditEvent[]): EventGroup[] {
       current.events.push(ev);
     } else {
       if (current) groups.push({ key: `${current.key}|${current.firstTs}`, events: current.events });
-      current = { key: k, firstTs: Number.isNaN(ts) ? 0 : ts, events: [ev] };
+      current = { key: k, firstTs: Number.isNaN(ts) ? Date.now() : ts, events: [ev] };
     }
   }
   if (current) groups.push({ key: `${current.key}|${current.firstTs}`, events: current.events });

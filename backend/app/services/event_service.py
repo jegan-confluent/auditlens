@@ -528,6 +528,8 @@ def list_events_result(
         db_offset += len(batch)
         combos_for_filter = suppressed_combos if mode == "decision" else None
         collected.extend(event for event in batch if _matches_derived_filters(event, signal_types, hide_noise, impact_types, change_types, combos_for_filter))
+        if len(collected) >= offset + limit:
+            break
         if len(batch) < batch_size:
             break
     page = collected[offset : offset + limit]

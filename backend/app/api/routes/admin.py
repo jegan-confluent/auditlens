@@ -1,3 +1,5 @@
+import time
+import threading
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -13,10 +15,34 @@ from src.product.auth import AuthConfig, Authenticator, Role
 
 router = APIRouter(tags=["admin"])
 
+import os as _os
+_auth_config_cache: tuple[float, AuthConfig, str] | None = None
+_auth_config_lock = threading.Lock()
+_AUTH_CONFIG_TTL = 60.0
+
+
+def _get_auth_config() -> AuthConfig:
+    global _auth_config_cache
+    now = time.monotonic()
+    # Include the key toggle in the cache key so env-var changes (e.g. in
+    # tests via monkeypatch) invalidate the cache immediately.
+    enabled_flag = _os.getenv("API_AUTH_ENABLED", "false")
+    with _auth_config_lock:
+        if (
+            _auth_config_cache is not None
+            and (now - _auth_config_cache[0]) < _AUTH_CONFIG_TTL
+            and _auth_config_cache[2] == enabled_flag
+        ):
+            return _auth_config_cache[1]
+    config = AuthConfig.from_env()
+    with _auth_config_lock:
+        _auth_config_cache = (now, config, enabled_flag)
+    return config
+
 
 def require_admin(request: Request) -> None:
     try:
-        config = AuthConfig.from_env()
+        config = _get_auth_config()
         auth = Authenticator(config)
     except Exception as exc:
         raise HTTPException(status_code=503, detail="API auth is enabled but not configured") from exc

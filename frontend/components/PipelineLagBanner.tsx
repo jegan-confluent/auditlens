@@ -103,16 +103,20 @@ export default function PipelineLagBanner() {
       }
     }
 
+    let currentTickController: AbortController | null = null;
+
     const initialController = new AbortController();
     poll(initialController.signal);
     timer = setInterval(() => {
       const c = new AbortController();
+      currentTickController = c;
       poll(c.signal);
     }, POLL_INTERVAL_MS);
 
     return () => {
       cancelled = true;
       initialController.abort();
+      currentTickController?.abort();
       if (timer !== null) clearInterval(timer);
     };
   }, []);

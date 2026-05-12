@@ -319,11 +319,9 @@ def test_filters_options_returns_categories(client):
     response = client.get("/filters/options")
     assert response.status_code == 200
     body = response.json()
+    # BUG-31 fix: resource_types now reflects only what exists in the DB,
+    # not a hardcoded union with a fixed set of Confluent types.
     assert "topic" in body["resource_types"]
-    assert "subject" in body["resource_types"]
-    assert "connector" in body["resource_types"]
-    assert "role_binding" in body["resource_types"]
-    assert "environment" in body["resource_types"]
     assert "Create" in body["action_categories"]
     assert "Delete" in body["action_categories"]
     assert "Security" in body["action_categories"]

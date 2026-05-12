@@ -146,8 +146,7 @@ def _safe_top_n(db: Session, column, *, label: str) -> list[str]:
 def _distinct_resource_types(db: Session) -> list[str]:
     rows = _safe_top_n(db, AuditEvent.resource_type, label="resource_types")
     values = {canonical_resource_type(value) for value in rows}
-    expected = {"topic", "subject", "connector", "role_binding", "environment"}
-    return sorted(values | expected)
+    return sorted(values)
 
 
 def _build_filter_options(db: Session) -> dict[str, list[str]]:

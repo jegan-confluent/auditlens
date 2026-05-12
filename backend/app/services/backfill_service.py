@@ -158,6 +158,8 @@ def _effective_since(*, hours: int | None = None, since: datetime | None = None)
         candidates.append(datetime.now(timezone.utc) - timedelta(hours=hours))
     if not candidates:
         return None
+    # max() picks the most-recent cutoff (most restrictive); both callers supply
+    # hours and/or since as separate knobs and expect the tighter bound to win.
     result = max(candidates)
     if result.tzinfo is None:
         result = result.replace(tzinfo=timezone.utc)

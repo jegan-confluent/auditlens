@@ -454,7 +454,7 @@ class AuditEvent(Base):
     def _triage(self) -> dict[str, str | None]:
         cached = getattr(self, "_triage_cache", None)
         if cached is not None:
-            return {**get_triage(self.event_fingerprint), **cached}
+            return cached
         session = object_session(self)
         if session is not None:
             record = session.scalar(select(AuditEventTriage).where(AuditEventTriage.event_fingerprint == self.event_fingerprint))

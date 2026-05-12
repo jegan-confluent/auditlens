@@ -25,7 +25,6 @@ def get_actor_ip_baseline(actor_id: str, db: Session = Depends(get_db)) -> dict:
     )
 
     now = _now()
-    cutoff_24h = now.replace(tzinfo=timezone.utc) if now.tzinfo else now
     from datetime import timedelta
     cutoff_24h_dt = now - timedelta(hours=24)
 
