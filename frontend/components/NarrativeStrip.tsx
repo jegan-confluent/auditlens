@@ -1,78 +1,89 @@
+import Link from "next/link";
 import type { SummaryResponse } from "../lib/types";
-import type { EventFilters } from "../lib/eventFilters";
 
-type NarrativeItem = {
-  label: string;
-  count: number;
-  meaning: string;
-  action: string;
-  tone: string;
-  filterPatch: Partial<EventFilters>;
-};
-
-function itemsFor(summary: SummaryResponse): NarrativeItem[] {
-  const items: NarrativeItem[] = [];
-  if (summary.destructive_count) {
-    items.push({ label: "Destructive actions", count: summary.destructive_count, meaning: "Resources were deleted or removed.", action: "Confirm approval and blast radius.", tone: "critical", filterPatch: { impact_type: "destructive" } });
+function resolveTopActorDisplay(summary: SummaryResponse): { display: string; rawId: string; count: number } | null {
+  const top = summary.top_subjects?.[0];
+  if (!top) return null;
+  const rawId = top.value;
+  // Prefer a display name from flow_groups where subject matches.
+  const matchingGroup = summary.flow_groups?.find((g) => g.subject === rawId);
+  if (matchingGroup?.subject_display_name) {
+    return { display: matchingGroup.subject_display_name, rawId, count: top.count };
   }
-  if (summary.configuration_change_count) {
-    items.push({ label: "Configuration changes", count: summary.configuration_change_count, meaning: "Runtime or resource configuration changed.", action: "Verify expected change window.", tone: "review", filterPatch: { impact_type: "configuration_change" } });
-  }
-  if (summary.access_change_count) {
-    items.push({ label: "Access changes", count: summary.access_change_count, meaning: "Identity, key, ACL, or role access changed.", action: "Confirm owner and approval.", tone: "review", filterPatch: { impact_type: "access_change" } });
-  }
-  const failedOrDenied = Math.max(summary.failure_count || 0, summary.denied_count || 0);
-  if (failedOrDenied) {
-    items.push({ label: "Failures / denied access", count: failedOrDenied, meaning: "Requests failed or were denied.", action: "Investigate actor, source, and resource.", tone: "critical", filterPatch: { result: "Failure" } });
-  }
-  if (summary.noise_count) {
-    items.push({ label: "Routine noise", count: summary.noise_count, meaning: "Successful auth/authz checks and routine access.", action: "Hidden by default; show noise if needed.", tone: "muted", filterPatch: { signal: "noise", mode: "audit_trail", hide_noise: "false" } });
-  }
-  return items.slice(0, 5);
+  // Normalize raw subject prefixes for fallback display.
+  let display = rawId;
+  if (display.startsWith("User:")) display = display.slice(5);
+  else if (display.startsWith("ServiceAccount:")) display = display.slice(15);
+  else if (display.startsWith("{") || display.includes('"externalAccount"')) display = "Confluent (internal)";
+  return { display, rawId, count: top.count };
 }
 
-export default function NarrativeStrip({ summary, onApplyFilter }: {
+function resolveDestructiveActor(summary: SummaryResponse): string | null {
+  const group = summary.flow_groups?.find((g) => g.impact_type === "destructive");
+  if (!group) return null;
+  return group.subject_display_name || group.subject || null;
+}
+
+export default function NarrativeStrip({
+  summary,
+  timeWindow = "24h",
+}: {
   summary: SummaryResponse;
-  onApplyFilter?: (patch: Partial<EventFilters>) => void;
+  timeWindow?: string;
 }) {
-  const items = itemsFor(summary);
-  if (!items.length) {
-    return (
-      <section className="narrative-strip">
-        <div className="narrative-item muted">
-          <strong>Nothing changed</strong>
-          <span>Activity is mostly routine access checks.</span>
-          <em>Continue monitoring.</em>
-        </div>
-      </section>
-    );
-  }
+  const actionRequired = summary.action_required_count ?? 0;
+  const destructive = summary.destructive_count ?? 0;
+  const failures = summary.failure_count ?? 0;
+  const topActor = resolveTopActorDisplay(summary);
+  const destructiveActor = destructive > 0 ? resolveDestructiveActor(summary) : null;
 
   return (
-    <section className="narrative-strip">
-      {items.map((item) => {
-        if (onApplyFilter) {
-          return (
-            <button
-              key={item.label}
-              type="button"
-              className={`narrative-item ${item.tone}`}
-              onClick={() => onApplyFilter(item.filterPatch)}
-            >
-              <strong>{item.count.toLocaleString()} {item.label}</strong>
-              <span>{item.meaning}</span>
-              <em>{item.action}</em>
-            </button>
-          );
-        }
-        return (
-          <div key={item.label} className={`narrative-item ${item.tone}`}>
-            <strong>{item.count.toLocaleString()} {item.label}</strong>
-            <span>{item.meaning}</span>
-            <em>{item.action}</em>
-          </div>
-        );
-      })}
-    </section>
+    <div className="narrative-strip">
+      {/* Line 1 — status headline */}
+      {actionRequired > 0 ? (
+        <Link
+          href={`/events?signal=action_required&time_window=${timeWindow}`}
+          className="narrative-line narrative-line-critical"
+        >
+          🔴 {actionRequired} event{actionRequired === 1 ? "" : "s"} need immediate attention.
+        </Link>
+      ) : (
+        <span className="narrative-line narrative-line-ok">
+          ✅ Nothing critical in the last {timeWindow}.
+        </span>
+      )}
+
+      {/* Line 2 — top actor */}
+      {topActor ? (
+        <span className="narrative-line narrative-line-primary">
+          {topActor.count.toLocaleString()} events from{" "}
+          <Link
+            href={`/events?actor=${encodeURIComponent(topActor.rawId)}&time_window=${timeWindow}`}
+            className="narrative-actor-link"
+          >
+            {topActor.display}
+          </Link>{" "}
+          led activity.
+        </span>
+      ) : null}
+
+      {/* Line 3 — destructive or failures (conditional) */}
+      {destructive > 0 ? (
+        <Link
+          href={`/events?action_category=Delete&signal=action_required&time_window=${timeWindow}`}
+          className="narrative-line narrative-line-warning"
+        >
+          {destructive} destructive action{destructive === 1 ? "" : "s"}
+          {destructiveActor ? ` — ${destructiveActor}` : ""}.
+        </Link>
+      ) : failures > 0 ? (
+        <Link
+          href={`/events?result=Failure&time_window=${timeWindow}`}
+          className="narrative-line narrative-line-secondary"
+        >
+          {failures.toLocaleString()} access failure{failures === 1 ? "" : "s"} recorded.
+        </Link>
+      ) : null}
+    </div>
   );
 }
