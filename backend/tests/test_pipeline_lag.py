@@ -281,3 +281,60 @@ def test_db_latest_event_cache_returns_none_on_query_failure(status_client, monk
     body = status_client.get("/system/status").json()
     assert body["pipeline_lag"]["db_latest_event_at"] is None
     assert body["pipeline_status"] == "stalled"
+
+
+def test_system_status_latest_event_reads_both_tables():
+    """db_latest_event_at must reflect the newest timestamp across both
+    audit_events and audit_events_noise — not just audit_events."""
+    import tempfile
+    from pathlib import Path as _Path
+    from alembic import command as _alembic_cmd
+    from alembic.config import Config as _AlembicConfig
+    from sqlalchemy import text as _text
+    from sqlalchemy.orm import sessionmaker as _sessionmaker
+    from backend.app.db.database import build_engine
+    from backend.app.services.system_service import _DbLatestEventCache
+
+    _alembic_ini = _Path(__file__).resolve().parents[1] / "alembic.ini"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        db_url = f"sqlite:///{_Path(tmp) / 'test.db'}"
+        engine = build_engine(db_url)
+        cfg = _AlembicConfig(str(_alembic_ini))
+        cfg.set_main_option("sqlalchemy.url", db_url)
+        _alembic_cmd.upgrade(cfg, "head")
+        _SessionLocal = _sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+
+        old_ts = datetime(2025, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+        recent_ts = datetime.now(timezone.utc) - timedelta(seconds=5)
+
+        with _SessionLocal() as db:
+            db.execute(
+                _text(
+                    "INSERT INTO audit_events "
+                    "(event_fingerprint, timestamp, result, actor, action, "
+                    "normalized_action, action_category, resource_type, "
+                    "resource_name, resource_display, summary, raw_payload_json, "
+                    "is_failure, is_denied, is_routine_noise) "
+                    "VALUES ('fp-old', :ts, 'Success', 'u-test', 'Test', 'Test', "
+                    "'Other', 'Unknown', '-', 'Unknown', '', '{}', 0, 0, 0)"
+                ),
+                {"ts": old_ts},
+            )
+            db.execute(
+                _text(
+                    "INSERT INTO audit_events_noise "
+                    "(timestamp, actor, action, result, resource_name, is_denied) "
+                    "VALUES (:ts, 'u-noise', 'kafka.fetch', 'Success', '-', 0)"
+                ),
+                {"ts": recent_ts},
+            )
+            db.commit()
+
+        cache = _DbLatestEventCache(ttl_seconds=0)
+        with _SessionLocal() as db:
+            result = cache.get(db)
+
+        assert result is not None
+        delta = abs((result - recent_ts).total_seconds())
+        assert delta < 2, f"expected ~{recent_ts!r}, got {result!r}"

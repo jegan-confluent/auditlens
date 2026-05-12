@@ -167,30 +167,37 @@ class _DbLatestEventCache:
 
     @staticmethod
     def _fetch_now(db: Session) -> datetime | None:
-        """Run MAX(timestamp) with a tight statement_timeout. Any failure
-        returns None; the route never 500s on this lookup.
+        """Run MAX(timestamp) across both audit tables. Any failure returns
+        None; the route never 500s on this lookup.
 
-        Uses the ORM column reference (not raw SQL) so SQLAlchemy
-        type-decodes the SQLite string column back to a Python datetime
-        — raw `text()` returns strings on SQLite.
+        The UNION ALL covers audit_events_noise so the status strip
+        reflects noise-lane writes — otherwise a forwarder that is
+        actively writing noise-only traffic shows a stale timestamp.
         """
-        # Local import keeps the system_service module importable in test
-        # contexts that don't load the full ORM (e.g. classifier-only tests).
-        from sqlalchemy import func, select
-
-        from backend.app.db.models import AuditEvent
-
         try:
             if db.get_bind().dialect.name == "postgresql":
                 db.execute(text(f"SET LOCAL statement_timeout = {DB_LATEST_EVENT_TIMEOUT_MS}"))
-            result = db.execute(select(func.max(AuditEvent.timestamp))).scalar_one_or_none()
-        except (OperationalError, SQLAlchemyError) as exc:
+            result = db.execute(text(
+                "SELECT MAX(ts) FROM ("
+                "  SELECT MAX(timestamp) AS ts FROM audit_events"
+                "  UNION ALL"
+                "  SELECT MAX(timestamp) AS ts FROM audit_events_noise"
+                ") _latest_combined"
+            )).scalar_one_or_none()
+        except (OperationalError, SQLAlchemyError):
+            # audit_events_noise may not exist in older deployments (pre-migration 0007).
+            # Fall back to audit_events only rather than returning stale None.
             db.rollback()
-            logger.warning(
-                "/system/status MAX(timestamp) failed: %s",
-                exc.__class__.__name__,
-            )
-            return None
+            try:
+                from sqlalchemy import func, select
+                from backend.app.db.models import AuditEvent
+                result = db.execute(select(func.max(AuditEvent.timestamp))).scalar_one_or_none()
+            except Exception as exc2:
+                logger.warning(
+                    "/system/status MAX(timestamp) failed (both tables): %s",
+                    exc2.__class__.__name__,
+                )
+                return None
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning("/system/status MAX(timestamp) unexpected error: %s", exc)
             return None
@@ -200,7 +207,7 @@ class _DbLatestEventCache:
             if result.tzinfo is None:
                 return result.replace(tzinfo=timezone.utc)
             return result.astimezone(timezone.utc)
-        # Some dialects/drivers return ISO strings even through the ORM.
+        # text() returns ISO strings on SQLite — parse them back.
         if isinstance(result, str):
             try:
                 parsed = datetime.fromisoformat(result.replace("Z", "+00:00"))
