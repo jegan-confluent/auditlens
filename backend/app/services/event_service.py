@@ -82,6 +82,9 @@ def _get_suppressed_combos_cached(db: Session) -> set[tuple[str, str, str]]:
                 )
             else:
                 logger.warning("Failed to load suppressed patterns (non-fatal): %s", exc)
+                # Cache empty set for the TTL so transient errors don't cause a
+                # thundering herd of re-queries on every /events request.
+                _suppression_cache = (now, set())
             return set()
         _suppression_cache = (now, combos)
         return combos
