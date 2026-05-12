@@ -442,10 +442,17 @@ def list_events_result(
     if not include_suppressed:
         suppressed_combos = _get_suppressed_combos_cached(db)
     use_suppression = bool(suppressed_combos)
-    derived_filter_applied = bool(signal_types or impact_types or change_types) or hide_noise or (use_suppression and mode == "decision")
+    # signal_type is applied at DB level (indexed column); only the remaining
+    # derived filters need Python-side scanning.
+    derived_filter_applied = bool(impact_types or change_types) or hide_noise or (use_suppression and mode == "decision")
     filters = _apply_derived_prefilters(filters, impact_types, change_types)
     active_filters = {key: value for key, value in {**filters, "mode": mode}.items() if isinstance(value, str) and value.strip()}
     conditions = _event_filter_conditions(**filters)
+    if signal_types:
+        if len(signal_types) == 1:
+            conditions.append(AuditEvent._signal_type == next(iter(signal_types)))
+        else:
+            conditions.append(AuditEvent._signal_type.in_(signal_types))
     if mode == "decision":
         conditions.append(_decision_mode_condition())
     count_query = select(func.count(AuditEvent.id))
@@ -495,7 +502,7 @@ def list_events_result(
             items=list(items),
             total=total,
             scanned_events=len(items),
-            signal_filter_applied=False,
+            signal_filter_applied=bool(signal_types),
             hide_noise_applied=False,
             next_cursor=next_cursor,
             debug=_debug_info(db, filters, mode, pre_filter_total, len(items), len(items), False) if debug else None,

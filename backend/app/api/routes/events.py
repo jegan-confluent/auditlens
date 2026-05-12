@@ -72,6 +72,7 @@ def events(
     result: str | None = None,
     is_denied: bool | None = None,
     signal_type: str | None = None,
+    signal: str | None = None,
     hide_noise: bool = False,
     impact_type: str | None = None,
     change_type: str | None = None,
@@ -151,6 +152,7 @@ def events(
             total=noise_result.total,
         )
 
+    effective_signal_type = signal_type or signal
     try:
         result_set = list_events_result(
             db,
@@ -164,7 +166,7 @@ def events(
             actor=actor,
             result=result,
             is_denied=is_denied,
-            signal_type=signal_type,
+            signal_type=effective_signal_type,
             hide_noise=hide_noise,
             impact_type=impact_type,
             change_type=change_type,
