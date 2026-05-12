@@ -692,13 +692,17 @@ def test_event_triage_does_not_follow_old_numeric_ids(client, monkeypatch, tmp_p
     assert item["triage_status"] == "open"
 
 
-def test_event_detail_redacts_raw_payload_json_for_non_admin(client):
+def test_event_detail_includes_raw_payload_when_auth_disabled(client):
+    # BUG-3 fix: when auth is disabled (dev mode) raw_payload_json is NOT
+    # redacted — there are no access controls in effect so all callers see it.
+    # Previously this was wrongly returning None even in dev mode.
     event_id = client.get("/events", params={"limit": 1}).json()["items"][0]["id"]
     response = client.get(f"/events/{event_id}")
     assert response.status_code == 200
     body = response.json()
     assert "raw_payload_json" in body
-    assert body["raw_payload_json"] is None
+    # raw payload is visible when auth is disabled
+    assert body["raw_payload_json"] is not None
 
 
 def test_event_detail_includes_raw_payload_json_for_admin(client, monkeypatch):
