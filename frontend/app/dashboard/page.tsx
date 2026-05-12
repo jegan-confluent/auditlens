@@ -4,10 +4,11 @@ import { useEffect, useState } from "react";
 import ActionFeed from "../../components/ActionFeed";
 import ErrorState from "../../components/ErrorState";
 import LoadingState from "../../components/LoadingState";
+import NarrativeStrip from "../../components/NarrativeStrip";
 import SystemStatusPanel from "../../components/SystemStatusPanel";
 import TopActors from "../../components/TopActors";
-import { getReadinessStatus, getSystemStatus, isAbortError } from "../../lib/api";
-import type { SystemStatus } from "../../lib/types";
+import { getReadinessStatus, getSummary, getSystemStatus, isAbortError } from "../../lib/api";
+import type { SummaryResponse, SystemStatus } from "../../lib/types";
 
 type Lag = { tone: "fresh" | "warning" | "critical"; ageHours: number };
 
@@ -40,6 +41,7 @@ export default function DashboardPage() {
   const [system, setSystem] = useState<Panel<SystemStatus>>(emptyPanel());
   const [newestEvent, setNewestEvent] = useState<string | null>(null);
   const [readyError, setReadyError] = useState<string | null>(null);
+  const [summary, setSummary] = useState<SummaryResponse | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -63,6 +65,13 @@ export default function DashboardPage() {
         setReadyError(err instanceof Error ? err.message : "Failed to check forwarder readiness");
       });
 
+    getSummary(new URLSearchParams({ time_window: "24h", mode: "decision" }), signal)
+      .then(setSummary)
+      .catch((err) => {
+        if (isAbortError(err)) return;
+        // Non-fatal: NarrativeStrip simply won't render if summary is null.
+      });
+
     return () => controller.abort();
   }, []);
 
@@ -70,6 +79,7 @@ export default function DashboardPage() {
 
   return (
     <main className="page">
+      {summary ? <NarrativeStrip summary={summary} timeWindow="24h" /> : null}
       {lag && lag.tone === "critical" ? (
         <div className="lag-banner critical" role="status">
           <strong>🚨 Forwarder significantly behind</strong>
