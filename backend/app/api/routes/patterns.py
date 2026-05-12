@@ -26,6 +26,12 @@ def _authenticate(request: Request) -> "AuthResult":  # type: ignore[name-define
 
 
 def _require_responder(request: Request) -> None:
+    try:
+        config = AuthConfig.from_env()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Auth configuration error") from exc
+    if not config.enabled:
+        return
     result = _authenticate(request)
     if not result.ok:
         raise HTTPException(status_code=result.status_code, detail=result.error)
@@ -35,6 +41,12 @@ def _require_responder(request: Request) -> None:
 
 
 def _require_admin(request: Request) -> None:
+    try:
+        config = AuthConfig.from_env()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Auth configuration error") from exc
+    if not config.enabled:
+        return
     result = _authenticate(request)
     if not result.ok:
         raise HTTPException(status_code=result.status_code, detail=result.error)

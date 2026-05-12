@@ -15,6 +15,7 @@ from backend.app.services.noise_service import (
 )
 from backend.app.services.triage_service import upsert_triage
 from src.product.auth import AuthConfig, Authenticator, Role
+from backend.app.api.routes.patterns import _require_responder
 
 # /events list + detail are the most expensive routes; cap them tighter than
 # the global default. The limiter instance is shared across routes via
@@ -209,6 +210,7 @@ def update_event_triage(
     payload: TriageUpdate,
     db: Session = Depends(get_db),
     x_actor: str | None = Header(default=None, alias="X-Actor"),
+    _auth: None = Depends(_require_responder),
 ):
     event = get_event(db, event_id)
     if event is None:

@@ -138,7 +138,7 @@ class Authenticator:
             return AuthResult(ok=True, status_code=200, actor=AccessToken(
                 token="anonymous-dev",
                 actor_id="anonymous-dev",
-                role=Role.ADMIN,
+                role=Role.VIEWER,
             ))
 
         token = self._extract_token(headers)

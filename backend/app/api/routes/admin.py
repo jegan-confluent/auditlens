@@ -16,9 +16,12 @@ router = APIRouter(tags=["admin"])
 
 def require_admin(request: Request) -> None:
     try:
-        auth = Authenticator(AuthConfig.from_env())
+        config = AuthConfig.from_env()
+        auth = Authenticator(config)
     except Exception as exc:
         raise HTTPException(status_code=503, detail="API auth is enabled but not configured") from exc
+    if not config.enabled:
+        return
     result = auth.authenticate(request.headers)
     if not result.ok:
         raise HTTPException(status_code=result.status_code, detail=result.error)
