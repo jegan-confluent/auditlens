@@ -174,16 +174,23 @@ def _flow_groups(events: list[AuditEvent], limit: int = 5) -> list[dict[str, Any
         resource = representative.resource_display_short
         subject = representative.subject
         family = representative.resource_family
+        _raw_dn = representative._actor_display_name or ""
+        subject_display_name: str | None = (
+            _raw_dn
+            if _raw_dn and _raw_dn != subject and _raw_dn != representative.actor
+            else None
+        )
+        display = subject_display_name or subject
         if representative.signal_type == "action_required":
-            title = f"{len(group)} action-needed events detected for {subject}"
+            title = f"{len(group)} action-needed events detected for {display}"
         elif representative.signal_type == "attention" and representative.impact_type == "configuration_change":
-            title = f"{len(group)} config changes by {subject}"
+            title = f"{len(group)} config changes by {display}"
         elif representative.signal_type == "noise" and representative.impact_type == "authorization_check":
-            title = f"{len(group)} routine authorization checks by {subject}"
+            title = f"{len(group)} routine authorization checks by {display}"
         elif representative.signal_type == "noise" and representative.impact_type == "authentication":
-            title = f"{len(group)} authentications by {subject}"
+            title = f"{len(group)} authentications by {display}"
         else:
-            title = f"{len(group)} {representative.decision_label.lower()} events by {subject}"
+            title = f"{len(group)} {representative.decision_label.lower()} events by {display}"
         if family != "unknown" and resource != "Unknown" and representative.signal_type != "action_required":
             title = f"{title} on {resource}"
         output.append(
@@ -194,6 +201,7 @@ def _flow_groups(events: list[AuditEvent], limit: int = 5) -> list[dict[str, Any
                 "first_seen": first_seen.isoformat() if isinstance(first_seen, datetime) else str(first_seen),
                 "last_seen": last_seen.isoformat() if isinstance(last_seen, datetime) else str(last_seen),
                 "subject": subject,
+                "subject_display_name": subject_display_name,
                 "signal_type": signal_type,
                 "decision_label": representative.decision_label,
                 "risk_level": representative.risk_level,

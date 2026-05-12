@@ -1296,3 +1296,45 @@ def test_stale_patterns_auto_expire(client):
         assert row.status == "expired", f"expected 'expired', got {row.status!r}"
     finally:
         session_gen2.close()
+
+
+def test_summary_flow_groups_subject_display_name(client):
+    """flow_groups items include subject_display_name when actor has an enriched name."""
+    from backend.app.db.models import AuditEvent as AuditEventModel
+    from backend.app.services.event_service import create_event
+
+    db_override = next(iter(client.app.dependency_overrides.values()))
+    session_gen = db_override()
+    db = next(session_gen)
+    try:
+        # Insert a batch of events attributed to a test actor with a known display name.
+        for i in range(3):
+            ev = AuditEventModel(
+                event_fingerprint=f"flowgroup-dn-test-{i}",
+                timestamp=datetime.now(timezone.utc) - timedelta(minutes=i),
+                result="Success",
+                actor="u-flowdntest",
+                action="iam.DeleteRoleBinding",
+                normalized_action="DeleteRoleBinding",
+                action_category="Delete",
+                resource_type="role_binding",
+                resource_name="rb-test",
+                resource_display="Role Binding: rb-test",
+                summary=f"u-flowdntest deleted role binding",
+            )
+            ev.actor_display_name = "Flow Test Person"
+            ev._actor_type = "user"
+            db.add(ev)
+        db.commit()
+    finally:
+        session_gen.close()
+
+    response = client.get("/summary", params={"time_window": "1h"})
+    assert response.status_code == 200
+    data = response.json()
+    flow_groups = data.get("flow_groups", [])
+    dn_group = next((g for g in flow_groups if g.get("subject") == "u-flowdntest"), None)
+    assert dn_group is not None, "flow group for u-flowdntest not found in /summary"
+    assert dn_group["subject_display_name"] == "Flow Test Person"
+    assert "Flow Test Person" in dn_group["group_title"]
+    assert "u-flowdntest" not in dn_group["group_title"]

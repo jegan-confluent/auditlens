@@ -98,6 +98,7 @@ export type SummaryResponse = {
     first_seen: string;
     last_seen: string;
     subject: string;
+    subject_display_name?: string | null;
     signal_type: string;
     decision_label: string;
     risk_level: string;
