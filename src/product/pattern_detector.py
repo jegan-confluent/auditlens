@@ -179,7 +179,7 @@ class PatternDetector:
                 index_elements=["pattern_key"],
                 set_={
                     "last_seen_at": now,
-                    "occurrence_count": tbl.c.occurrence_count + item["count"],
+                    "occurrence_count": tbl.c.occurrence_count + 1,
                     "window_count": tbl.c.window_count + 1,
                     "updated_at": now,
                 },
@@ -201,7 +201,7 @@ class PatternDetector:
                 index_elements=["pattern_key"],
                 set_={
                     "last_seen_at": now,
-                    "occurrence_count": tbl.c.occurrence_count + item["count"],
+                    "occurrence_count": tbl.c.occurrence_count + 1,
                     "window_count": tbl.c.window_count + 1,
                     "updated_at": now,
                 },
