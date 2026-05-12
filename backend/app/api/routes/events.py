@@ -43,7 +43,7 @@ def _can_view_raw_payload(headers) -> bool:
     except Exception:
         return False
     if not auth_config.enabled:
-        return False
+        return True
     result = Authenticator(auth_config).authenticate(headers)
     return bool(result.ok and result.actor and result.actor.role == Role.ADMIN)
 
