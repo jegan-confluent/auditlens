@@ -70,6 +70,23 @@ _ALWAYS_INFORMATIONAL_METHODS = frozenset({
     "tableflowlisttables",
 })
 
+# Confluent platform automation: these org-level operations stay action_required
+# even when performed by Confluent's own service account.
+CONFLUENT_PLATFORM_HIGH_RISK = frozenset({
+    "deleteorganization",
+    "suspendorganization",
+})
+
+
+def _is_confluent_platform(event_or_fields: Any) -> bool:
+    """Return True if the actor is Confluent's own platform automation."""
+    principal = _as_text(_field(event_or_fields, "principal"))
+    actor = _as_text(_field(event_or_fields, "actor"))
+    for val in (principal, actor):
+        if "externalAccount" in val and "Confluent" in val:
+            return True
+    return False
+
 
 def _method_name_lower(event_or_fields: Any, fallback_action: str) -> str:
     raw = _as_text(
@@ -81,6 +98,43 @@ def _method_name_lower(event_or_fields: Any, fallback_action: str) -> str:
 
 
 def classify_signal(event_or_fields: Any) -> dict[str, str]:
+    """Classify an event and apply post-classification overrides."""
+    result = _classify_signal_core(event_or_fields)
+    action = _as_text(_field(event_or_fields, "action")).lower()
+
+    # Override 1 — Confluent platform automation is always informational
+    # unless it is a truly destructive org-level operation.
+    if _is_confluent_platform(event_or_fields) and action not in CONFLUENT_PLATFORM_HIGH_RISK:
+        return {
+            "signal_type": "informational",
+            "signal_reason": "platform_automation",
+            "recommended_action": "No action needed",
+            "decision_label": "Info",
+        }
+
+    # Override 2 — Schema RegisterSchema failures are schema evolution
+    # problems, not security incidents.
+    result_val = _as_text(
+        _field(event_or_fields, "result")
+        or _field(event_or_fields, "resultStatus")
+        or _field(event_or_fields, "result_display")
+    ).lower()
+    if (
+        result["signal_type"] == "action_required"
+        and action == "schema-registry.registerschema"
+        and "fail" in result_val
+    ):
+        return {
+            "signal_type": "attention",
+            "signal_reason": "schema_incompatible",
+            "recommended_action": "Review schema compatibility settings",
+            "decision_label": "Review",
+        }
+
+    return result
+
+
+def _classify_signal_core(event_or_fields: Any) -> dict[str, str]:
     digest = _digest(event_or_fields)
     impact = digest["impact_type"]
     risk = digest["risk_level"]

@@ -169,3 +169,43 @@ def test_flow_groups_prioritize_action_required_before_noise():
     )
     assert summary["flow_groups"][0]["signal_type"] == "action_required"
     assert summary["flow_groups"][0]["decision_label"] == "Action Needed"
+
+
+# ── Fix 1: Confluent platform actor overrides ──────────────────────────────
+
+def test_confluent_platform_actor_is_informational():
+    result = signal({
+        "principal": '{"externalAccount":{"subject":"Confluent"}}',
+        "action": "schema-registry.UnbindAllRolesForPrincipal",
+        "result": "Success",
+    })
+    assert result["signal_type"] == "informational"
+    assert result["signal_reason"] == "platform_automation"
+
+
+def test_confluent_platform_high_risk_stays_action_required():
+    result = signal({
+        "principal": '{"externalAccount":{"subject":"Confluent"}}',
+        "action": "DeleteOrganization",
+        "result": "Success",
+    })
+    assert result["signal_type"] == "action_required"
+
+
+# ── Fix 2: Schema RegisterSchema failures → attention ─────────────────────
+
+def test_schema_register_failure_is_attention():
+    result = signal({
+        "action": "schema-registry.RegisterSchema",
+        "result": "FAILURE",
+    })
+    assert result["signal_type"] == "attention"
+    assert result["signal_reason"] == "schema_incompatible"
+
+
+def test_schema_register_success_keeps_original_signal():
+    result = signal({
+        "action": "schema-registry.RegisterSchema",
+        "result": "Success",
+    })
+    assert result["signal_reason"] != "schema_incompatible"
