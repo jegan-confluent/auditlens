@@ -536,7 +536,7 @@ def list_events_result(
         for ev in page:
             if (ev.actor, ev.action, _norm(ev.resource_name)) in suppressed_combos:
                 setattr(ev, "_suppressed", True)
-    result_limit_reached = scanned >= SIGNAL_FILTER_MAX_SCAN and len(collected) >= offset + limit
+    result_limit_reached = scanned >= SIGNAL_FILTER_MAX_SCAN
     # Derived filtering keeps offset semantics — keyset cursors are emitted
     # only on the SQL-only path because the derived prefilter loop scans a
     # bounded window in Python and the next-page boundary is offset-shaped.
