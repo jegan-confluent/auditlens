@@ -19,6 +19,7 @@ VERSION = _version_file.read_text().strip() if _version_file.exists() else "2.1.
 
 import os
 import sys
+import traceback
 import argparse
 import signal
 import orjson
@@ -4484,7 +4485,14 @@ def run_cli(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     if args.command != "replay":
-        main()
+        try:
+            main()
+        except Exception as e:
+            logging.critical(
+                "FORWARDER CRASHED: %s\n%s",
+                e, traceback.format_exc()
+            )
+            raise
         return 0
 
     startup_config = validate_startup_config()

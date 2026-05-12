@@ -7,7 +7,7 @@ services:
         BUILDKIT_INLINE_CACHE: 1
     image: auditlens-forwarder:v1.0.0
     container_name: auditlens-forwarder
-    restart: on-failure:3
+    restart: unless-stopped
     env_file:
       - path: .env
         required: false
