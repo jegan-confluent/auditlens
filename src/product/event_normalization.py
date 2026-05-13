@@ -339,12 +339,20 @@ def summarize_resource(value: Any) -> str:
     return _summarize_resource(value)
 
 
+# Pre-compiled for derive_action_category hot path (called once per event).
+_RE_NORM_SPLIT = re.compile(r"[_./-]+")
+_RE_NORM_COMPACT = re.compile(r"[^a-z0-9]+")
+_RE_NORM_GET = re.compile(r"\bget[a-z]+\b")
+_RE_NORM_LIST = re.compile(r"\blist[a-z]+\b")
+_RE_NORM_DESCRIBE = re.compile(r"\bdescribe[a-z]+\b")
+
+
 def derive_action_category(method_name: str | None, action: str | None) -> str:
     method = str(method_name or "")
     action_text = str(action or "")
     combined = f"{method} {action_text}"
-    lowered = re.sub(r"[_./-]+", " ", combined).lower()
-    compact = re.sub(r"[^a-z0-9]+", "", lowered)
+    lowered = _RE_NORM_SPLIT.sub(" ", combined).lower()
+    compact = _RE_NORM_COMPACT.sub("", lowered)
 
     # Reads of API keys are Data, not API Key. The API Key bucket should
     # reflect mutations only — checked before the API Key step.
@@ -383,9 +391,9 @@ def derive_action_category(method_name: str | None, action: str | None) -> str:
     )):
         return "Data"
     if (
-        re.search(r"\bget[a-z]+\b", lowered)
-        or re.search(r"\blist[a-z]+\b", lowered)
-        or re.search(r"\bdescribe[a-z]+\b", lowered)
+        _RE_NORM_GET.search(lowered)
+        or _RE_NORM_LIST.search(lowered)
+        or _RE_NORM_DESCRIBE.search(lowered)
     ):
         return "Data"
     if any(marker in compact for marker in ("authorize", "authorization", "authentication", "authenticate")):
