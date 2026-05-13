@@ -8,7 +8,9 @@ Runtime path:
 Kafka -> audit_forwarder -> DB -> FastAPI -> Next.js UI
 ```
 
-Streamlit dashboards are still present for compatibility, but the product path is the FastAPI + Next.js UI.
+**Current UI:** Next.js frontend at `frontend/` (port 3000) — this is the product path.
+
+> **Legacy:** The Streamlit dashboard at `dashboard/` (profile `streamlit`) has been archived to `archive/dashboard/` (May 2026). It is no longer on the product path. Start it only with `docker compose --profile streamlit up -d dashboard` for historical reference.
 
 ## Modes
 

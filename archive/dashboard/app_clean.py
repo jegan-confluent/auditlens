@@ -39,7 +39,7 @@ from data.kafka_consumer import load_events_from_kafka
 
 
 PRIMARY_TABS = ["Overview", "Audit Trail", "Failures", "Deletions", "Advanced", "Help"]
-HELP_DOC_PATH = Path(__file__).resolve().parents[1] / "docs" / "AuditLens_Clean_Onboarding_Walkthrough.md"
+HELP_DOC_PATH = Path(__file__).resolve().parents[2] / "docs" / "AuditLens_Clean_Onboarding_Walkthrough.md"
 HELP_GUIDED_DEMO_HEADING = "## 5. Guided Demo Flow"
 HELP_GUIDED_DEMO_ANCHOR = "guided-demo-flow"
 RESOURCE_TYPE_OPTIONS = [
