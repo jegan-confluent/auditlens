@@ -628,17 +628,24 @@ class ConfluentSchemaWatcher:
                 }
             })
 
-            # Send to Slack
-            response = await self.http_client.post(
-                self.slack_webhook_url,
-                json={"blocks": blocks}
-            )
-            response.raise_for_status()
-
+            await self._post_slack_blocks(blocks)
             logger.info("Sent Slack alert successfully")
 
         except Exception as e:
             logger.error(f"Error sending Slack alert: {e}")
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=30),
+        reraise=False,
+    )
+    async def _post_slack_blocks(self, blocks: list) -> None:
+        """POST a pre-built Slack blocks payload with tenacity retry."""
+        response = await self.http_client.post(
+            self.slack_webhook_url,
+            json={"blocks": blocks},
+        )
+        response.raise_for_status()
 
     def load_version_history(self) -> List[Dict]:
         """Load version history from schema_versions.json."""
