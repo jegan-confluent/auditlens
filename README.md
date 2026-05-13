@@ -25,6 +25,22 @@ Default Docker Compose does not start Prometheus, Grafana, Loki, or Promtail.
 - Kafka/Confluent audit topic credentials for real ingestion
 - Node.js and Python only if running pieces outside Docker
 
+## Security
+
+**Before exposing AuditLens to any network, set `API_AUTH_ENABLED=true`.**  
+All API endpoints are publicly accessible by default. See [SECURITY.md](SECURITY.md) for the
+full hardening guide including token setup, role permissions, and reverse-proxy configuration.
+
+**Data privacy:** AuditLens is self-hosted. Audit events never leave your deployment. There is
+no telemetry, no phone-home mechanism, and no third-party analytics. The only outbound
+connections are to your Confluent Cloud Kafka endpoint (always) and to `api.confluent.cloud`
+(only when `IAM_ENRICHMENT_ENABLED=true`).
+
+**Mac / local evaluation:** Running locally with Docker Desktop on `127.0.0.1` is safe for
+evaluation. Ports are bound to localhost only, so no traffic reaches external networks.
+
+---
+
 ## Quick Start
 
 **Prerequisites:** Python 3.11+, Docker Desktop
