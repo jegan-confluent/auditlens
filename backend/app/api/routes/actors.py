@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from backend.app.db.database import get_db
 from backend.app.db.models import ActorIpBaseline, AuditEvent
+from backend.app.api.routes.patterns import _require_viewer
 
 router = APIRouter(tags=["actors"])
 
@@ -16,7 +17,7 @@ def _now() -> datetime:
 
 
 @router.get("/actors/{actor_id}/ip-baseline")
-def get_actor_ip_baseline(actor_id: str, db: Session = Depends(get_db)) -> dict:
+def get_actor_ip_baseline(actor_id: str, db: Session = Depends(get_db), _auth: None = Depends(_require_viewer)) -> dict:
     rows = (
         db.query(ActorIpBaseline)
         .filter(ActorIpBaseline.actor == actor_id)

@@ -8,6 +8,7 @@ from backend.app.db.database import get_db
 from backend.app.schemas.response import MethodDistributionResponse, SummaryResponse
 from backend.app.services.noise_service import get_method_distribution
 from backend.app.services.summary_service import get_summary
+from backend.app.api.routes.patterns import _require_viewer
 
 router = APIRouter(tags=["summary"])
 
@@ -30,6 +31,7 @@ def summary(
         description="If true, attaches a noise_summary block sourced from audit_events_noise.",
     ),
     db: Session = Depends(get_db),
+    _auth: None = Depends(_require_viewer),
 ) -> dict:
     try:
         return get_summary(

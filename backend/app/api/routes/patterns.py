@@ -25,6 +25,21 @@ def _authenticate(request: Request) -> "AuthResult":  # type: ignore[name-define
         raise HTTPException(status_code=503, detail="Auth configuration error") from exc
 
 
+def _require_viewer(request: Request) -> None:
+    try:
+        config = AuthConfig.from_env()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Auth configuration error") from exc
+    if not config.enabled:
+        return
+    result = _authenticate(request)
+    if not result.ok:
+        raise HTTPException(status_code=result.status_code, detail=result.error)
+    if result.actor and result.actor.role in {Role.VIEWER, Role.RESPONDER, Role.ADMIN}:
+        return
+    raise HTTPException(status_code=403, detail="viewer role required")
+
+
 def _require_responder(request: Request) -> None:
     try:
         config = AuthConfig.from_env()

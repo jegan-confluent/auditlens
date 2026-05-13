@@ -15,7 +15,7 @@ from backend.app.services.noise_service import (
 )
 from backend.app.services.triage_service import upsert_triage
 from src.product.auth import AuthConfig, Authenticator, Role
-from backend.app.api.routes.patterns import _require_responder
+from backend.app.api.routes.patterns import _require_responder, _require_viewer
 
 # /events list + detail are the most expensive routes; cap them tighter than
 # the global default. The limiter instance is shared across routes via
@@ -235,6 +235,7 @@ def failures(
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
+    _auth: None = Depends(_require_viewer),
 ) -> EventListResponse:
     items, total = list_failures(db, limit=limit, offset=offset)
     return EventListResponse(items=items, limit=limit, offset=offset, total=total)
@@ -245,6 +246,7 @@ def deletions(
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
+    _auth: None = Depends(_require_viewer),
 ) -> EventListResponse:
     items, total = list_deletions(db, limit=limit, offset=offset)
     return EventListResponse(items=items, limit=limit, offset=offset, total=total)
