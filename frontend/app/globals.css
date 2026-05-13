@@ -2425,4 +2425,61 @@ pre {
   border-color: var(--accent);
   color: var(--accent);
 }
+
+/* ── Events filter bar — primary / secondary layout ── */
+.filter-primary-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 0;
+}
+.signal-pills {
+  display: flex;
+  gap: 4px;
+  flex-wrap: nowrap;
+}
+.signal-pill {
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.1s;
+}
+.signal-pill:hover {
+  background: var(--bg);
+}
+.signal-pill.active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.more-filters-btn {
+  padding: 4px 12px;
+  font-size: 13px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  margin-left: auto;
+  white-space: nowrap;
+}
+.more-filters-btn.active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.filter-secondary-panel {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 0;
+  border-top: 1px solid var(--line);
+}
 .settings-tab-content { padding-top: 4px; }

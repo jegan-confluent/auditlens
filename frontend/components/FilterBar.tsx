@@ -22,10 +22,10 @@ const quickFilters: Array<{ label: string; patch: Partial<EventFilters> }> = [
 ];
 
 const SIGNAL_OPTIONS: Array<{ value: string; label: string }> = [
-  { value: "", label: "All signals" },
+  { value: "", label: "All" },
   { value: "action_required", label: "🔴 Action Required" },
-  { value: "attention", label: "🟡 Needs Review" },
-  { value: "informational", label: "ℹ️ Informational" },
+  { value: "attention", label: "🟡 Review" },
+  { value: "informational", label: "ℹ️ Info" },
   { value: "noise", label: "🔇 Noise" }
 ];
 
@@ -52,6 +52,19 @@ export default function FilterBar({ filters, options, onChange, onReset }: {
   const update = (key: keyof EventFilters, value: string) => onChange({ ...filters, [key]: value });
   const apply = (patch: Partial<EventFilters>) => onChange(applyQuickFilter(filters, patch));
   const activeLabels = activeFilterLabels(filters);
+
+  const secondaryCount = [
+    filters.actor,
+    filters.resource,
+    filters.cluster_name,
+    filters.environment_name,
+    filters.resource_type,
+    filters.result,
+  ].filter(Boolean).length;
+
+  const [moreOpen, setMoreOpen] = useState(
+    () => [filters.actor, filters.resource, filters.cluster_name, filters.environment_name, filters.resource_type, filters.result].some(Boolean)
+  );
 
   // Debounced actor search: keep an internal draft so each keystroke doesn't
   // refetch /events. The committed `filters.actor` still drives the URL /
@@ -95,52 +108,114 @@ export default function FilterBar({ filters, options, onChange, onReset }: {
         ))}
         <button className="quick-filter reset" onClick={onReset}>Clear Filters</button>
       </div>
-      <div className="toolbar filter-toolbar">
-        <select value={filters.signal} onChange={(event) => update("signal", event.target.value)} aria-label="Signal type">
-          {SIGNAL_OPTIONS.map((option) => (
-            <option key={option.value} value={option.value}>{option.label}</option>
+
+      <div className="filter-primary-row">
+        <div className="signal-pills" role="group" aria-label="Signal filter">
+          {SIGNAL_OPTIONS.map((opt) => (
+            <button
+              key={opt.value}
+              type="button"
+              className={`signal-pill${filters.signal === opt.value ? " active" : ""}`}
+              onClick={() => update("signal", opt.value)}
+            >
+              {opt.label}
+            </button>
           ))}
+        </div>
+        <select
+          value={filters.time_window}
+          onChange={(e) => update("time_window", e.target.value)}
+          aria-label="Time window"
+        >
+          <option value="30m">Last 30 min</option>
+          <option value="2h">Last 2h</option>
+          <option value="4h">Last 4h</option>
+          <option value="12h">Last 12h</option>
+          <option value="24h">Last 24h</option>
+          <option value="7d">Last 7d</option>
+          <option value="30d">Last 30d</option>
         </select>
-        <select value={filters.time_window} onChange={(event) => update("time_window", event.target.value)} aria-label="Time window">
-          <option value="30m">Last 30 minutes</option>
-          <option value="2h">Last 2 hours</option>
-          <option value="4h">Last 4 hours</option>
-          <option value="12h">Last 12 hours</option>
-          <option value="24h">Last 24 hours</option>
-          <option value="7d">Last 7 days</option>
-          <option value="30d">Last 30 days</option>
-        </select>
-        <select value={filters.resource_type} onChange={(event) => update("resource_type", event.target.value)} aria-label="Resource type">
-          <option value="">All resource types</option>
-          {(options?.resource_types || []).map((value) => <option key={value} value={value}>{value}</option>)}
-        </select>
-        <input value={filters.resource} onChange={(event) => update("resource", event.target.value)} placeholder="Resource text" aria-label="Resource search" />
-        <input value={filters.cluster_name} onChange={(event) => update("cluster_name", event.target.value)} placeholder="Cluster" aria-label="Cluster filter" />
-        <select value={filters.environment_name} onChange={(event) => update("environment_name", event.target.value)} aria-label="Environment filter">
-          <option value="">All environments</option>
-          {(options?.environments || []).map((value) => <option key={value} value={value}>{value}</option>)}
-        </select>
-        <select value={filters.action_category} onChange={(event) => update("action_category", event.target.value)} aria-label="Action category">
+        <select
+          value={filters.action_category}
+          onChange={(e) => update("action_category", e.target.value)}
+          aria-label="Action category"
+        >
           <option value="">All actions</option>
-          {(options?.action_categories || []).map((value) => <option key={value} value={value}>{value}</option>)}
-        </select>
-        <span className="actor-search">
-          <input
-            value={actorDraft}
-            onChange={(event) => onActorInput(event.target.value)}
-            placeholder="Filter by actor name or ID..."
-            aria-label="Actor filter"
-          />
-          {actorDraft ? (
-            <button type="button" className="actor-search-clear" aria-label="Clear actor filter" onClick={onActorClear}>×</button>
-          ) : null}
-        </span>
-        <select value={filters.result} onChange={(event) => update("result", event.target.value)} aria-label="Result">
-          {RESULT_OPTIONS.map((option) => (
-            <option key={option.value} value={option.value}>{option.label}</option>
+          {(options?.action_categories || []).map((v) => (
+            <option key={v} value={v}>{v}</option>
           ))}
         </select>
+        <button
+          type="button"
+          className={`more-filters-btn${moreOpen ? " active" : ""}`}
+          onClick={() => setMoreOpen(!moreOpen)}
+          aria-expanded={moreOpen}
+        >
+          {moreOpen
+            ? "Hide filters"
+            : secondaryCount > 0
+            ? `More filters (${secondaryCount})`
+            : "More filters"}
+        </button>
       </div>
+
+      {moreOpen ? (
+        <div className="filter-secondary-panel">
+          <span className="actor-search">
+            <input
+              value={actorDraft}
+              onChange={(e) => onActorInput(e.target.value)}
+              placeholder="Filter by actor name or ID..."
+              aria-label="Actor filter"
+            />
+            {actorDraft ? (
+              <button type="button" className="actor-search-clear" aria-label="Clear actor filter" onClick={onActorClear}>×</button>
+            ) : null}
+          </span>
+          <input
+            value={filters.resource}
+            onChange={(e) => update("resource", e.target.value)}
+            placeholder="Resource text"
+            aria-label="Resource search"
+          />
+          <select
+            value={filters.resource_type}
+            onChange={(e) => update("resource_type", e.target.value)}
+            aria-label="Resource type"
+          >
+            <option value="">All resource types</option>
+            {(options?.resource_types || []).map((v) => (
+              <option key={v} value={v}>{v}</option>
+            ))}
+          </select>
+          <input
+            value={filters.cluster_name}
+            onChange={(e) => update("cluster_name", e.target.value)}
+            placeholder="Cluster"
+            aria-label="Cluster filter"
+          />
+          <select
+            value={filters.environment_name}
+            onChange={(e) => update("environment_name", e.target.value)}
+            aria-label="Environment filter"
+          >
+            <option value="">All environments</option>
+            {(options?.environments || []).map((v) => (
+              <option key={v} value={v}>{v}</option>
+            ))}
+          </select>
+          <select
+            value={filters.result}
+            onChange={(e) => update("result", e.target.value)}
+            aria-label="Result"
+          >
+            {RESULT_OPTIONS.map((opt) => (
+              <option key={opt.value} value={opt.value}>{opt.label}</option>
+            ))}
+          </select>
+        </div>
+      ) : null}
+
       <p className="active-filters">Active filters: {activeLabels.length ? activeLabels.join(", ") : "none"}</p>
     </section>
   );
