@@ -1074,14 +1074,25 @@ def test_event_fingerprint_no_iam_call(monkeypatch):
     assert called == [], "event_fingerprint must not call enrich_actor for management-plane events"
 
 
-def test_always_noise_methods_matches_bulk_noise_methods():
-    """_ALWAYS_NOISE_METHODS must be derived from BULK_NOISE_METHODS so they cannot diverge."""
+def test_always_noise_methods_derived_from_bulk_noise_methods():
+    """_ALWAYS_NOISE_METHODS must equal BULK_NOISE_METHODS minus the authentication methods
+    whose failures are security signals (not noise)."""
     from src.product.event_signals import _ALWAYS_NOISE_METHODS
     from src.product.event_normalization import BULK_NOISE_METHODS
-    assert _ALWAYS_NOISE_METHODS == BULK_NOISE_METHODS, (
-        f"diverged — in BULK but not ALWAYS: {BULK_NOISE_METHODS - _ALWAYS_NOISE_METHODS}; "
-        f"in ALWAYS but not BULK: {_ALWAYS_NOISE_METHODS - BULK_NOISE_METHODS}"
+    _AUTH_SECURITY_METHODS = frozenset({
+        "kafka.authentication",
+        "schema-registry.authentication",
+        "ksql.authenticate",
+    })
+    expected = BULK_NOISE_METHODS - _AUTH_SECURITY_METHODS
+    assert _ALWAYS_NOISE_METHODS == expected, (
+        f"unexpected diff — extra: {_ALWAYS_NOISE_METHODS - expected}; "
+        f"missing: {expected - _ALWAYS_NOISE_METHODS}"
     )
+    for auth_method in _AUTH_SECURITY_METHODS:
+        assert auth_method not in _ALWAYS_NOISE_METHODS, (
+            f"{auth_method} must not be in _ALWAYS_NOISE_METHODS — its failures are security events"
+        )
 
 
 def test_signin_classified_as_authentication_not_read_only():
