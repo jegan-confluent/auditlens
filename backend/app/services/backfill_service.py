@@ -20,6 +20,7 @@ from src.product.event_normalization import normalize_event
 from src.product.resource_intelligence import extract_resource_context
 from src.product.source_enrichment import extract_source_info
 from backend.app.services.resource_service import upsert_resource_catalog
+from backend.app.services import settings_service
 
 logger = logging.getLogger("auditlens.backend.backfill")
 
@@ -500,7 +501,18 @@ def backfill_source_fields_from_raw_payload(
     result = BackfillResult(dry_run=dry_run, force=force)
     processed = 0
     batch_size = min(limit, 1000)
+    _CURSOR_CATEGORY = "backfill"
+    _CURSOR_KEY = "source_fields_cursor"
     cursor: tuple[datetime, int] | None = None
+    if not dry_run and target_id is None:
+        _saved = settings_service.get(db, _CURSOR_CATEGORY, _CURSOR_KEY)
+        if _saved:
+            try:
+                _ts_str, _id_str = _saved.rsplit("|", 1)
+                cursor = (datetime.fromisoformat(_ts_str), int(_id_str))
+                logger.info("backfill_source_fields: resuming from cursor %s", cursor)
+            except Exception:
+                cursor = None
     while processed < limit:
         current_limit = 1 if target_id is not None else min(batch_size, limit - processed)
         query = _build_batch_query(
@@ -565,14 +577,22 @@ def backfill_source_fields_from_raw_payload(
                 )
                 debug_sample -= 1
             cursor = (event.timestamp, event.id)
+        if not dry_run:
+            db.commit()
+            if cursor is not None and target_id is None:
+                settings_service.set(db, _CURSOR_CATEGORY, _CURSOR_KEY,
+                                     f"{cursor[0].isoformat()}|{cursor[1]}")
         if target_id is not None:
             break
         if len(batch) < current_limit:
+            if not dry_run:
+                settings_service.delete(db, _CURSOR_CATEGORY, _CURSOR_KEY)
             break
         if sleep_ms > 0 and processed < limit:
             sleep(sleep_ms / 1000.0)
-    if not dry_run:
-        db.commit()
+    else:
+        if not dry_run:
+            settings_service.delete(db, _CURSOR_CATEGORY, _CURSOR_KEY)
     logger.info(
         "field backfill complete scanned=%s updated=%s source_updated=%s decision_updated=%s invalid_json=%s dry_run=%s force=%s source_fields=%s decision_fields=%s",
         result.scanned,
@@ -877,6 +897,13 @@ def backfill_actor_display_names(
             )
         query = (
             select(AuditEvent)
+            .options(load_only(
+                AuditEvent.id,
+                AuditEvent.actor,
+                AuditEvent._actor_display_name,
+                AuditEvent._actor_source,
+                AuditEvent._actor_confidence,
+            ))
             .where(AuditEvent._actor_display_name.in_(_UNKNOWN_DISPLAY_NAMES))
             .order_by(AuditEvent.id.asc())
             .limit(_ACTOR_BACKFILL_BATCH_SIZE)
