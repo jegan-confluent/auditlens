@@ -247,7 +247,7 @@ class TopicRouter:
             return RoutingResult.ROUTED
 
         except Exception as e:
-            logger.error(f"Error routing event: {e}")
+            logger.error("Error routing event: %s", e, exc_info=True)
             self.stats.errors += 1
             return RoutingResult.ERROR
 

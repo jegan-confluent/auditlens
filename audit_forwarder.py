@@ -68,7 +68,7 @@ from src.classification.methods import (
     AUTHORIZATION_CHECK_METHODS,
 )
 from src.anomaly import RateTracker, RateTrackerConfig
-from src.routing import TopicRouter, RouterConfig
+from src.routing import TopicRouter, RouterConfig, RoutingResult
 from src.alerting import get_webhook_sender
 from src.aggregation import DenialAggregator, AggregatorConfig
 from src.identity import normalize_with_type
@@ -4422,7 +4422,20 @@ def main():
                                 metrics.record_persistence_success(_ps_health)
 
                     if ENABLE_MULTI_TOPIC_ROUTING and topic_router:
-                        topic_router.route_event(enriched_event)
+                        _rt_result = topic_router.route_event(enriched_event)
+                        if _rt_result == RoutingResult.ERROR:
+                            logger.error(
+                                "topic_router.route_event failed for method=%s — sending to DLQ",
+                                enriched_event.get("methodName", "unknown"),
+                            )
+                            send_to_dlq(
+                                producer,
+                                msg.value(),
+                                "topic_router.route_event returned ERROR",
+                                msg.topic(),
+                                msg.partition(),
+                                msg.offset(),
+                            )
 
                     # Track this message's offset for the end-of-batch commit.
                     key = (msg.topic(), msg.partition())
