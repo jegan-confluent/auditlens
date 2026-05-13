@@ -10,6 +10,9 @@ import TopActors from "../../components/TopActors";
 import { getReadinessStatus, getSummary, getSystemStatus, isAbortError } from "../../lib/api";
 import type { SummaryResponse, SystemStatus } from "../../lib/types";
 
+type TimeWindow = "1h" | "6h" | "24h" | "7d";
+const TIME_WINDOW_OPTIONS = ["1h", "6h", "24h", "7d"] as const;
+
 type Lag = { tone: "fresh" | "warning" | "critical"; ageHours: number };
 
 function classifyLag(newestEvent: string | null): Lag | null {
@@ -37,11 +40,46 @@ function emptyPanel<T>(): Panel<T> {
   return { data: null, error: null, loading: true };
 }
 
+function TimeWindowPills({
+  value,
+  onChange,
+}: {
+  value: TimeWindow;
+  onChange: (v: TimeWindow) => void;
+}) {
+  return (
+    <div className="time-window-pills">
+      {TIME_WINDOW_OPTIONS.map((opt) => (
+        <button
+          key={opt}
+          type="button"
+          className={`time-window-pill${value === opt ? " active" : ""}`}
+          onClick={() => onChange(opt)}
+        >
+          {opt}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 export default function DashboardPage() {
+  const [timeWindow, setTimeWindow] = useState<TimeWindow>(() => {
+    if (typeof window === "undefined") return "24h";
+    const saved = localStorage.getItem("dashboard_time_window");
+    if (saved === "1h" || saved === "6h" || saved === "24h" || saved === "7d") return saved;
+    return "24h";
+  });
   const [system, setSystem] = useState<Panel<SystemStatus>>(emptyPanel());
   const [newestEvent, setNewestEvent] = useState<string | null>(null);
   const [readyError, setReadyError] = useState<string | null>(null);
   const [summary, setSummary] = useState<SummaryResponse | null>(null);
+
+  const onTimeWindowChange = (val: TimeWindow) => {
+    setSummary(null);
+    setTimeWindow(val);
+    localStorage.setItem("dashboard_time_window", val);
+  };
 
   useEffect(() => {
     const controller = new AbortController();
@@ -65,21 +103,24 @@ export default function DashboardPage() {
         setReadyError(err instanceof Error ? err.message : "Failed to check forwarder readiness");
       });
 
-    getSummary(new URLSearchParams({ time_window: "24h", mode: "decision" }), signal)
+    return () => controller.abort();
+  }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    getSummary(new URLSearchParams({ time_window: timeWindow, mode: "decision" }), controller.signal)
       .then(setSummary)
       .catch((err) => {
         if (isAbortError(err)) return;
-        // Non-fatal: NarrativeStrip simply won't render if summary is null.
       });
-
     return () => controller.abort();
-  }, []);
+  }, [timeWindow]);
 
   const lag = classifyLag(newestEvent);
 
   return (
     <main className="page">
-      {summary ? <NarrativeStrip summary={summary} timeWindow="24h" /> : null}
+      {summary ? <NarrativeStrip summary={summary} timeWindow={timeWindow} /> : null}
       {lag && lag.tone === "critical" ? (
         <div className="lag-banner critical" role="status">
           <strong>🚨 Forwarder significantly behind</strong>
@@ -96,8 +137,13 @@ export default function DashboardPage() {
         <p className="panel-error">Forwarder readiness check failed — {readyError}</p>
       ) : null}
 
-      <ActionFeed timeWindow="24h" />
-      <TopActors timeWindow="24h" />
+      <ActionFeed
+        timeWindow={timeWindow}
+        timeWindowSelector={
+          <TimeWindowPills value={timeWindow} onChange={onTimeWindowChange} />
+        }
+      />
+      <TopActors timeWindow={timeWindow} />
 
       {system.loading ? (
         <LoadingState label="Loading system health" />

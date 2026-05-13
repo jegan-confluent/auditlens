@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import type React from "react";
 import Link from "next/link";
 import { getEvents, isAbortError } from "../lib/api";
 import type { AuditEvent, EventListResponse } from "../lib/types";
@@ -152,7 +153,7 @@ function buildGroups(events: AuditEvent[], limit = 5): FeedGroup[] {
     .slice(0, limit);
 }
 
-export default function ActionFeed({ timeWindow = "24h" }: { timeWindow?: string }) {
+export default function ActionFeed({ timeWindow = "24h", timeWindowSelector }: { timeWindow?: string; timeWindowSelector?: React.ReactNode }) {
   const categories = useMemo(() => buildCategories(timeWindow), [timeWindow]);
 
   const [state, setState] = useState<Record<string, FeedState>>(() => {
@@ -198,8 +199,11 @@ export default function ActionFeed({ timeWindow = "24h" }: { timeWindow?: string
 
   return (
     <section className="action-feed panel">
-      <h2>{allLoaded && hasAttentionItems ? "⚠️ Needs attention" : "✅ Recent activity"}</h2>
-      <p className="muted">Grouped activity from the last 24 hours that may need your attention.</p>
+      <div className="action-feed-header">
+        <h2>{allLoaded && hasAttentionItems ? "⚠️ Needs attention" : "✅ Recent activity"}</h2>
+        {timeWindowSelector ?? null}
+      </div>
+      <p className="muted">Grouped activity from the last {timeWindow} that may need your attention.</p>
       {allEmpty ? (
         <p className="action-feed-allclear">✅ Nothing unusual in the last 24h. Continue monitoring.</p>
       ) : null}
