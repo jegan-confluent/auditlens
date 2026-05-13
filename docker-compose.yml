@@ -294,7 +294,7 @@ services:
       - no-new-privileges:true
 
   prometheus:
-    image: prom/prometheus:v2.54.1@sha256:69961df6ffa67598048a31aa2822d61f3c93b91d7db24e44d9bb03f99d520da9
+    image: prom/prometheus:v2.55.1
     container_name: audit-prometheus
     restart: unless-stopped
     user: "65534:65534"  # nobody user
@@ -334,7 +334,7 @@ services:
       - ALL
 
   grafana:
-    image: grafana/grafana:11.3.1@sha256:cc51212998c91d624fdbb6d1a6903234ddcf97108d56a7a2d1c85bffdb749b6a
+    image: grafana/grafana:11.6.0
     container_name: audit-grafana
     restart: unless-stopped
     user: "472:472"  # grafana user
@@ -418,7 +418,7 @@ services:
 
   loki:
     profiles: ["observability", "dev"]
-    image: grafana/loki:3.2.1
+    image: grafana/loki:3.3.2
     container_name: loki
     user: "10001:10001"  # loki user
     ports:
@@ -452,7 +452,7 @@ services:
 
   promtail:
     profiles: ["observability", "dev"]
-    image: grafana/promtail:3.2.1
+    image: grafana/promtail:3.3.2
     container_name: promtail
     # SECURITY: Using non-root user (10001) instead of root for file-based log collection
     # Create logs directory with appropriate permissions: mkdir -p ./logs && chmod 755 ./logs
