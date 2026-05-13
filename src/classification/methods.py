@@ -477,6 +477,7 @@ _AUTHENTICATION_METHODS_DEFAULT = {
     'flink.Authenticate',
     'ksql.Authenticate',
     'schema-registry.Authentication',
+    'SignIn',
 }
 
 AUTHENTICATION_METHODS = _get_methods('authentication_methods', _AUTHENTICATION_METHODS_DEFAULT)
@@ -551,7 +552,6 @@ _READ_ONLY_METHODS_DEFAULT = {
     'schema-registry.GetAllTagDefs',
     'schema-registry.GetEntityByTypeAndName',
     'schema-registry.GetDek',
-    'SignIn',
 
     # Caps-API variants Confluent emits — explicit set must enumerate both
     # forms because pattern-matching collides with the API Key bucket.

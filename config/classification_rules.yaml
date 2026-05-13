@@ -332,6 +332,7 @@ authentication_methods:
   - flink.Authenticate
   - ksql.Authenticate
   - schema-registry.Authentication
+  - SignIn
 
 authorization_check_methods:
   - mds.Authorize
@@ -413,7 +414,6 @@ read_only_methods:
   - ListCustomConnectorPlugins
   - ListEndpoints
   - ListIdentityPool
-  - SignIn
   - schema-registry.GetAllTagDefs
   - schema-registry.GetEntityByTypeAndName
   - schema-registry.GetDek
