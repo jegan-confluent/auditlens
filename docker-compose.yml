@@ -60,7 +60,7 @@ services:
     volumes:
       - ./audit_forwarder.py:/app/audit_forwarder.py:ro
       - ./src:/app/src:ro
-      - auditlens_data:/app/data
+      - ./data/forwarder:/app/data
       - ./secrets:/run/secrets:ro
     ports:
       - "127.0.0.1:${METRICS_PORT:-8003}:${METRICS_PORT:-8003}"
