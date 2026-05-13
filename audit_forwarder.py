@@ -2701,10 +2701,10 @@ def delivery_callback(err, msg):
     if err:
         with _delivery_errors_lock:
             delivery_errors["count"] += 1
-        # Always store the masked form so anything that subsequently reads
-        # delivery_errors["last_error"] (the heartbeat log, the /health probe,
-        # etc.) cannot inadvertently leak secrets.
-        delivery_errors["last_error"] = mask_sensitive_text(str(err))
+            # Always store the masked form so anything that subsequently reads
+            # delivery_errors["last_error"] (the heartbeat log, the /health probe,
+            # etc.) cannot inadvertently leak secrets.
+            delivery_errors["last_error"] = mask_sensitive_text(str(err))
         metrics.record_delivery_failure(msg.topic() if msg else "unknown")
         if delivery_errors["count"] <= 10 or delivery_errors["count"] % 1000 == 0:
             logger.error(
@@ -4659,7 +4659,8 @@ def main():
             logger.warning("kafka-consumer thread did not exit within 30s")
         # Wait for the processor to drain in-flight DB writes.
         processor_thread.join(timeout=120)
-        if processor_thread.is_alive():
+        processor_still_alive = processor_thread.is_alive()
+        if processor_still_alive:
             logger.warning("event-processor thread did not exit within 120s")
         # Drain priority writer threads. Each writer flushes any partial
         # batch it has buffered before exiting (loop checks _shutdown_requested
@@ -4689,17 +4690,20 @@ def main():
         if remaining > 0:
             logger.warning("Could not flush %d messages during shutdown", remaining)
         else:
-            try:
-                consumer.commit(asynchronous=False)
-                metrics.record_commit_success()
-                logger.info("Final offset commit successful")
-            except Exception as e:
-                msg_str = str(e)
-                if "No offset stored" in msg_str or "_NO_OFFSET" in msg_str:
-                    logger.info("No pending offsets to commit at shutdown (processor already committed)")
-                else:
-                    logger.error("Failed to commit offsets during shutdown: %s", e)
-                    metrics.record_commit_failure()
+            if processor_still_alive:
+                logger.info("Skipping shutdown commit — processor thread still alive and will commit its own offsets")
+            else:
+                try:
+                    consumer.commit(asynchronous=False)
+                    metrics.record_commit_success()
+                    logger.info("Final offset commit successful")
+                except Exception as e:
+                    msg_str = str(e)
+                    if "No offset stored" in msg_str or "_NO_OFFSET" in msg_str:
+                        logger.info("No pending offsets to commit at shutdown (processor already committed)")
+                    else:
+                        logger.error("Failed to commit offsets during shutdown: %s", e)
+                        metrics.record_commit_failure()
 
         consumer.close()
         logger.info("Shutdown complete")

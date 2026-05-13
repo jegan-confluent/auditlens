@@ -558,7 +558,6 @@ class IdentityEnricher:
         """Force refresh of identity cache."""
         with self._lock:
             self._cache.clear()
-        with self._load_lock:
             self._service_accounts.clear()
             self._users.clear()
             self._identities_loaded = False
