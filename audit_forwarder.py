@@ -3073,7 +3073,15 @@ def flush_db_writer_buffer(payloads: list[dict], backoff: RuntimeBackoff, log_st
         if len(payloads) > parallel_chunk:
             chunks = [payloads[i:i + parallel_chunk] for i in range(0, len(payloads), parallel_chunk)]
             # Submit copies so the caller's payload mutation doesn't race the workers.
-            futures = [executor.submit(flush_db_writer_batch, list(chunk), backoff, log_state) for chunk in chunks]
+            futures = [
+                executor.submit(
+                    flush_db_writer_batch,
+                    list(chunk),
+                    RuntimeBackoff(maximum=DB_WRITE_BACKOFF_MAX_SECONDS),  # fresh per chunk
+                    {},                                                      # fresh per chunk
+                )
+                for chunk in chunks
+            ]
             all_ok = True
             for fut in futures:
                 try:
