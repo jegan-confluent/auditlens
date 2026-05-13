@@ -27,6 +27,12 @@ logger = logging.getLogger(__name__)
 # YAML CONFIGURATION LOADER
 # =============================================================================
 
+_VALID_YAML_KEYS = frozenset({
+    'critical_methods', 'high_methods', 'medium_methods', 'read_only_methods',
+    'authentication_methods', 'authorization_check_methods', 'security_failure_statuses',
+})
+
+
 def _load_rules_from_yaml() -> dict:
     """Load classification rules from YAML config file."""
     try:
@@ -35,8 +41,15 @@ def _load_rules_from_yaml() -> dict:
         if config_path.exists():
             with open(config_path, 'r') as f:
                 rules = yaml.safe_load(f)
-                logger.info(f"Loaded classification rules from {config_path}")
-                return rules
+            unknown = set(rules or {}) - _VALID_YAML_KEYS
+            if unknown:
+                logger.warning(
+                    "classification_rules.yaml contains unknown key(s) %s — "
+                    "valid keys: %s",
+                    sorted(unknown), sorted(_VALID_YAML_KEYS),
+                )
+            logger.info(f"Loaded classification rules from {config_path}")
+            return rules or {}
     except ImportError:
         logger.debug("PyYAML not installed, using hardcoded rules")
     except Exception as e:
@@ -571,13 +584,6 @@ _READ_ONLY_METHODS_DEFAULT = {
 
     # Networking reads.
     'GetTransitGateways',
-
-    # ksqlDB authentication / authorization (very high volume; READ_ONLY by
-    # the criticality model). Already present in AUTHENTICATION_METHODS /
-    # AUTHORIZATION_CHECK_METHODS — listing here documents read-only intent
-    # for the criticality cascade.
-    'ksql.Authenticate',
-    'ksql.Authorize',
 
     # Produce/Consume (routine operations)
     'kafka.Produce',
