@@ -69,8 +69,9 @@ class EnrichmentConfig:
     confluent_api_secret: str | None = None
     confluent_api_base_url: str = "https://api.confluent.cloud"
 
-    @classmethod
-    def from_env(cls) -> "EnrichmentConfig":
+    @staticmethod
+    @lru_cache(maxsize=1)
+    def from_env() -> "EnrichmentConfig":
         sources = tuple(
             source.strip()
             for source in os.getenv("IAM_ENRICHMENT_SOURCE", "manual,confluent_api,metrics").split(",")
@@ -78,7 +79,7 @@ class EnrichmentConfig:
         )
         api_key = os.getenv("CONFLUENT_CLOUD_API_KEY") or os.getenv("CONFLUENT_API_KEY")
         api_secret = os.getenv("CONFLUENT_CLOUD_API_SECRET") or os.getenv("CONFLUENT_API_SECRET")
-        return cls(
+        return EnrichmentConfig(
             enabled=os.getenv("IAM_ENRICHMENT_ENABLED", "false").lower() == "true",
             sources=sources or ("manual",),
             cache_ttl_seconds=_env_int("IAM_ENRICHMENT_CACHE_TTL_SECONDS", 3600),
@@ -554,6 +555,7 @@ def clear_actor_enrichment_cache() -> None:
     _identity_map.cache_clear()
     _confluent_identity_enricher.cache_clear()
     _actor_mapping_file.cache_clear()
+    EnrichmentConfig.from_env.cache_clear()
 
 
 def looks_like_ip(value: str | None) -> bool:
