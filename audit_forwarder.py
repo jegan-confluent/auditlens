@@ -339,6 +339,7 @@ authenticator = Authenticator(AUTH_CONFIG)
 PERSISTENCE_CONFIG = PersistenceConfig.from_env()
 product_store = None
 db_writer = None
+_db_init_next_attempt: float = 0.0
 storage_monitor_stop = threading.Event()
 storage_monitor_thread = None
 
@@ -2899,21 +2900,41 @@ def _should_log_repeated_error(state: dict, error_text: str) -> bool:
 
 
 def initialize_db_writer_if_enabled():
-    global db_writer
+    global db_writer, _db_init_next_attempt
     if not ENABLE_DB_WRITER:
         metrics.set_db_writer_state("disabled")
         return None
     if db_writer is not None:
         return db_writer
+    # Circuit breaker: if the last init attempt failed, wait before retrying
+    # to avoid creating a new SQLAlchemy engine (and leaking a connection pool)
+    # on every call during an extended DB outage.
+    if time.monotonic() < _db_init_next_attempt:
+        return None
     metrics.set_db_writer_state("retrying")
-    db_writer = AuditEventDbWriter(
-        DATABASE_URL,
-        retention_days=EVENT_RETENTION_DAYS,
-        retention_cleanup_interval_seconds=DB_RETENTION_CLEANUP_INTERVAL_SECONDS,
-    )
-    metrics.set_db_writer_state("connected")
-    logger.info("DB writer enabled: mode=%s", db_writer.mode)
-    return db_writer
+    try:
+        db_writer = AuditEventDbWriter(
+            DATABASE_URL,
+            retention_days=EVENT_RETENTION_DAYS,
+            retention_cleanup_interval_seconds=DB_RETENTION_CLEANUP_INTERVAL_SECONDS,
+        )
+        metrics.set_db_writer_state("connected")
+        _db_init_next_attempt = 0.0  # reset — success
+        logger.info("DB writer enabled: mode=%s", db_writer.mode)
+        return db_writer
+    except Exception as exc:
+        masked = mask_sensitive_text(str(exc))
+        # Exponential backoff — cap at 60s to avoid stalling too long
+        _db_init_next_attempt = time.monotonic() + min(
+            60.0, 2.0 ** min(metrics.db_write_consecutive_error_count, 6)
+        )
+        metrics.record_db_write_error(masked, 0)
+        logger.warning(
+            "DB writer init failed (retry in %.0fs): %s",
+            _db_init_next_attempt - time.monotonic(),
+            masked,
+        )
+        return None
 
 
 def flush_db_writer_noise_batch(
@@ -2930,6 +2951,8 @@ def flush_db_writer_noise_batch(
         return True
     try:
         writer = initialize_db_writer_if_enabled()
+        if writer is None:
+            return False
         result = writer.write_noise_batch(payloads)
         max_event_iso = _max_event_timestamp_iso(payloads)
         metrics.record_db_write_success(result.attempted, max_event_timestamp_iso=max_event_iso)
@@ -2966,6 +2989,8 @@ def flush_db_writer_batch(
         return True
     try:
         writer = initialize_db_writer_if_enabled()
+        if writer is None:
+            return False
         # Pass defer_catalog only when set so older test doubles whose
         # write_batch signature predates the kwarg keep working.
         if defer_catalog:

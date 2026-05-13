@@ -1027,3 +1027,28 @@ def test_flatten_audit_lowercase_method_deletion():
         "is_deletion must be True for lowercase 'deleteCluster' — "
         "case-sensitive check was the bug"
     )
+
+
+def test_db_writer_init_circuit_breaker(monkeypatch):
+    """DB init failure should not be retried on every call — circuit breaker."""
+    import audit_forwarder as af
+    call_count = [0]
+
+    def failing_init(*args, **kwargs):
+        call_count[0] += 1
+        raise RuntimeError("simulated DB unavailable")
+
+    monkeypatch.setattr(af, "AuditEventDbWriter", failing_init)
+    monkeypatch.setattr(af, "db_writer", None)
+    monkeypatch.setattr(af, "_db_init_next_attempt", 0.0)
+    monkeypatch.setattr(af, "ENABLE_DB_WRITER", True)
+
+    # First call — should attempt init, fail, set backoff
+    result1 = af.initialize_db_writer_if_enabled()
+    assert result1 is None
+    assert call_count[0] == 1
+
+    # Second immediate call — should NOT attempt init (circuit breaker active)
+    result2 = af.initialize_db_writer_if_enabled()
+    assert result2 is None
+    assert call_count[0] == 1, "Circuit breaker failed: init called twice"
