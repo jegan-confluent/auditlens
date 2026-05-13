@@ -29,9 +29,7 @@ function ClickableCount({ value, field, onApply }: {
       type="button"
       className={`count-link${n === 0 ? " zero" : ""}`}
       onClick={() => {
-        const patch = derivePatch(field);
-        console.log("[DecisionBanner] count clicked — field:", field, "patch:", patch, "handler:", typeof onApply);
-        onApply?.(patch);
+        onApply?.(derivePatch(field));
       }}
     >
       {n.toLocaleString()}

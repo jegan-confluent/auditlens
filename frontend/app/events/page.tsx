@@ -404,21 +404,12 @@ function EventsPageInner() {
   };
   const resetFilters = () => updateFilters(defaultFilters);
   const showAllActivity = () => updateFilters(allActivityFilters);
-  const applyFlowFilters = (patch: Partial<EventFilters>) => {
-    updateFilters({ ...filters, ...patch });
-    tableRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-  };
   const applyDecisionFilters = (patch: Partial<EventFilters>) => {
-    console.log("[Events] applyDecisionFilters — patch:", patch, "tableRef:", tableRef.current);
     updateFilters({ ...filters, ...patch });
     tableRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
   };
   const isDecisionMode = filters.mode === "decision";
   const timeWindowLabel = humanTimeWindowLabel(filters.time_window);
-
-  // suppress unused-variable warning for applyFlowFilters / applyDecisionFilters
-  void applyFlowFilters;
-  void applyDecisionFilters;
 
   if (error) return <main className="page"><ErrorState message={error} systemState={system?.db_writer_state || system?.consumer_state} /></main>;
   const renderedEvents = data ? data.items : [];
