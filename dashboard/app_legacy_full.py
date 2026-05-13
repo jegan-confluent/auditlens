@@ -3,7 +3,23 @@ Confluent AuditLens
 Real-time Kafka Audit Intelligence Dashboard
 """
 
+import os as _os
 import streamlit as st
+
+# ── Password gate ──────────────────────────────────────────────────────────────
+# Set STREAMLIT_PASSWORD in the environment to require a password.
+# If the variable is absent the gate is skipped (local dev / CI).
+_STREAMLIT_PASSWORD = _os.getenv("STREAMLIT_PASSWORD", "")
+if _STREAMLIT_PASSWORD:
+    if not st.session_state.get("_authenticated"):
+        _entered = st.text_input("Dashboard password", type="password", key="_pw_gate")
+        if _entered == _STREAMLIT_PASSWORD:
+            st.session_state["_authenticated"] = True
+            st.rerun()
+        elif _entered:
+            st.error("Incorrect password")
+        st.stop()
+# ──────────────────────────────────────────────────────────────────────────────
 import pandas as pd
 from datetime import datetime
 from streamlit_autorefresh import st_autorefresh

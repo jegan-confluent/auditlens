@@ -8,6 +8,7 @@ investigations.
 from __future__ import annotations
 
 import html
+import os as _os
 from pathlib import Path
 import re
 from typing import Any, Dict, Iterable
@@ -16,6 +17,21 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import requests
 import streamlit as st
+
+# ── Password gate ──────────────────────────────────────────────────────────────
+# Set STREAMLIT_PASSWORD in the environment to require a password.
+# If the variable is absent the gate is skipped (local dev / CI).
+_STREAMLIT_PASSWORD = _os.getenv("STREAMLIT_PASSWORD", "")
+if _STREAMLIT_PASSWORD:
+    if not st.session_state.get("_authenticated"):
+        _entered = st.text_input("Dashboard password", type="password", key="_pw_gate")
+        if _entered == _STREAMLIT_PASSWORD:
+            st.session_state["_authenticated"] = True
+            st.rerun()
+        elif _entered:
+            st.error("Incorrect password")
+        st.stop()
+# ──────────────────────────────────────────────────────────────────────────────
 
 import config
 from config import APP_NAME, APP_TAGLINE, DATA_TABLE_CSS, LOGO_BASE64, THEME_CSS
