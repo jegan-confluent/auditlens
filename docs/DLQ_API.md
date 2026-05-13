@@ -13,14 +13,14 @@ The Dead Letter Queue captures events that fail during processing, allowing for 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `ENABLE_DLQ` | `true` | Enable/disable DLQ functionality |
-| `DLQ_TOPIC` | `audit_events_dlq` | Kafka topic for failed events |
+| `DLQ_TOPIC` | `audit.dlq.v1` | Kafka topic for failed events |
 
 ### Example
 
 ```bash
 # Enable DLQ (default)
 ENABLE_DLQ=true
-DLQ_TOPIC=audit_events_dlq
+DLQ_TOPIC=audit.dlq.v1
 
 # Disable DLQ
 ENABLE_DLQ=false
@@ -157,7 +157,7 @@ This allows:
 
 ```bash
 # Create DLQ topic with appropriate settings
-confluent kafka topic create audit_events_dlq \
+confluent kafka topic create audit.dlq.v1 \
   --partitions 6 \
   --config retention.ms=2592000000 \  # 30 days
   --config cleanup.policy=delete
@@ -178,7 +178,7 @@ confluent kafka topic create audit_events_dlq \
 
 ```bash
 # Count messages in DLQ
-confluent kafka topic consume audit_events_dlq \
+confluent kafka topic consume audit.dlq.v1 \
   --from-beginning \
   --print-key \
   | wc -l
@@ -188,7 +188,7 @@ confluent kafka topic consume audit_events_dlq \
 
 ```bash
 # Group by error type
-confluent kafka topic consume audit_events_dlq \
+confluent kafka topic consume audit.dlq.v1 \
   --from-beginning \
   | jq -r '.error' \
   | sort | uniq -c | sort -rn
@@ -198,7 +198,7 @@ confluent kafka topic consume audit_events_dlq \
 
 ```bash
 # View recent DLQ events
-confluent kafka topic consume audit_events_dlq \
+confluent kafka topic consume audit.dlq.v1 \
   --from-beginning \
   | tail -10 \
   | jq .
@@ -236,7 +236,7 @@ def reprocess_dlq(limit=None, dry_run=True):
         'group.id': 'dlq-reprocessor',
         'auto.offset.reset': 'earliest',
     })
-    consumer.subscribe(['audit_events_dlq'])
+    consumer.subscribe(['audit.dlq.v1'])
 
     stats = {'processed': 0, 'failed': 0, 'skipped': 0}
 

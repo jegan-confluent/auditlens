@@ -101,7 +101,7 @@ services:
         echo "Creating Kafka topics..."
         kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic confluent-audit-log-events --partitions 3 --replication-factor 1
         kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic audit-logs-processed --partitions 3 --replication-factor 1
-        kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic audit-logs-dlq --partitions 1 --replication-factor 1
+        kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic audit.dlq.v1 --partitions 1 --replication-factor 1
         echo "Topics created successfully:"
         kafka-topics --bootstrap-server kafka:29092 --list
 
@@ -174,7 +174,7 @@ services:
       AWS_SECRET_ACCESS_KEY: minioadmin
       # DLQ
       DLQ_ENABLED: "true"
-      DLQ_TOPIC: audit-logs-dlq
+      DLQ_TOPIC: audit.dlq.v1
       # Logging
       LOG_LEVEL: DEBUG
 

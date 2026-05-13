@@ -51,7 +51,7 @@ services:
 
       # DLQ
       - DLQ_ENABLED=${DLQ_ENABLED:-true}
-      - DLQ_TOPIC=${DLQ_TOPIC:-audit-forwarder-dlq}
+      - DLQ_TOPIC=${DLQ_TOPIC:-audit.dlq.v1}
 
       # Observability
       - METRICS_PORT=8000
