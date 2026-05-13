@@ -59,6 +59,7 @@ class AuditEventListOut(BaseModel):
     decision_reason: str
     decision_label: str
     recommended_action: str
+    client_tool: str | None = None
     triage_status: str = "open"
     triage_actor: str | None = None
     triage_timestamp: str | None = None

@@ -215,7 +215,7 @@ function ExpandedEventRow({ event, detail, loading, error }: {
   const resourceText = displayResource(data);
   return (
     <tr className="event-row-expanded">
-      <td colSpan={2}>
+      <td colSpan={3}>
         <div className="expanded-block">
           {loading ? <p className="muted">Loading details…</p> : null}
           {error ? <p className="panel-error">Could not load detail — {error}</p> : null}
@@ -286,6 +286,9 @@ function EventRow({ event, options }: { event: AuditEvent; options: RowOptions }
           <div className="event-relative-time">{formatRelativeCompact(event.timestamp)}</div>
           <div className="event-source-ip">{displaySourceIp(event)}</div>
         </td>
+        <td className="event-client-tool-cell" style={{ textAlign: "right", fontSize: "0.75em", color: "var(--muted)", whiteSpace: "nowrap" }}>
+          {event.client_tool || null}
+        </td>
       </tr>
       {isExpanded ? (
         <ExpandedEventRow event={event} detail={options.expandedDetail} loading={options.expandedLoading} error={options.expandedError} />
@@ -325,6 +328,9 @@ function GroupRow({ group, expanded, onToggle, onActorClick }: {
           {actor.isServiceAccount ? <span className="actor-badge sa" title="Service account">SA</span> : null}
         </div>
         <div className="event-relative-time">{formatRelativeCompact(head.timestamp)}</div>
+      </td>
+      <td className="event-client-tool-cell" style={{ textAlign: "right", fontSize: "0.75em", color: "var(--muted)", whiteSpace: "nowrap" }}>
+        {head.client_tool || null}
       </td>
     </tr>
   );
@@ -370,6 +376,7 @@ export default function AuditEventTable({
           <tr>
             <th>Event</th>
             <th style={{ textAlign: "right" }}>Who / When</th>
+            <th style={{ textAlign: "right" }}>Client</th>
           </tr>
         </thead>
         <tbody>

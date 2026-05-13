@@ -54,3 +54,53 @@ def test_flatten_audit_no_override_for_proper_user_id():
     flat = forwarder.flatten_audit(evt)
     assert flat["principal_normalized"] == "u-79z161"
     assert flat["principal_type"] == "user"
+
+
+def test_map_client_tool_rdkafka():
+    """rdkafka/ prefix maps to librdkafka client."""
+    assert forwarder._map_client_tool("rdkafka/1.9.2") == "librdkafka client (C/C++/Python/Go)"
+
+
+def test_map_client_tool_proxy():
+    """proxy: prefix maps to Confluent Console / VS Code / CLI."""
+    assert forwarder._map_client_tool("proxy:1.0.0") == "Confluent Console / VS Code / CLI"
+
+
+def test_map_client_tool_confluent_python():
+    """confluent-kafka- prefix maps to Confluent Python client."""
+    assert forwarder._map_client_tool("confluent-kafka-2.0.2") == "Confluent Python client"
+
+
+def test_map_client_tool_java():
+    """Apache Kafka prefix maps to Java Kafka client."""
+    assert forwarder._map_client_tool("Apache Kafka 3.4") == "Java Kafka client"
+
+
+def test_map_client_tool_sarama():
+    """sarama/ prefix maps to Go Sarama client."""
+    assert forwarder._map_client_tool("sarama/1.38.1") == "Go Sarama client"
+
+
+def test_map_client_tool_unknown_passthrough():
+    """Unknown clientId is returned as-is."""
+    assert forwarder._map_client_tool("my-custom-client/1.0") == "my-custom-client/1.0"
+
+
+def test_map_client_tool_none():
+    """None input returns None."""
+    assert forwarder._map_client_tool(None) is None
+
+
+def test_flatten_audit_sets_client_tool():
+    """flatten_audit sets client_tool when clientId is present in request."""
+    evt = {
+        "data": {
+            "serviceName": "test",
+            "methodName": "kafka.CreateTopics",
+            "authenticationInfo": {"principal": "User:u-abc123"},
+            "request": {"clientId": "rdkafka/1.9.2"},
+        }
+    }
+    flat = forwarder.flatten_audit(evt)
+    assert flat["client_tool"] == "librdkafka client (C/C++/Python/Go)"
+    assert flat["clientId"] == "rdkafka/1.9.2"

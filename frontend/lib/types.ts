@@ -44,6 +44,7 @@ export type AuditEvent = {
   source_display?: string;
   source_reason?: string;
   client_id?: string | null;
+  client_tool?: string | null;
   connection_id?: string | null;
   request_id?: string | null;
   environment_id?: string | null;

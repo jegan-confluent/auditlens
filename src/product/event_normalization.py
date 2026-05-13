@@ -555,6 +555,7 @@ def normalize_event(payload: dict[str, Any]) -> dict[str, Any]:
         "decision_reason": decision["decision_reason"],
         "decision_label": decision["decision_label"],
         "recommended_action": decision["recommended_action"],
+        "client_tool": payload.get("client_tool") or None,
     }
 
 

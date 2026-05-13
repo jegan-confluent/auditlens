@@ -64,6 +64,7 @@ class AuditEvent(Base):
     source_ip: Mapped[str | None] = mapped_column(String(128), nullable=True)
     _source_context: Mapped[str | None] = mapped_column("source_context", String(255), nullable=True)
     _client_id: Mapped[str | None] = mapped_column("client_id", String(255), nullable=True)
+    client_tool: Mapped[str | None] = mapped_column(String(128), nullable=True)
     _connection_id: Mapped[str | None] = mapped_column("connection_id", String(255), nullable=True)
     _request_id: Mapped[str | None] = mapped_column("request_id", String(255), nullable=True)
     environment_id: Mapped[str | None] = mapped_column(String(255), nullable=True)

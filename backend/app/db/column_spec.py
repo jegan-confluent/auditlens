@@ -14,6 +14,7 @@ AUDIT_EVENT_COLUMNS: dict[str, str] = {
     "actor_enriched_at": "VARCHAR(64)",
     "source_context": "VARCHAR(255)",
     "client_id": "VARCHAR(255)",
+    "client_tool": "VARCHAR(128)",
     "connection_id": "VARCHAR(255)",
     "request_id": "VARCHAR(255)",
     "environment_id": "VARCHAR(255)",

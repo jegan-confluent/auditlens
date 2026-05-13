@@ -82,6 +82,7 @@ audit_events = Table(
     Column("source_ip", String(128), nullable=True),
     Column("source_context", String(255), nullable=True),
     Column("client_id", String(255), nullable=True),
+    Column("client_tool", String(128), nullable=True),
     Column("connection_id", String(255), nullable=True),
     Column("request_id", String(255), nullable=True),
     Column("environment_id", String(255), nullable=True),

@@ -2527,6 +2527,24 @@ def _extract_client_ip(data):
 
     return None
 
+
+def _map_client_tool(client_id: str | None) -> str | None:
+    """Map raw clientId strings to human-readable tool names for narrative context."""
+    if not client_id:
+        return None
+    if client_id.startswith("proxy:"):
+        return "Confluent Console / VS Code / CLI"
+    if client_id.startswith("rdkafka/"):
+        return "librdkafka client (C/C++/Python/Go)"
+    if client_id.startswith("confluent-kafka-"):
+        return "Confluent Python client"
+    if client_id.startswith("Apache Kafka"):
+        return "Java Kafka client"
+    if client_id.startswith("sarama/"):
+        return "Go Sarama client"
+    return client_id
+
+
 def flatten_audit(event):
     out = {
         "id":             event.get("id"),
@@ -2594,6 +2612,7 @@ def flatten_audit(event):
 
     # clientId can be in request.clientId OR requestMetadata.clientId (kafka.Fetch/Produce events)
     out["clientId"] = req.get("clientId") or req.get("client_id") or meta.get("clientId") or meta.get("client_id")
+    out["client_tool"] = _map_client_tool(out["clientId"])
 
     # Extract client IP from multiple possible locations
     out["clientIp"] = _extract_client_ip(data)
