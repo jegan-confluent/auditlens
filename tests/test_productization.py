@@ -1004,3 +1004,26 @@ def test_delivery_callback_masks_kafka_error_before_logging(monkeypatch):
     assert "***MASKED***" in last_error
     for message in captured:
         assert sentinel not in message, f"sentinel leaked into log: {message}"
+
+
+def test_flatten_audit_lowercase_method_deletion():
+    """Regression: Confluent internal events use lowercase method names."""
+    from audit_forwarder import flatten_audit
+    event = {
+        "id": "test-lowercase-delete",
+        "specversion": "1.0",
+        "source": "crn://confluent.cloud/organization=org-1",
+        "subject": "",
+        "type": "io.confluent.kafka.server/authorization",
+        "time": "2026-05-13T10:00:00Z",
+        "data": {
+            "methodName": "deleteCluster",   # lowercase d
+            "authenticationInfo": {"principal": "User:sa-abc"},
+            "result": {"status": "SUCCESS"},
+        },
+    }
+    result = flatten_audit(event)
+    assert result["is_deletion"] is True, (
+        "is_deletion must be True for lowercase 'deleteCluster' — "
+        "case-sensitive check was the bug"
+    )

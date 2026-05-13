@@ -2650,9 +2650,10 @@ def flatten_audit(event):
 
     # Boolean classification flags
     method_name = out.get("methodName", "") or ""
-    out["is_deletion"] = "Delete" in method_name
-    out["is_creation"] = "Create" in method_name
-    out["is_modification"] = any(op in method_name for op in ("Update", "Alter"))
+    _method_lower = method_name.lower()
+    out["is_deletion"] = "delete" in _method_lower
+    out["is_creation"] = "create" in _method_lower
+    out["is_modification"] = any(op in _method_lower for op in ("update", "alter"))
 
     # Extract IDs from CRN fields (source, resourceName, subject)
     # mds.Authorize events have minimal source but full resourceName/subject
@@ -3176,9 +3177,10 @@ def recompute_enriched_event(event: dict) -> dict:
     updated["is_signal_candidate"] = classification_result.is_signal_candidate
     updated["signal_type"] = classification_result.signal_type
     method_name = updated.get("methodName", "") or ""
-    updated["is_deletion"] = "Delete" in method_name
-    updated["is_creation"] = "Create" in method_name
-    updated["is_modification"] = any(op in method_name for op in ("Update", "Alter"))
+    _method_lower = method_name.lower()
+    updated["is_deletion"] = "delete" in _method_lower
+    updated["is_creation"] = "create" in _method_lower
+    updated["is_modification"] = any(op in _method_lower for op in ("update", "alter"))
     updated["schema_version"] = "audit.enriched.v1"
     updated["pipeline_stage"] = "enriched"
     updated["event_contract_version"] = "v1"
