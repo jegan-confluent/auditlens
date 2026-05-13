@@ -1102,6 +1102,49 @@ def test_signin_classified_as_authentication_not_read_only():
     assert "SignIn" in AUTHENTICATION_METHODS, "SignIn must be in AUTHENTICATION_METHODS"
 
 
+def test_cleanup_retention_returns_batches_key_on_live_run(tmp_path):
+    """Live cleanup_retention must return a 'batches' key indicating batch count."""
+    writer = AuditEventDbWriter(f"sqlite:///{tmp_path / 'auditlens_api.db'}", retention_days=7)
+    old_event = {
+        "id": "evt-batch-old",
+        "time": (datetime.now(timezone.utc) - timedelta(days=10)).isoformat(),
+        "methodName": "kafka.DeleteTopics",
+        "action": "DeleteTopics",
+        "user": "u-batch",
+        "resourceName": "crn://confluent.cloud/topic=batch-topic",
+    }
+    writer.write_batch([old_event])
+
+    result = writer.cleanup_retention(dry_run=False)
+
+    assert "batches" in result, "live cleanup_retention must include 'batches' count"
+    assert result["batches"] >= 1
+    assert result["deleted_count"] == 1
+    assert result["dry_run"] is False
+
+
+def test_cleanup_retention_dry_run_no_batches_key(tmp_path):
+    """dry_run=True must NOT delete rows and must not include 'batches' key."""
+    writer = AuditEventDbWriter(f"sqlite:///{tmp_path / 'auditlens_api.db'}", retention_days=7)
+    old_event = {
+        "id": "evt-dryrun-old",
+        "time": (datetime.now(timezone.utc) - timedelta(days=10)).isoformat(),
+        "methodName": "kafka.CreateTopics",
+        "action": "CreateTopics",
+        "user": "u-dry",
+        "resourceName": "crn://confluent.cloud/topic=dry-topic",
+    }
+    writer.write_batch([old_event])
+
+    result = writer.cleanup_retention(dry_run=True)
+
+    assert result["dry_run"] is True
+    assert result["deleted_count"] == 1
+    assert "batches" not in result
+    # Row must still be there — dry_run must not delete.
+    assert writer.health()["event_count"] == 1
+
+
 def test_health_postgres_no_count_star():
     """health() must not run COUNT(*) on postgres — use reltuples instead."""
     from unittest.mock import MagicMock

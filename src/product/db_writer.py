@@ -38,6 +38,11 @@ from src.product.resource_intelligence import build_resource_catalog_entry
 
 logger = logging.getLogger(__name__)
 
+# Delete audit_events in 5 K-row batches during retention cleanup.
+# Prevents long lock windows and autovacuum spikes on large tables.
+# Each batch is a separate transaction so concurrent INSERTs are not blocked.
+_RETENTION_DELETE_BATCH_SIZE = 5_000
+
 
 @dataclass
 class DbWriteResult:
@@ -536,39 +541,111 @@ class AuditEventDbWriter:
             conn.execute(resource_statement)
 
     def cleanup_retention(self, *, dry_run: bool = False, retention_days: int | None = None) -> dict[str, Any]:
+        """Delete events older than retention_days in small batches.
+
+        Batching prevents long lock windows and autovacuum spikes on large
+        tables. Each batch runs in its own transaction so concurrent INSERTs
+        are not blocked. The noise table cleanup uses a single unbounded DELETE
+        (noise rows are ephemeral and the table stays small).
+        """
         days = max(1, int(retention_days or self.retention_days))
         cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-        with self.engine.begin() as conn:
-            count = int(conn.execute(select(func.count()).select_from(audit_events).where(audit_events.c.timestamp < cutoff)).scalar() or 0)
-            if not dry_run and count:
-                conn.execute(delete(audit_events).where(audit_events.c.timestamp < cutoff))
-            # The noise table follows the same retention as audit_events.
-            # Best-effort: any deletion error is logged but doesn't fail
-            # the primary cleanup.
-            try:
-                noise_deleted = int(
-                    conn.execute(delete(audit_events_noise).where(audit_events_noise.c.timestamp < cutoff)).rowcount or 0
+
+        if dry_run:
+            with self.engine.connect() as conn:
+                count = int(
+                    conn.execute(
+                        select(func.count()).select_from(audit_events).where(
+                            audit_events.c.timestamp < cutoff
+                        )
+                    ).scalar() or 0
                 )
-                if noise_deleted:
-                    logger.info("Noise retention cleanup: deleted %d rows older than %s", noise_deleted, cutoff.isoformat())
-            except Exception as exc:  # pragma: no cover - best-effort
-                logger.warning("Noise retention cleanup failed: %s", exc)
-        if not dry_run:
-            self.last_cleanup_at = datetime.now(timezone.utc).isoformat()
-            self.last_cleanup_deleted_count = count
-            self._last_cleanup_monotonic = time.monotonic()
+            logger.info(
+                "DB writer retention cleanup complete dry_run=True retention_days=%s cutoff=%s deleted_count=%s",
+                days, cutoff.isoformat(), count,
+            )
+            return {
+                "dry_run": True,
+                "retention_days": days,
+                "cutoff": cutoff.isoformat(),
+                "deleted_count": count,
+                "last_cleanup_at": self.last_cleanup_at,
+            }
+
+        # Live run: delete audit_events in batches to cap transaction size.
+        total_deleted = 0
+        batch_num = 0
+        while True:
+            with self.engine.begin() as conn:
+                if self.mode == "postgres":
+                    # CTE selects a batch by ctid — avoids re-scanning the full
+                    # table on every iteration; ctid lookup is a direct heap read.
+                    result = conn.execute(
+                        text("""
+                            WITH batch AS (
+                                SELECT ctid FROM audit_events
+                                WHERE timestamp < :cutoff
+                                LIMIT :limit
+                            )
+                            DELETE FROM audit_events
+                            WHERE ctid IN (SELECT ctid FROM batch)
+                        """),
+                        {"cutoff": cutoff, "limit": _RETENTION_DELETE_BATCH_SIZE},
+                    )
+                else:
+                    # SQLite: subquery selects a batch by primary key.
+                    subq = (
+                        select(audit_events.c.id)
+                        .where(audit_events.c.timestamp < cutoff)
+                        .limit(_RETENTION_DELETE_BATCH_SIZE)
+                        .scalar_subquery()
+                    )
+                    result = conn.execute(
+                        delete(audit_events).where(audit_events.c.id.in_(subq))
+                    )
+                deleted = result.rowcount or 0
+
+            total_deleted += deleted
+            batch_num += 1
+
+            if deleted < _RETENTION_DELETE_BATCH_SIZE:
+                # Last batch — fewer rows than batch_size means no more old rows.
+                break
+
+            # Brief pause between batches to yield to concurrent writers.
+            time.sleep(0.05)
+
+        # Noise table: unbounded single DELETE (INSERT-only table stays small).
+        try:
+            with self.engine.begin() as conn:
+                noise_deleted = int(
+                    conn.execute(
+                        delete(audit_events_noise).where(audit_events_noise.c.timestamp < cutoff)
+                    ).rowcount or 0
+                )
+            if noise_deleted:
+                logger.info(
+                    "Noise retention cleanup: deleted %d rows older than %s",
+                    noise_deleted, cutoff.isoformat(),
+                )
+        except Exception as exc:  # pragma: no cover - best-effort
+            logger.warning("Noise retention cleanup failed: %s", exc)
+
+        self.last_cleanup_at = datetime.now(timezone.utc).isoformat()
+        self.last_cleanup_deleted_count = total_deleted
+        self._last_cleanup_monotonic = time.monotonic()
         logger.info(
-            "DB writer retention cleanup complete dry_run=%s retention_days=%s cutoff=%s deleted_count=%s",
-            dry_run,
-            days,
-            cutoff.isoformat(),
-            count,
+            "DB writer retention cleanup complete dry_run=False retention_days=%s "
+            "cutoff=%s deleted_count=%s batches=%s",
+            days, cutoff.isoformat(), total_deleted, batch_num,
         )
         return {
-            "dry_run": dry_run,
+            "dry_run": False,
             "retention_days": days,
             "cutoff": cutoff.isoformat(),
-            "deleted_count": count,
+            "deleted_count": total_deleted,
+            "batches": batch_num,
+            "batch_size": _RETENTION_DELETE_BATCH_SIZE,
             "last_cleanup_at": self.last_cleanup_at,
         }
 
