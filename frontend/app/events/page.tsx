@@ -8,6 +8,7 @@ import EmptyState from "../../components/EmptyState";
 import ErrorState from "../../components/ErrorState";
 import FilterBar from "../../components/FilterBar";
 import LoadingState from "../../components/LoadingState";
+import EventDetailDrawer from "../../components/EventDetailDrawer";
 import RecurringPatterns from "../../components/RecurringPatterns";
 import {
   getEvent,
@@ -15,7 +16,8 @@ import {
   getFilters,
   getSummary,
   getSystemStatus,
-  isAbortError
+  isAbortError,
+  updateEventTriage
 } from "../../lib/api";
 import {
   activeFilterLabels,
@@ -371,6 +373,8 @@ function EventsPageInner() {
   const [error, setError] = useState<string | null>(null);
   const [system, setSystem] = useState<SystemStatus | null>(null);
 
+  const [selectedEvent, setSelectedEvent] = useState<AuditEvent | null>(null);
+
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const [expandedDetail, setExpandedDetail] = useState<AuditEvent | null>(null);
   const [expandedLoading, setExpandedLoading] = useState(false);
@@ -464,21 +468,31 @@ function EventsPageInner() {
       setExpandedId(null);
       setExpandedDetail(null);
       setExpandedError(null);
+      setSelectedEvent(null);
       return;
     }
     setExpandedId(event.id);
     setExpandedDetail(null);
     setExpandedError(null);
     setExpandedLoading(true);
+    setSelectedEvent(event);
     getEvent(event.id)
       .then((full) => {
         setExpandedDetail(full);
+        setSelectedEvent(full);
       })
       .catch((err: Error) => {
         if (isAbortError(err)) return;
         setExpandedError(err.message);
       })
       .finally(() => setExpandedLoading(false));
+  };
+
+  const handleTriage = async (status: string) => {
+    if (!selectedEvent) return;
+    const updated = await updateEventTriage(selectedEvent.id, status);
+    setSelectedEvent(updated);
+    setData((prev) => prev ? { ...prev, items: prev.items.map((e) => e.id === updated.id ? updated : e) } : prev);
   };
 
   const updateFilters = (next: EventFilters) => {
@@ -608,6 +622,16 @@ function EventsPageInner() {
         seedEvent={actorPanelSeed}
         onClose={closeActorPanel}
         onApplyActorFilter={applyActorFilter}
+      />
+      <EventDetailDrawer
+        event={selectedEvent}
+        onClose={() => {
+          setSelectedEvent(null);
+          setExpandedId(null);
+          setExpandedDetail(null);
+          setExpandedError(null);
+        }}
+        onTriage={handleTriage}
       />
     </main>
   );
