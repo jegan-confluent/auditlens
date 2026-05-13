@@ -3,17 +3,17 @@
 # Last updated: 2025-12-08
 
 # Kafka client with schema registry support
-confluent-kafka[json,avro]==2.6.0
+confluent-kafka[json,avro]==2.13.2
 
 # Environment and configuration
 python-dotenv==1.0.1
 
 # HTTP client with HTTP/2 support
-httpx==0.26.0
+httpx==0.28.1
 
 # Core dependencies
 attrs==23.2.0
-cachetools==5.3.3
+cachetools==5.5.2
 typing-extensions==4.12.2
 
 # Authentication
@@ -27,7 +27,7 @@ referencing==0.35.1
 jsonschema==4.23.0
 
 # Data validation
-pydantic==2.9.2
+pydantic==2.11.4
 pydantic-settings==2.8.0
 SQLAlchemy==2.0.30
 psycopg[binary]==3.1.19
@@ -36,13 +36,13 @@ psycopg[binary]==3.1.19
 rfc3339-validator==0.1.4
 
 # Prometheus metrics
-prometheus-client==0.21.0
+prometheus-client==0.22.1
 
 # Retry logic for webhooks
 tenacity==9.0.0
 
 # Fast JSON parsing (2-3x faster than json)
-orjson==3.10.12
+orjson==3.10.16
 
 # YAML config parsing (for classification rules)
 PyYAML==6.0.2
