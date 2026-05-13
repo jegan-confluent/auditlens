@@ -38,6 +38,7 @@ from pathlib import Path
 from io import StringIO
 from urllib.parse import parse_qs, urlparse
 from dotenv import load_dotenv
+from cachetools import TTLCache
 
 try:
     import psutil as _psutil
@@ -3594,8 +3595,8 @@ def main():
             )
 
     # 24h dedup cache for new-IP alerts: maps (actor, ip) → alert_sent_at epoch
-    _ip_alert_dedup: dict[tuple[str, str], float] = {}
     _IP_ALERT_DEDUP_WINDOW = 86400.0  # 24 hours
+    _ip_alert_dedup: TTLCache = TTLCache(maxsize=50_000, ttl=_IP_ALERT_DEDUP_WINDOW)
 
     # Optional Schema Registry check
     if SCHEMA_REGISTRY_URL:
