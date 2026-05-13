@@ -451,6 +451,7 @@ function EventsPageInner() {
       {summaryLoading ? null : summaryError ? (
         <p className="active-filters">Decision summary unavailable: {summaryError}</p>
       ) : null}
+      <RecurringPatterns defaultExpanded={true} />
       <div ref={tableRef}>
         {!data ? <LoadingState /> : renderedEvents.length ? (
           <AuditEventTable
@@ -483,7 +484,6 @@ function EventsPageInner() {
           </div>
         ) : null}
       </div>
-      <RecurringPatterns />
       <ActorActivityPanel
         actorId={actorPanelId}
         seedEvent={actorPanelSeed}

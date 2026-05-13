@@ -33,12 +33,12 @@ function isServiceAccount(actor_type: string | null | undefined): boolean {
   return actor_type === "service_account";
 }
 
-export default function RecurringPatterns() {
+export default function RecurringPatterns({ defaultExpanded }: { defaultExpanded?: boolean } = {}) {
   const [patterns, setPatterns] = useState<EventPattern[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [collapsed, setCollapsed] = useState(true);
+  const [collapsed, setCollapsed] = useState(!defaultExpanded);
   const [acting, setActing] = useState<number | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
