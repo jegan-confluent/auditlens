@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from cachetools import TTLCache
 
 from src.identity.enricher import IdentityEnricher as ConfluentIdentityEnricher
 
@@ -21,7 +22,7 @@ ACTOR_SOURCES = {"manual", "manual_mapping", "confluent_api", "metrics", "audit_
 CONFIDENCE_LEVELS = {"high", "medium", "low"}
 UNKNOWN_DISPLAY_LABELS = {"unknown actor", "unknown user", "unknown service account", "unknown principal"}
 PRINCIPAL_PREFIXES = ("user:", "u-", "sa-", "api-key-", "apikey", "pool-", "org-", "lkc-", "env-")
-_CACHE: dict[tuple[str, str, str], tuple[float, dict[str, str | None]]] = {}
+_CACHE: TTLCache = TTLCache(maxsize=50000, ttl=3600)
 
 
 def _as_text(value: Any) -> str:

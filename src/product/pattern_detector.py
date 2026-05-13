@@ -129,7 +129,11 @@ class PatternDetector:
             timestamps.append(now)
             self._counts[key] = timestamps
             count = len(timestamps)
+            if not self._counts[key]:
+                del self._counts[key]
 
+        # occurrence_count tracks threshold-crossing events (windows where count >= THRESHOLD),
+        # not total raw event count. A continuous burst increments this on each window crossing.
         # Only enqueue a DB write the moment we cross the threshold so the queue
         # stays sparse — one entry per detection, not one per event.
         if count == self.THRESHOLD + 1:
