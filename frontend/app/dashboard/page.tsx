@@ -1,13 +1,16 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import ActionFeed from "../../components/ActionFeed";
 import ErrorState from "../../components/ErrorState";
 import LoadingState from "../../components/LoadingState";
 import NarrativeStrip from "../../components/NarrativeStrip";
+import SignalSummaryPanel from "../../components/SignalSummaryPanel";
 import SystemStatusPanel from "../../components/SystemStatusPanel";
 import TopActors from "../../components/TopActors";
 import { getReadinessStatus, getSummary, getSystemStatus, isAbortError } from "../../lib/api";
+import type { EventFilters } from "../../lib/eventFilters";
 import type { SummaryResponse, SystemStatus } from "../../lib/types";
 
 type TimeWindow = "1h" | "6h" | "24h" | "7d";
@@ -64,6 +67,16 @@ function TimeWindowPills({
 }
 
 export default function DashboardPage() {
+  const router = useRouter();
+
+  const navigateToEvents = (patch: Partial<EventFilters>) => {
+    const params = new URLSearchParams();
+    (Object.entries(patch) as Array<[string, string | undefined]>).forEach(([key, value]) => {
+      if (value) params.set(key, value);
+    });
+    router.push(`/events?${params.toString()}`);
+  };
+
   const [timeWindow, setTimeWindow] = useState<TimeWindow>(() => {
     if (typeof window === "undefined") return "24h";
     const saved = localStorage.getItem("dashboard_time_window");
@@ -137,6 +150,12 @@ export default function DashboardPage() {
         <p className="panel-error">Forwarder readiness check failed — {readyError}</p>
       ) : null}
 
+      {summary ? (
+        <SignalSummaryPanel
+          summary={summary}
+          onApplyFlow={navigateToEvents}
+        />
+      ) : null}
       <ActionFeed
         timeWindow={timeWindow}
         timeWindowSelector={
