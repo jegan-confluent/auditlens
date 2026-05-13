@@ -160,6 +160,14 @@ class TopicRouter:
             ),
         }
 
+        if self.config.drop_low_events and self.config.enable_all_events:
+            logger.warning(
+                "DROP_LOW_EVENTS=true but AUDIT_ENABLE_ALL_EVENTS=true — LOW events will be "
+                "absent from %s even though all_events_topic is enabled. "
+                "Disable DROP_LOW_EVENTS or disable all_events_topic to silence this warning.",
+                self.config.all_events_topic,
+            )
+
         if self.config.dry_run:
             logger.info("TopicRouter initialized in DRY-RUN mode")
         else:

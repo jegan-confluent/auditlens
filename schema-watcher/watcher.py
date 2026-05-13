@@ -758,7 +758,7 @@ async def main():
     data_file = Path(os.getenv('SCHEMA_METHODS_DATA_FILE', '/app/data/schema_methods.json'))
     versions_file = Path(os.getenv('VERSIONS_FILE', '/app/data/schema_versions.json'))
     slack_webhook_url = os.getenv('SLACK_WEBHOOK_URL')
-    check_interval_hours = int(os.getenv('CHECK_INTERVAL_HOURS', '24'))
+    check_interval_hours = max(1, int(os.getenv('CHECK_INTERVAL_HOURS', '24')))
     dry_run = os.getenv('DRY_RUN', 'false').lower() == 'true'
 
     logger.info(f"Starting Confluent Schema Watcher")
