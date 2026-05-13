@@ -580,10 +580,25 @@ class AuditEventDbWriter:
     def health(self) -> dict[str, Any]:
         with self.engine.connect() as conn:
             conn.exec_driver_sql("select 1")
-            count = conn.exec_driver_sql("select count(*) from audit_events").scalar()
+            if self.mode == "postgres":
+                # pg_class.reltuples is the query planner's row estimate.
+                # Updated by autovacuum. Returns instantly — no table scan.
+                # Falls back to 0 if the table hasn't been analyzed yet.
+                count = conn.exec_driver_sql(
+                    "SELECT reltuples::bigint FROM pg_class "
+                    "WHERE relname = 'audit_events'"
+                ).scalar() or 0
+                count_source = "estimate"
+            else:
+                # SQLite tables are small — COUNT(*) is acceptable here.
+                count = conn.exec_driver_sql(
+                    "SELECT COUNT(*) FROM audit_events"
+                ).scalar() or 0
+                count_source = "exact"
         return {
             "mode": self.mode,
-            "event_count": int(count or 0),
+            "event_count": int(count),
+            "event_count_source": count_source,
             "retention_days": self.retention_days,
             "last_cleanup_at": self.last_cleanup_at,
             "last_cleanup_deleted_count": self.last_cleanup_deleted_count,

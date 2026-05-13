@@ -1100,3 +1100,41 @@ def test_signin_classified_as_authentication_not_read_only():
     from src.classification.methods import READ_ONLY_METHODS, AUTHENTICATION_METHODS
     assert "SignIn" not in READ_ONLY_METHODS, "SignIn must not be in READ_ONLY_METHODS"
     assert "SignIn" in AUTHENTICATION_METHODS, "SignIn must be in AUTHENTICATION_METHODS"
+
+
+def test_health_postgres_no_count_star():
+    """health() must not run COUNT(*) on postgres — use reltuples instead."""
+    from unittest.mock import MagicMock
+
+    writer = AuditEventDbWriter.__new__(AuditEventDbWriter)
+    writer.database_url = "postgresql+psycopg://mock"  # drives mode == "postgres"
+    writer.retention_days = 7
+    writer.last_cleanup_at = None
+    writer.last_cleanup_deleted_count = 0
+
+    executed_queries: list[str] = []
+    mock_conn = MagicMock()
+    mock_conn.__enter__ = lambda s: mock_conn
+    mock_conn.__exit__ = MagicMock(return_value=False)
+
+    def capture_query(sql, *args, **kwargs):
+        executed_queries.append(str(sql))
+        result = MagicMock()
+        result.scalar.return_value = 9_000_000
+        return result
+
+    mock_conn.exec_driver_sql = capture_query
+    writer.engine = MagicMock()
+    writer.engine.connect.return_value = mock_conn
+
+    result = writer.health()
+
+    count_star_queries = [
+        q for q in executed_queries
+        if "count(*)" in q.lower() and "audit_events" in q.lower()
+    ]
+    assert count_star_queries == [], (
+        f"health() ran COUNT(*) on postgres: {count_star_queries}"
+    )
+    assert result["event_count"] == 9_000_000
+    assert result.get("event_count_source") == "estimate"
