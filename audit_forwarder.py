@@ -759,6 +759,7 @@ class Metrics:
         # short-circuit is firing in production. Incremented atomically
         # under self.lock by record_noise_short_circuited().
         self.noise_short_circuited_total = 0
+        self.dry_run_suppressed_total = 0
         # Count of batches where the bulk writer didn't persist all
         # short-circuited noise offsets in time (we did NOT commit;
         # restart will replay). High value signals bulk lane backpressure.
@@ -940,6 +941,10 @@ class Metrics:
         with self.lock:
             self.noise_short_circuited_total += int(count)
 
+    def record_dry_run_suppressed(self, count: int = 1):
+        with self.lock:
+            self.dry_run_suppressed_total += int(count)
+
     def record_noise_persist_wait_timeout(self):
         with self.lock:
             self.noise_persist_wait_timeouts_total += 1
@@ -1089,6 +1094,8 @@ class Metrics:
             method = flat.get("methodName") or ""
             if method.endswith(".Authorize") and flat.get("granted") is True:
                 self.data_quality["suppressed_authz_noise_total"] += 1
+            if flat.get("validateOnly"):
+                self.dry_run_suppressed_total += 1
     
     def update_lag(self, partition, position, high):
         with self.lock:
@@ -1118,6 +1125,7 @@ class Metrics:
                 },
                 "noise_short_circuited_total": int(self.noise_short_circuited_total),
                 "noise_persist_wait_timeouts_total": int(self.noise_persist_wait_timeouts_total),
+                "dry_run_suppressed_total": int(self.dry_run_suppressed_total),
                 "last_ingested_event_time": self.last_ingested_event_time,
                 "last_committed_at": self.last_committed_at,
                 "offset_commits_total": self.offset_commits_total,
@@ -1608,6 +1616,7 @@ class MetricsHandler(BaseHTTPRequestHandler):
             }),
             "noise_short_circuited_total": metrics_data.get("noise_short_circuited_total", 0),
             "noise_persist_wait_timeouts_total": metrics_data.get("noise_persist_wait_timeouts_total", 0),
+            "dry_run_suppressed_total": metrics_data.get("dry_run_suppressed_total", 0),
             # ── DB-writer freshness / replay-recommended ──
             # Computed defensively off the in-memory metrics snapshot.
             # Every helper below returns a safe default on bad input so
@@ -2576,6 +2585,7 @@ def flatten_audit(event):
     req = data.get("request", {})
     out["correlationId"]       = req.get("correlationId")
     out["correlation_id"]      = req.get("correlation_id")
+    out["validateOnly"]        = bool(req.get("validateOnly") or req.get("validate_only"))
 
     meta = data.get("requestMetadata", {})
     out["requestId"]           = meta.get("request_id") or meta.get("requestId")
@@ -3844,7 +3854,9 @@ def main():
         if not PRIORITY_QUEUES_ENABLED:
             return
         method = enriched_event.get("methodName") or enriched_event.get("method") or ""
-        if method in CRITICAL_METHODS or method in HIGH_METHODS:
+        if enriched_event.get("validateOnly"):
+            target, target_name = bulk_queue, "bulk"
+        elif method in CRITICAL_METHODS or method in HIGH_METHODS:
             target, target_name = critical_queue, "critical"
         elif (
             method in READ_ONLY_METHODS

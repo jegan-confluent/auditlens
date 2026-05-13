@@ -7,6 +7,7 @@ from backend.app.db.database import build_engine, init_db
 from backend.app.services.event_service import create_event
 from backend.app.services.summary_service import get_summary
 from src.product.event_signals import classify_signal
+from src.product.event_normalization import normalize_event
 
 
 def signal(payload: dict) -> dict[str, str]:
@@ -304,3 +305,29 @@ def test_low_risk_matching_family_constructive_returns_attention():
     assert result["signal_type"] == "attention", (
         f"expected 'attention' for family=service_account+constructive, got {result['signal_type']!r}"
     )
+
+
+def test_validate_only_create_topics_is_noise():
+    """kafka.CreateTopics with validateOnly:true should classify as noise (dry-run preflight)."""
+    payload = {
+        "methodName": "kafka.CreateTopics",
+        "validateOnly": True,
+        "principal": "User:u-abc123",
+        "resultStatus": "SUCCESS",
+    }
+    result = normalize_event(payload)
+    assert result["signal_type"] == "noise"
+    assert result["signal_reason"] == "dry_run_preflight"
+    assert result["is_routine_noise"] is True
+
+
+def test_validate_only_false_create_topics_not_suppressed():
+    """kafka.CreateTopics with validateOnly:false should NOT be suppressed."""
+    payload = {
+        "methodName": "kafka.CreateTopics",
+        "validateOnly": False,
+        "principal": "User:u-abc123",
+        "resultStatus": "SUCCESS",
+    }
+    result = normalize_event(payload)
+    assert result["signal_type"] != "noise" or result["signal_reason"] != "dry_run_preflight"
