@@ -8,6 +8,7 @@ import EmptyState from "../../components/EmptyState";
 import ErrorState from "../../components/ErrorState";
 import FilterBar from "../../components/FilterBar";
 import LoadingState from "../../components/LoadingState";
+import DecisionBanner from "../../components/DecisionBanner";
 import EventDetailDrawer from "../../components/EventDetailDrawer";
 import RecurringPatterns from "../../components/RecurringPatterns";
 import {
@@ -145,129 +146,6 @@ function StatusStrip({
           <option key={opt} value={opt}>{opt} ▼</option>
         ))}
       </select>
-    </div>
-  );
-}
-
-// Zone 2: Incident card
-function formatSubject(subject: string): string {
-  if (subject.startsWith("{") || subject.startsWith("[")) return "Confluent (platform)";
-  if (subject.length > 30 && !subject.includes(" ") && !subject.includes("@")) {
-    return subject.slice(0, 20) + "...";
-  }
-  return subject;
-}
-
-function IncidentCard({
-  summary,
-  timeWindowLabel,
-  filters,
-  onCategoryFilter,
-  onInvestigateActor,
-  onSeeAll,
-}: {
-  summary: SummaryResponse | null;
-  timeWindowLabel: string;
-  filters: EventFilters;
-  onCategoryFilter: (patch: Partial<EventFilters>) => void;
-  onInvestigateActor: (actor: string) => void;
-  onSeeAll: () => void;
-}): React.ReactElement | null {
-  if (!summary) return null;
-
-  const categoryCards = (
-    <div className="incident-category-cards">
-      {[
-        { key: "destructive", label: "Destructive actions", count: summary.destructive_count, isActive: filters.impact_type === "destructive" },
-        { key: "configuration_change", label: "Configuration changes", count: summary.configuration_change_count, isActive: filters.impact_type === "configuration_change" },
-        { key: "access_change", label: "Access changes", count: summary.access_change_count, isActive: filters.impact_type === "access_change" },
-        { key: "failures", label: "Failures / denied", count: summary.failure_count + summary.denied_count, isActive: filters.result === "Failure" },
-      ].map(({ key, label, count, isActive }) => {
-        const activePatch: Partial<EventFilters> = key === "failures"
-          ? { result: "Failure", impact_type: "", mode: "audit_trail", signal: "", hide_noise: "false" }
-          : { impact_type: key, mode: "audit_trail", signal: "", hide_noise: "false" };
-        const clearPatch: Partial<EventFilters> = key === "failures" ? { result: "" } : { impact_type: "" };
-        return (
-          <button
-            key={key}
-            type="button"
-            className={`incident-category-card${isActive ? " active" : ""}`}
-            onClick={() => onCategoryFilter(isActive ? clearPatch : activePatch)}
-          >
-            <span className="incident-category-count">{count.toLocaleString()}</span>
-            <span className="incident-category-label">{label}</span>
-          </button>
-        );
-      })}
-    </div>
-  );
-
-  const actionRequired = summary.action_required_count;
-  const attention = summary.attention_count;
-  const flows = summary.flow_groups ?? [];
-
-  if (actionRequired > 0) {
-    const criticalFlows = flows.filter((f) => f.signal_type === "action_required").slice(0, 2);
-    const topFlow = criticalFlows[0];
-    return (
-      <div className="incident-card incident-card-critical">
-        <div className="incident-card-header">
-          🔴 <strong>{actionRequired} critical event{actionRequired === 1 ? "" : "s"} need immediate attention</strong>
-        </div>
-        <div className="incident-card-subtext muted">
-          {filters.signal === "action_required"
-            ? "Showing these events below ↓"
-            : <button className="incident-card-link" onClick={onSeeAll}>Click to investigate →</button>}
-        </div>
-        {criticalFlows.map((flow, i) => (
-          <div key={i} className="incident-card-flow">
-            {flow.subject ? flow.group_title.replace(flow.subject, formatSubject(flow.subject)) : flow.group_title}
-          </div>
-        ))}
-        <div className="incident-card-actions">
-          {topFlow ? (
-            <button
-              className="incident-card-btn-primary"
-              onClick={() => onInvestigateActor(topFlow.subject)}
-            >
-              Investigate top actor →
-            </button>
-          ) : null}
-          <button className="incident-card-btn-secondary" onClick={onSeeAll}>
-            See all {actionRequired} events
-          </button>
-        </div>
-        {categoryCards}
-      </div>
-    );
-  }
-
-  if (attention > 0) {
-    const attentionFlows = flows.filter((f) => f.signal_type === "attention").slice(0, 2);
-    return (
-      <div className="incident-card incident-card-attention">
-        <div className="incident-card-header">
-          🟡 <strong>{attention} event{attention === 1 ? "" : "s"} need review</strong>
-        </div>
-        {attentionFlows.map((flow, i) => (
-          <div key={i} className="incident-card-flow">
-            {flow.subject ? flow.group_title.replace(flow.subject, formatSubject(flow.subject)) : flow.group_title}
-          </div>
-        ))}
-        <div className="incident-card-actions">
-          <button className="incident-card-btn-secondary" onClick={onSeeAll}>
-            Review →
-          </button>
-        </div>
-        {categoryCards}
-      </div>
-    );
-  }
-
-  return (
-    <div className="incident-card incident-card-ok">
-      <div className="incident-card-header">✅ No critical activity in the {timeWindowLabel}</div>
-      {categoryCards}
     </div>
   );
 }
@@ -553,24 +431,13 @@ function EventsPageInner() {
         filters={filters}
         onFilterChange={(patch) => updateFilters({ ...filters, ...patch })}
       />
-      <IncidentCard
-        summary={summary}
-        timeWindowLabel={timeWindowLabel}
-        filters={filters}
-        onCategoryFilter={(patch) => {
-          updateFilters({ ...filters, ...patch });
-          tableRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-        }}
-        onInvestigateActor={(actor) => {
-          closeActorPanel();
-          updateFilters({ ...filters, actor });
-          tableRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-        }}
-        onSeeAll={() => {
-          updateFilters({ ...filters, signal: "action_required" });
-          tableRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-        }}
-      />
+      {summary ? (
+        <DecisionBanner
+          summary={summary}
+          timeWindowLabel={timeWindowLabel}
+          onApplyDecision={applyDecisionFilters}
+        />
+      ) : null}
       <FilterToolbar
         filters={filters}
         options={options}
