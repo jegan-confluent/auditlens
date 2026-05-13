@@ -586,5 +586,5 @@ class AuditEventDbWriter:
             "retention_days": self.retention_days,
             "last_cleanup_at": self.last_cleanup_at,
             "last_cleanup_deleted_count": self.last_cleanup_deleted_count,
-            "checked_at": datetime.utcnow().isoformat() + "Z",
+            "checked_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         }

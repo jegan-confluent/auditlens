@@ -234,7 +234,7 @@ def write_text_file(path: Path, content: str, mode: int = 0o600) -> None:
 
 
 def timestamp_suffix() -> str:
-    return datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
 
 def backup_file_if_exists(path: Path) -> Path | None:
