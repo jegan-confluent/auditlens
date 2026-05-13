@@ -1,6 +1,7 @@
 import logging
 from typing import Any
 
+from cachetools import LRUCache
 from src.product.event_intelligence import event_digest, event_digest_from_model
 from src.product.event_normalization import BULK_NOISE_METHODS
 
@@ -8,9 +9,9 @@ from src.product.event_normalization import BULK_NOISE_METHODS
 logger = logging.getLogger(__name__)
 
 # Track unique unclassified method names so the catch-all warning fires once
-# per method per process. Without this guard a single unmapped method that
-# arrives at high QPS would flood the log.
-_unknown_methods_seen: set[str] = set()
+# per method. Bounded at 2048 entries via LRUCache to prevent unbounded growth
+# when many distinct unknown methods arrive over a long-running process lifetime.
+_unknown_methods_seen: LRUCache = LRUCache(maxsize=2048)
 
 
 ACTION_REQUIRED_REASONS = {
@@ -275,7 +276,7 @@ def _classify_signal_core(event_or_fields: Any) -> dict[str, str]:
     ) or "<missing>"
     key = method_name.lower()[:128]
     if key not in _unknown_methods_seen:
-        _unknown_methods_seen.add(key)
+        _unknown_methods_seen[key] = True
         logger.warning(
             "unclassified_method method=%s action=%s",
             method_name,
