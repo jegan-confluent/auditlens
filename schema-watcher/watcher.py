@@ -323,19 +323,95 @@ class ConfluentSchemaWatcher:
         for method in methods:
             method_upper = method.upper()
             method_lower = method.lower()
+            method_upper_nopunct = method_upper.replace('_', '').replace('-', '').replace('.', '')
 
-            # CRITICAL: Deletions
-            if any(keyword in method_upper for keyword in ['DELETE', 'REMOVE', 'PURGE', 'DROP']):
-                # Exception: OffsetDelete is routine consumer group management (MEDIUM)
-                if 'OFFSETDELETE' in method_upper.replace('_', ''):
-                    classification['MEDIUM'].append(method)
-                else:
-                    classification['CRITICAL'].append(method)
+            # Specific HIGH-entity checks come FIRST so that Delete-prefixed entity
+            # methods (DeleteApiKey, DeleteRoleBinding, DeleteUser …) land in HIGH,
+            # not in the generic CRITICAL deletion bucket below.
+
+            # HIGH: API Key operations (DeleteApiKey / CreateApiKey / UpdateApiKey …)
+            if 'APIKEY' in method_upper_nopunct or 'API_KEY' in method_upper:
+                classification['HIGH'].append(method)
                 continue
 
-            # CRITICAL: ACL operations
-            if 'ACL' in method_upper and any(kw in method_upper for kw in ['CREATE', 'DELETE']):
-                classification['CRITICAL'].append(method)
+            # HIGH/CRITICAL: Service Account operations
+            if 'SERVICEACCOUNT' in method_upper_nopunct or 'SERVICE_ACCOUNT' in method_upper:
+                if 'DELETE' in method_upper:
+                    classification['CRITICAL'].append(method)  # DeleteServiceAccount is irreversible
+                else:
+                    classification['HIGH'].append(method)
+                continue
+
+            # HIGH: Role Binding operations (DeleteRoleBinding → HIGH, not CRITICAL)
+            if 'ROLEBINDING' in method_upper_nopunct or 'ROLE_BINDING' in method_upper:
+                classification['HIGH'].append(method)
+                continue
+
+            # HIGH: User / Invitation management (DeleteUser → HIGH)
+            if any(kw in method_upper_nopunct for kw in ['DELETEUSER', 'CREATEUSER', 'UPDATEUSER',
+                                                          'DELETEINVITATION', 'CREATEINVITATION', 'INVITEUSER']):
+                classification['HIGH'].append(method)
+                continue
+
+            # HIGH/CRITICAL: Identity operations
+            if any(kw in method_upper for kw in ['IDENTITYPROVIDER', 'IDENTITYPOOL',
+                                                  'IDENTITY_PROVIDER', 'IDENTITY_POOL']):
+                if 'DELETE' in method_upper:
+                    classification['CRITICAL'].append(method)
+                else:
+                    classification['HIGH'].append(method)
+                continue
+
+            # HIGH: Private Link Attachment / Connection — sub-resources, not top-level.
+            # Top-level PrivateLinkAccess deletion falls through to CRITICAL below.
+            if any(kw in method_upper for kw in ['PRIVATELINKATTACHMENT', 'PRIVATELINKATTACHMENTCONNECTION']):
+                classification['HIGH'].append(method)
+                continue
+
+            # HIGH/CRITICAL: Other network constructs (Peering, TransitGateway, NetworkLink,
+            # top-level PrivateLinkAccess).
+            if any(kw in method_upper for kw in ['PRIVATELINK', 'PEERING', 'TRANSITGATEWAY', 'NETWORKLINK']):
+                if 'DELETE' in method_upper:
+                    classification['CRITICAL'].append(method)
+                else:
+                    classification['HIGH'].append(method)
+                continue
+
+            # HIGH: Cluster Link operations (DeleteClusterLink / kafka.DeleteClusterLinks → HIGH)
+            if any(kw in method_upper_nopunct for kw in ['CLUSTERLINK', 'CLUSTERLINKS', 'MIRRORTOPIC']):
+                classification['HIGH'].append(method)
+                continue
+
+            # HIGH: BYOK/Encryption
+            if any(kw in method_upper for kw in ['BYOK', 'ENCRYPT', 'DECRYPT']):
+                classification['HIGH'].append(method)
+                continue
+
+            # HIGH: ACL operations (kafka.CreateAcls / kafka.DeleteAcls).
+            # Use 'ACLS' (plural) — 'ACL' alone is a substring of 'KAFKACLUSTER'
+            # which would incorrectly match DeleteKafkaCluster.
+            if 'ACLS' in method_upper and any(kw in method_upper for kw in ['CREATE', 'DELETE']):
+                classification['HIGH'].append(method)
+                continue
+
+            # HIGH: Consumer group management — kafka.DeleteGroups is deliberate
+            # HIGH (not CRITICAL), analogous to kafka.AlterConfigs promotion.
+            if 'DELETEGROUPS' in method_upper_nopunct:
+                classification['HIGH'].append(method)
+                continue
+
+            # HIGH: Schema Registry subject/version deletions — soft-delete, not CRITICAL.
+            if any(kw in method_upper_nopunct for kw in ['DELETESUBJECT', 'DELETESCHEMAVERSION']):
+                classification['HIGH'].append(method)
+                continue
+
+            # HIGH: IP filtering / DNS / Integrations / SSO group mappings / alerts —
+            # individually scoped, not cluster-level blast radius.
+            if any(kw in method_upper_nopunct for kw in [
+                'IPFILTER', 'IPGROUP', 'DNSFORWARDER', 'INTEGRATION',
+                'SSOGROUPMAPPING', 'GROUPMAPPING',
+            ]):
+                classification['HIGH'].append(method)
                 continue
 
             # CRITICAL: Audit log configuration changes
@@ -348,43 +424,13 @@ class ConfluentSchemaWatcher:
                 classification['CRITICAL'].append(method)
                 continue
 
-            # HIGH: API Key operations
-            if 'APIKEY' in method_upper.replace('_', '') or 'API_KEY' in method_upper:
-                classification['HIGH'].append(method)
-                continue
-
-            # HIGH: Service Account operations
-            if 'SERVICEACCOUNT' in method_upper.replace('_', '') or 'SERVICE_ACCOUNT' in method_upper:
-                if 'DELETE' in method_upper:
-                    classification['CRITICAL'].append(method)  # Elevate deletion to CRITICAL
+            # CRITICAL: Generic deletions — only reached after all HIGH-entity checks above
+            if any(keyword in method_upper for keyword in ['DELETE', 'REMOVE', 'PURGE', 'DROP']):
+                # Exception: OffsetDelete is routine consumer group management (MEDIUM)
+                if 'OFFSETDELETE' in method_upper_nopunct:
+                    classification['MEDIUM'].append(method)
                 else:
-                    classification['HIGH'].append(method)
-                continue
-
-            # HIGH: Role Binding operations
-            if 'ROLEBINDING' in method_upper.replace('_', '') or 'ROLE_BINDING' in method_upper:
-                classification['HIGH'].append(method)
-                continue
-
-            # HIGH: Identity operations
-            if any(kw in method_upper for kw in ['IDENTITYPROVIDER', 'IDENTITYPOOL', 'IDENTITY_PROVIDER', 'IDENTITY_POOL']):
-                if 'DELETE' in method_upper:
                     classification['CRITICAL'].append(method)
-                else:
-                    classification['HIGH'].append(method)
-                continue
-
-            # HIGH: Network/Private Link operations
-            if any(kw in method_upper for kw in ['PRIVATELINK', 'PEERING', 'TRANSITGATEWAY', 'NETWORKLINK']):
-                if 'DELETE' in method_upper:
-                    classification['CRITICAL'].append(method)
-                else:
-                    classification['HIGH'].append(method)
-                continue
-
-            # HIGH: BYOK/Encryption
-            if any(kw in method_upper for kw in ['BYOK', 'ENCRYPT', 'DECRYPT']):
-                classification['HIGH'].append(method)
                 continue
 
             # MEDIUM: Create operations (not covered above)
