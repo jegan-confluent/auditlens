@@ -78,6 +78,39 @@ CONFLUENT_PLATFORM_HIGH_RISK = frozenset({
     "suspendorganization",
 })
 
+# Topic name prefixes that are always Confluent-platform internals.
+# Events on these topics are classified as noise regardless of the method.
+_INTERNAL_TOPIC_PREFIXES = (
+    "error-lcc-",    # auto-created DLQ topics for Confluent Connect/Flink (lcc- = cluster ID)
+    "_confluent",    # Confluent internal metrics, tier storage, audit topics
+    "__consumer_",   # Kafka consumer group offset topics
+    "_schemas",      # Schema Registry internal compacted topic
+)
+
+# Methods that are relevant for internal-topic noise suppression.
+# Only suppress platform-internal topic activity for these high-volume methods.
+_INTERNAL_TOPIC_METHODS = frozenset({
+    "kafka.createtopics",
+    "kafka.produce",
+    "kafka.fetch",
+    "kafka.deletetopics",
+    "kafka.alterconfigs",
+    "kafka.describeconfigs",
+    "kafka.createpartitions",
+})
+
+
+def _is_internal_topic(event_or_fields: Any) -> bool:
+    """Return True when the resource_name matches a Confluent-internal topic pattern."""
+    resource = _as_text(
+        _field(event_or_fields, "resource_name")
+        or _field(event_or_fields, "resourceName")
+        or _field(event_or_fields, "authzResourceName")
+    ).lower()
+    if not resource:
+        return False
+    return any(resource.startswith(prefix) for prefix in _INTERNAL_TOPIC_PREFIXES)
+
 
 def _is_confluent_platform(event_or_fields: Any) -> bool:
     """Return True if the actor is Confluent's own platform automation."""
@@ -102,6 +135,25 @@ def classify_signal(event_or_fields: Any) -> dict[str, str]:
     """Classify an event and apply post-classification overrides."""
     result = _classify_signal_core(event_or_fields)
     action = _as_text(_field(event_or_fields, "action")).lower()
+
+    # Override 0 — Confluent-internal topics (error-lcc-*, _confluent*, etc.)
+    # are auto-created by the platform and produce enormous volumes of routine
+    # events.  Suppress them as noise before any other override so they never
+    # inflate action_required counts.
+    method = _as_text(
+        _field(event_or_fields, "methodName")
+        or _field(event_or_fields, "method_name")
+        or action
+    ).lower()
+    if _is_internal_topic(event_or_fields) and (
+        not method or method in _INTERNAL_TOPIC_METHODS
+    ):
+        return {
+            "signal_type": "noise",
+            "signal_reason": "internal_topic",
+            "recommended_action": "No action needed",
+            "decision_label": "Noise",
+        }
 
     # Override 1 — Confluent platform automation is always informational
     # unless it is a truly destructive org-level operation.
