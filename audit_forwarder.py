@@ -87,6 +87,34 @@ from src.product.actor_enrichment import get_actor_mapping_file, wait_for_iam_ca
 from src.notifications.notifier import AuditLensNotifier
 from src.forwarder.utils import extract_from_crn, utc_now_iso
 from src.forwarder.secrets_masking import mask_sensitive_text, mask_config_for_logging, _SENSITIVE_KEY_TOKENS
+from src.forwarder.config import (
+    load_env,
+    AUDIT_BOOTSTRAP, AUDIT_API_KEY, AUDIT_API_SECRET,
+    DEST_BOOTSTRAP, DEST_API_KEY, DEST_API_SECRET,
+    SCHEMA_REGISTRY_URL, SCHEMA_REGISTRY_KEY, SCHEMA_REGISTRY_SECRET,
+    AUDIT_TOPIC, GROUP_ID, AUTO_OFFSET_RESET, METRICS_PORT,
+    AUDIT_RAW_TOPIC, AUDIT_NORMALIZED_TOPIC, AUDIT_ENRICHED_TOPIC,
+    AUDIT_SIGNALS_DENIALS_TOPIC, AUDIT_SIGNALS_HIGHRISK_TOPIC, AUDIT_ALERTS_TOPIC,
+    ANOMALY_WINDOW_SECONDS, ANOMALY_AUTH_FAILURE_THRESHOLD, ANOMALY_ACTIVITY_SPIKE_THRESHOLD,
+    ANOMALY_DELETION_THRESHOLD, ANOMALY_API_KEY_THRESHOLD,
+    ENABLE_MULTI_TOPIC_ROUTING, ROUTER_DRY_RUN,
+    DLQ_TOPIC, ENABLE_DLQ,
+    ENABLE_DENIAL_AGGREGATION, ALERT_ON_HIGH_RISK,
+    API_MAX_SEARCH_RESULTS, API_BUFFER_ENRICHED, API_BUFFER_SIGNALS,
+    API_EXPORT_MAX_ROWS, API_EXPORT_MAX_HOURS,
+    REPLAY_ENABLED, REPLAY_DEFAULT_HOURS, REPLAY_MAX_HOURS, REPLAY_PUBLISH_DERIVED_TOPICS,
+    STORAGE_MONITOR_INTERVAL_SECONDS,
+    CONSUMER_POLL_TIMEOUT_SECONDS, CONSUMER_EMPTY_POLL_SLEEP_SECONDS, CONSUMER_BATCH_SLEEP_SECONDS,
+    KAFKA_RETRY_INITIAL_BACKOFF_SECONDS, KAFKA_RETRY_MAX_BACKOFF_SECONDS,
+    KAFKA_DEGRADED_AFTER_ERRORS, KAFKA_ERROR_LOG_INTERVAL_SECONDS,
+    ENABLE_DB_WRITER, DATABASE_URL,
+    DB_WRITE_BATCH_SIZE, DB_WRITE_BACKOFF_MAX_SECONDS, DB_WRITE_FLUSH_INTERVAL_SECONDS,
+    EVENT_RETENTION_DAYS, DB_RETENTION_CLEANUP_INTERVAL_SECONDS,
+    ENABLE_NOISE_SHORT_CIRCUIT, NOISE_PERSIST_WAIT_TIMEOUT_SECONDS,
+    AUTH_CONFIG, PERSISTENCE_CONFIG,
+    BUILTIN_ALERT_METHODS, ENABLE_BUILTIN_ALERTS, LEGACY_WEBHOOK_ENABLED,
+    HIGH_RISK_ALERT_METHODS, HIGH_RISK_SIGNAL_METHODS,
+)
 
 # ──────────── graceful shutdown handler ────────────
 _shutdown_requested = False
@@ -104,102 +132,10 @@ signal.signal(signal.SIGTERM, _signal_handler)
 signal.signal(signal.SIGINT, _signal_handler)
 
 
-# ──────────── environment loader ────────────
-def load_env():
-    # Load .env file
-    env_path = Path('.env')
-    if not env_path.exists():
-        alt = Path('..') / '.env'
-        if alt.exists():
-            env_path = alt
-    if env_path.exists():
-        load_dotenv(env_path)
-
-    # Load .secrets file (contains sensitive credentials)
-    secrets_path = Path('.secrets')
-    if not secrets_path.exists():
-        alt = Path('..') / '.secrets'
-        if alt.exists():
-            secrets_path = alt
-    if secrets_path.exists():
-        load_dotenv(secrets_path)
-
-# ──────────── environment variables ────────────
-AUDIT_BOOTSTRAP        = os.getenv("AUDIT_BOOTSTRAP")
-AUDIT_API_KEY          = os.getenv("AUDIT_API_KEY")
-AUDIT_API_SECRET       = os.getenv("AUDIT_API_SECRET")
-DEST_BOOTSTRAP         = os.getenv("DEST_BOOTSTRAP")
-DEST_API_KEY           = os.getenv("DEST_API_KEY")
-DEST_API_SECRET        = os.getenv("DEST_API_SECRET")
-SCHEMA_REGISTRY_URL    = os.getenv("SCHEMA_REGISTRY_URL")
-SCHEMA_REGISTRY_KEY    = os.getenv("SCHEMA_REGISTRY_KEY")
-SCHEMA_REGISTRY_SECRET = os.getenv("SCHEMA_REGISTRY_SECRET")
-AUDIT_TOPIC            = os.getenv("AUDIT_TOPIC", "confluent-audit-log-events")
-# Consumer group - offsets are managed by Kafka consumer groups (not files)
-GROUP_ID               = os.getenv("GROUP_ID", "auditlens-forwarder-v1")
-AUTO_OFFSET_RESET      = os.getenv("AUTO_OFFSET_RESET", "latest")
-METRICS_PORT           = int(os.getenv("METRICS_PORT", "8003"))
-
-# Canonical product topics
-AUDIT_RAW_TOPIC = os.getenv("AUDIT_RAW_TOPIC", "audit.raw.v1")
-AUDIT_NORMALIZED_TOPIC = os.getenv("AUDIT_NORMALIZED_TOPIC", "audit.normalized.v1")
-AUDIT_ENRICHED_TOPIC = os.getenv("AUDIT_ENRICHED_TOPIC", "audit.enriched.v1")
-AUDIT_SIGNALS_DENIALS_TOPIC = os.getenv("AUDIT_SIGNALS_DENIALS_TOPIC", "audit.signals.denials.v1")
-AUDIT_SIGNALS_HIGHRISK_TOPIC = os.getenv("AUDIT_SIGNALS_HIGHRISK_TOPIC", "audit.signals.highrisk.v1")
-AUDIT_ALERTS_TOPIC = os.getenv("AUDIT_ALERTS_TOPIC", "audit.alerts.v1")
-
-# Anomaly detection configuration
-ANOMALY_WINDOW_SECONDS = int(os.getenv("ANOMALY_WINDOW_SECONDS", "60"))
-ANOMALY_AUTH_FAILURE_THRESHOLD = int(os.getenv("ANOMALY_AUTH_FAILURE_THRESHOLD", "10"))
-ANOMALY_ACTIVITY_SPIKE_THRESHOLD = int(os.getenv("ANOMALY_ACTIVITY_SPIKE_THRESHOLD", "100"))
-ANOMALY_DELETION_THRESHOLD = int(os.getenv("ANOMALY_DELETION_THRESHOLD", "5"))
-ANOMALY_API_KEY_THRESHOLD = int(os.getenv("ANOMALY_API_KEY_THRESHOLD", "10"))
-
-# Legacy routing configuration - kept only for compatibility testing
-ENABLE_MULTI_TOPIC_ROUTING = os.getenv("ENABLE_LEGACY_MULTI_TOPIC_ROUTING", "false").lower() == "true"
-ROUTER_DRY_RUN = os.getenv("AUDIT_ROUTER_DRY_RUN", "false").lower() == "true"
-
-# Dead Letter Queue - for events that fail processing
-DLQ_TOPIC = os.getenv("DLQ_TOPIC", "audit.dlq.v1")
-ENABLE_DLQ = os.getenv("ENABLE_DLQ", "true").lower() == "true"
-
-# Denial aggregation - aggregate auth denials into summary alerts
-ENABLE_DENIAL_AGGREGATION = os.getenv("ENABLE_DENIAL_AGGREGATION", "true").lower() == "true"
-ALERT_ON_HIGH_RISK = os.getenv("ALERT_ON_HIGH_RISK", "true").lower() == "true"
-API_MAX_SEARCH_RESULTS = int(os.getenv("API_MAX_SEARCH_RESULTS", "500"))
-API_BUFFER_ENRICHED = int(os.getenv("API_BUFFER_ENRICHED", "5000"))
-API_BUFFER_SIGNALS = int(os.getenv("API_BUFFER_SIGNALS", "1000"))
-API_EXPORT_MAX_ROWS = int(os.getenv("API_EXPORT_MAX_ROWS", "5000"))
-API_EXPORT_MAX_HOURS = int(os.getenv("API_EXPORT_MAX_HOURS", "168"))
-REPLAY_ENABLED = os.getenv("REPLAY_ENABLED", "true").lower() == "true"
-REPLAY_DEFAULT_HOURS = int(os.getenv("REPLAY_DEFAULT_HOURS", "24"))
-REPLAY_MAX_HOURS = int(os.getenv("REPLAY_MAX_HOURS", "720"))
-REPLAY_PUBLISH_DERIVED_TOPICS = os.getenv("REPLAY_PUBLISH_DERIVED_TOPICS", "false").lower() == "true"
-STORAGE_MONITOR_INTERVAL_SECONDS = int(os.getenv("STORAGE_MONITOR_INTERVAL_SECONDS", "60"))
-CONSUMER_POLL_TIMEOUT_SECONDS = float(os.getenv("CONSUMER_POLL_TIMEOUT_SECONDS", "2.0"))
-CONSUMER_EMPTY_POLL_SLEEP_SECONDS = float(os.getenv("CONSUMER_EMPTY_POLL_SLEEP_SECONDS", "0.25"))
-CONSUMER_BATCH_SLEEP_SECONDS = float(os.getenv("CONSUMER_BATCH_SLEEP_SECONDS", "0.25"))
-KAFKA_RETRY_INITIAL_BACKOFF_SECONDS = float(os.getenv("KAFKA_RETRY_INITIAL_BACKOFF_SECONDS", "1.0"))
-KAFKA_RETRY_MAX_BACKOFF_SECONDS = float(os.getenv("KAFKA_RETRY_MAX_BACKOFF_SECONDS", "60.0"))
-KAFKA_DEGRADED_AFTER_ERRORS = int(os.getenv("KAFKA_DEGRADED_AFTER_ERRORS", "5"))
-KAFKA_ERROR_LOG_INTERVAL_SECONDS = float(os.getenv("KAFKA_ERROR_LOG_INTERVAL_SECONDS", "30.0"))
-ENABLE_DB_WRITER = os.getenv("ENABLE_DB_WRITER", "false").lower() == "true"
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:////var/lib/auditlens/auditlens_api.db")
-DB_WRITE_BATCH_SIZE = int(os.getenv("DB_WRITE_BATCH_SIZE", "100"))
-DB_WRITE_BACKOFF_MAX_SECONDS = float(os.getenv("DB_WRITE_BACKOFF_MAX_SECONDS", "60.0"))
-DB_WRITE_FLUSH_INTERVAL_SECONDS = float(os.getenv("DB_WRITE_FLUSH_INTERVAL_SECONDS", "2.0"))
-EVENT_RETENTION_DAYS = int(os.getenv("EVENT_RETENTION_DAYS", "7"))
-DB_RETENTION_CLEANUP_INTERVAL_SECONDS = float(os.getenv("DB_RETENTION_CLEANUP_INTERVAL_SECONDS", "3600.0"))
-
-# Postgres-backed deployments are the durable store and don't need the
-# SQLite "hot cache" (the legacy SQLiteProductStore). Detect product mode
-# off the DATABASE_URL prefix — matches backend/app/core/config.py's
-# database_mode logic so the two halves of the system agree.
-PRODUCT_MODE = DATABASE_URL.startswith("postgresql")
-# Override knob for the SQLite hot cache. `auto` disables in product
-# mode; `true` forces on (debug only); anything else forces off. Keeping
-# the SQLiteProductStore class compiled so demo mode keeps working — this
-# is a runtime guard, not a removal.
+# PRODUCT_MODE, ENABLE_SQLITE_HOT_CACHE, and _sqlite_hot_cache_enabled are computed
+# locally so that importlib.reload(audit_forwarder) re-evaluates them from the current
+# env — the tests in test_sqlite_hot_cache_guard.py rely on this reload behaviour.
+PRODUCT_MODE = os.getenv("DATABASE_URL", "sqlite:////var/lib/auditlens/auditlens_api.db").startswith("postgresql")
 ENABLE_SQLITE_HOT_CACHE = os.getenv("ENABLE_SQLITE_HOT_CACHE", "auto").strip().lower()
 
 
@@ -209,24 +145,10 @@ def _sqlite_hot_cache_enabled() -> bool:
         return True
     if ENABLE_SQLITE_HOT_CACHE in {"false", "0", "no", "off"}:
         return False
-    # `auto` (default) or any unrecognised value: lean on PRODUCT_MODE.
     return not PRODUCT_MODE
 
 
-# Short-circuit bulk-noise events (mds.Authorize, kafka.Fetch, kafka.Produce, …)
-# at the consume point — they go straight to the bulk writer, bypassing
-# flatten_audit, the seven canonical Kafka produces, anomaly tracking, and
-# the SQLite hot cache. Saves the processor thread from doing ~83% of its
-# work. Disable for debugging if the full pipeline is needed for every event.
-ENABLE_NOISE_SHORT_CIRCUIT = os.getenv("ENABLE_NOISE_SHORT_CIRCUIT", "true").lower() == "true"
-# How long the processor will wait for the bulk writer to persist
-# short-circuited noise events before declining to commit. Bulk writes
-# normally complete in tens of milliseconds — this is a defensive ceiling.
-NOISE_PERSIST_WAIT_TIMEOUT_SECONDS = float(os.getenv("NOISE_PERSIST_WAIT_TIMEOUT_SECONDS", "60.0"))
-
-AUTH_CONFIG = AuthConfig.from_env()
 authenticator = Authenticator(AUTH_CONFIG)
-PERSISTENCE_CONFIG = PersistenceConfig.from_env()
 product_store = None
 db_writer = None
 _db_init_next_attempt: float = 0.0
@@ -330,39 +252,6 @@ def _try_short_circuit_noise(msg) -> dict | None:
     except Exception:
         return None  # Any decode/shape error → full path
 
-# Built-in alert rules (auto-enabled if SLACK_WEBHOOK is set)
-# These are critical events that should trigger immediate alerts
-BUILTIN_ALERT_METHODS = {
-    # Infrastructure deletion - CRITICAL
-    'DeleteKafkaCluster': {'severity': 'CRITICAL', 'message': '🚨 CRITICAL: Kafka cluster deleted'},
-    'DeleteEnvironment': {'severity': 'CRITICAL', 'message': '🚨 CRITICAL: Environment deleted'},
-    'DeleteOrganization': {'severity': 'CRITICAL', 'message': '🚨 CRITICAL: Organization deleted'},
-
-    # Topic/data deletion - CRITICAL
-    'kafka.DeleteTopics': {'severity': 'CRITICAL', 'message': '🚨 CRITICAL: Kafka topics deleted'},
-    'kafka.DeleteRecords': {'severity': 'CRITICAL', 'message': '🚨 CRITICAL: Kafka records deleted'},
-
-    # Security configuration changes - HIGH
-    'kafka.CreateAcls': {'severity': 'HIGH', 'message': '⚠️ HIGH: ACLs created'},
-    'kafka.DeleteAcls': {'severity': 'HIGH', 'message': '⚠️ HIGH: ACLs deleted'},
-    'CreateApiKey': {'severity': 'HIGH', 'message': '🔑 HIGH: API key created'},
-    'DeleteApiKey': {'severity': 'HIGH', 'message': '🔑 HIGH: API key deleted'},
-
-    # Service account changes - HIGH
-    'DeleteServiceAccount': {'severity': 'HIGH', 'message': '⚠️ HIGH: Service account deleted'},
-    'CreateServiceAccount': {'severity': 'MEDIUM', 'message': 'ℹ️ MEDIUM: Service account created'},
-}
-
-# Enable built-in alerts if SLACK_WEBHOOK is configured
-ENABLE_BUILTIN_ALERTS = os.getenv("SLACK_WEBHOOK", "") != ""
-
-# Gate the legacy SLACK_WEBHOOK firing path now that the configurable
-# notifications layer (notifications.yml) is the supported way forward.
-#   auto   → disabled when notifications.yml provides destinations
-#   true   → always enable (backward compatibility)
-#   false  → always disable (notifier-only)
-LEGACY_WEBHOOK_ENABLED = os.getenv("ENABLE_LEGACY_SLACK_WEBHOOK", "auto").lower()
-
 # ──────────── logging ────────────
 logging.basicConfig(
     level=logging.INFO,
@@ -370,26 +259,6 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)]
 )
 logger = logging.getLogger()
-
-
-HIGH_RISK_ALERT_METHODS = {
-    "kafka.DeleteTopics",
-    "kafka.DeleteRecords",
-    "kafka.CreateAcls",
-    "kafka.DeleteAcls",
-    "CreateApiKey",
-    "DeleteApiKey",
-    "DeleteServiceAccount",
-    "CreateRoleBinding",
-    "DeleteRoleBinding",
-}
-
-HIGH_RISK_SIGNAL_METHODS = HIGH_RISK_ALERT_METHODS | {
-    "DeleteKafkaCluster",
-    "DeleteEnvironment",
-    "DeleteWorkspace",
-    "DeleteConnector",
-}
 
 
 # ─────────────────── DB-writer freshness helpers ───────────────────────
