@@ -34,6 +34,8 @@ confluent.properties
 *api-key*
 *apikey*
 *secret*
+# Exception: Python masking-utility modules are code, not secrets files
+!src/forwarder/secrets_masking.py
 *token*
 *.token
 
