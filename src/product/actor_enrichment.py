@@ -553,6 +553,9 @@ def enrich_actor(actor: str, subject: str = "", subject_type: str = "") -> dict[
 def clear_actor_enrichment_cache() -> None:
     _CACHE.clear()
     _identity_map.cache_clear()
+    old_enricher = _confluent_identity_enricher()
+    if old_enricher is not None and hasattr(old_enricher, "stop"):
+        old_enricher.stop()
     _confluent_identity_enricher.cache_clear()
     _actor_mapping_file.cache_clear()
     EnrichmentConfig.from_env.cache_clear()

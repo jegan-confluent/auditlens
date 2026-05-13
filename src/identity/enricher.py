@@ -113,6 +113,7 @@ class IdentityEnricher:
         self._last_refresh_at: Optional[float] = None
         self._last_refresh_error: Optional[str] = None
         self._last_refresh_partial: bool = False
+        self._stop_event = threading.Event()
 
         if self.enabled:
             logger.info("IdentityEnricher initialized with Confluent Cloud API credentials")
@@ -224,8 +225,10 @@ class IdentityEnricher:
                 # blocking lazy-load path.
                 self._identities_loaded = True
 
-            while True:
-                time.sleep(self._refresh_interval_seconds)
+            while not self._stop_event.is_set():
+                self._stop_event.wait(timeout=self._refresh_interval_seconds)
+                if self._stop_event.is_set():
+                    break
                 try:
                     service_accounts, users = self._fetch_all_identities()
                     with self._lock:
@@ -268,8 +271,10 @@ class IdentityEnricher:
                 self._identities_loaded = True
 
             def loop_post_initial() -> None:
-                while True:
-                    time.sleep(self._refresh_interval_seconds)
+                while not self._stop_event.is_set():
+                    self._stop_event.wait(timeout=self._refresh_interval_seconds)
+                    if self._stop_event.is_set():
+                        break
                     try:
                         service_accounts, users = self._fetch_all_identities()
                         with self._lock:
@@ -542,6 +547,12 @@ class IdentityEnricher:
         if not self._identities_loaded:
             self._load_identities()
         return list(self._users.values())
+
+    def stop(self, timeout: float = 2.0) -> None:
+        """Signal the background refresh thread to stop and wait briefly for it to exit."""
+        self._stop_event.set()
+        if self._refresh_thread is not None and self._refresh_thread.is_alive():
+            self._refresh_thread.join(timeout=timeout)
 
     def refresh(self) -> None:
         """Force refresh of identity cache."""
