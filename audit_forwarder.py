@@ -1769,6 +1769,20 @@ class MetricsHandler(BaseHTTPRequestHandler):
                 },
             ],
         }
+        try:
+            from src.product.actor_enrichment import _confluent_identity_enricher  # noqa: PLC0415
+            _enricher = _confluent_identity_enricher()
+            if _enricher is not None:
+                _enricher_stats = _enricher.get_stats()
+                _enricher_partial = _enricher_stats.get("refresh_partial", False)
+                payload["components"].append({
+                    "name": "identity_enricher",
+                    "status": "warning" if _enricher_partial else "healthy",
+                    "last_check": utc_now_iso(),
+                    "details": _enricher_stats,
+                })
+        except Exception:
+            pass
         if reasons:
             payload["reasons"] = reasons
         return (200 if is_healthy else 503), payload

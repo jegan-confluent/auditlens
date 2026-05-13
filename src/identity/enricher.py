@@ -112,6 +112,7 @@ class IdentityEnricher:
         self._refresh_thread_started = threading.Event()
         self._last_refresh_at: Optional[float] = None
         self._last_refresh_error: Optional[str] = None
+        self._last_refresh_partial: bool = False
 
         if self.enabled:
             logger.info("IdentityEnricher initialized with Confluent Cloud API credentials")
@@ -174,6 +175,7 @@ class IdentityEnricher:
         ``self`` is mutated here. That means a refresh failure midway
         through cannot leave the live cache half-replaced.
         """
+        self._last_refresh_partial = False
         service_accounts: Dict[str, IdentityInfo] = {}
         users: Dict[str, IdentityInfo] = {}
         with self._get_client() as client:
@@ -205,12 +207,16 @@ class IdentityEnricher:
                     self._users = users
                 self._identities_loaded = True
                 self._last_refresh_at = time.time()
-                self._last_refresh_error = None
-                logger.info(
-                    "Identity cache loaded: %d service accounts, %d users",
-                    len(service_accounts),
-                    len(users),
-                )
+                if self._last_refresh_partial:
+                    self._last_refresh_error = "partial load: rate limited during IAM pagination"
+                    logger.warning("Identity cache partially loaded (rate limited during pagination)")
+                else:
+                    self._last_refresh_error = None
+                    logger.info(
+                        "Identity cache loaded: %d service accounts, %d users",
+                        len(service_accounts),
+                        len(users),
+                    )
             except Exception as exc:
                 self._last_refresh_error = str(exc)
                 logger.warning("Initial identity cache load failed; will retry on schedule: %s", exc)
@@ -230,12 +236,16 @@ class IdentityEnricher:
                         # entries until their individual TTL ticks over.
                         self._cache.clear()
                     self._last_refresh_at = time.time()
-                    self._last_refresh_error = None
-                    logger.info(
-                        "Identity cache refreshed: %d service accounts, %d users",
-                        len(service_accounts),
-                        len(users),
-                    )
+                    if self._last_refresh_partial:
+                        self._last_refresh_error = "partial load: rate limited during IAM pagination"
+                        logger.warning("Identity cache partially refreshed (rate limited during pagination)")
+                    else:
+                        self._last_refresh_error = None
+                        logger.info(
+                            "Identity cache refreshed: %d service accounts, %d users",
+                            len(service_accounts),
+                            len(users),
+                        )
                 except Exception as exc:
                     self._last_refresh_error = str(exc)
                     logger.warning("Identity cache refresh failed (keeping old cache): %s", exc)
@@ -250,6 +260,8 @@ class IdentityEnricher:
                     self._users = users
                 self._identities_loaded = True
                 self._last_refresh_at = time.time()
+                if self._last_refresh_partial:
+                    self._last_refresh_error = "partial load: rate limited during IAM pagination"
             except Exception as exc:
                 self._last_refresh_error = str(exc)
                 logger.warning("Synchronous initial identity load failed: %s", exc)
@@ -265,7 +277,10 @@ class IdentityEnricher:
                             self._users = users
                             self._cache.clear()
                         self._last_refresh_at = time.time()
-                        self._last_refresh_error = None
+                        if self._last_refresh_partial:
+                            self._last_refresh_error = "partial load: rate limited during IAM pagination"
+                        else:
+                            self._last_refresh_error = None
                     except Exception as exc:
                         self._last_refresh_error = str(exc)
                         logger.warning("Identity cache refresh failed: %s", exc)
@@ -316,6 +331,7 @@ class IdentityEnricher:
             except httpx.HTTPStatusError as e:
                 if e.response.status_code == 429:
                     logger.warning("Rate limited loading service accounts, stopping pagination")
+                    self._last_refresh_partial = True
                     break
                 raise
 
@@ -366,6 +382,7 @@ class IdentityEnricher:
             except httpx.HTTPStatusError as e:
                 if e.response.status_code == 429:
                     logger.warning("Rate limited loading users, stopping pagination")
+                    self._last_refresh_partial = True
                     break
                 raise
 
@@ -546,6 +563,7 @@ class IdentityEnricher:
             "cache_size": len(self._cache),
             "cache_maxsize": self._cache.maxsize,
             "cache_ttl": self._cache.ttl,
+            "refresh_partial": self._last_refresh_partial,
         }
 
 
