@@ -119,8 +119,6 @@ function StatusStrip({
 
   return (
     <div className="events-status-strip">
-      <span className="events-status-brand">AuditLens</span>
-      <span className="events-status-sep">·</span>
       <span>Last event: {lastEventText}</span>
       {attentionCount > 0 ? (
         <>
