@@ -495,7 +495,12 @@ def normalize_event(payload: dict[str, Any]) -> dict[str, Any]:
     failure = is_failure(payload)
     denied = is_denied(payload)
     result = "Failure" if failure else "Success"
-    actor = _as_text(_first_present(payload, ("user_display", "user", "principal", "actor"), "Unknown actor")) or "Unknown actor"
+    actor_raw = _as_text(_first_present(payload, ("user_display", "user", "principal", "actor"), "Unknown actor")) or "Unknown actor"
+    # principal_normalized is set by flatten_audit and may have been corrected to
+    # principalResourceId (e.g. "u-79z161") when the raw principal is a bare numeric ID.
+    # Prefer it for IAM lookup; fall back to the raw principal if absent or numeric.
+    _pn = _as_text(payload.get("principal_normalized") or "")
+    actor = _pn if (_pn and not _pn.isdigit()) else actor_raw
     actor_info = enrich_actor(actor)
     source_info = extract_source_info(payload)
     decision = decision_snapshot(payload)

@@ -2537,11 +2537,20 @@ def flatten_audit(event):
     principal_obj = authn.get("principal")
     principal_raw = _to_scalar(principal_obj)
     principal_normalized, principal_type = normalize_with_type(principal_raw)
+    principal_resource_id = authn.get("principalResourceId")
+    # "User:3958188" — bare numeric IDs cannot be resolved via IAM.
+    # When principalResourceId (e.g. "u-79z161") is present, use it for enrichment.
+    if (
+        principal_normalized.isdigit()
+        and principal_resource_id
+        and str(principal_resource_id).startswith(("u-", "sa-"))
+    ):
+        principal_normalized, principal_type = normalize_with_type(principal_resource_id)
     out["principal"]           = principal_raw
     out["principal_raw"]       = principal_raw
     out["principal_normalized"] = principal_normalized
     out["principal_type"]      = principal_type
-    out["principalResourceId"] = authn.get("principalResourceId")
+    out["principalResourceId"] = principal_resource_id
     out["identity"]            = authn.get("identity")
     out["email"]               = _extract_email(principal_obj)
     authn_meta = authn.get("metadata", {})
