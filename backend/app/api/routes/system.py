@@ -9,6 +9,7 @@ from backend.app.core.config import get_settings
 from backend.app.db.database import get_db
 from backend.app.schemas.response import SystemStatusResponse
 from backend.app.services.system_service import get_system_status
+from backend.app.api.routes.patterns import _require_admin, _require_viewer
 
 router = APIRouter(tags=["system"])
 
@@ -20,12 +21,12 @@ _VACUUM_REQUEST_TIMEOUT_SECONDS = 30.0
 
 
 @router.get("/system/status", response_model=SystemStatusResponse)
-def system_status(db: Session = Depends(get_db)) -> dict:
+def system_status(db: Session = Depends(get_db), _auth: None = Depends(_require_viewer)) -> dict:
     return get_system_status(db)
 
 
 @router.get("/system/forwarder-health")
-def forwarder_health() -> JSONResponse:
+def forwarder_health(_auth: None = Depends(_require_viewer)) -> JSONResponse:
     settings = get_settings()
     try:
         response = httpx.get(settings.forwarder_health_url, timeout=_FORWARDER_REQUEST_TIMEOUT_SECONDS)
@@ -41,7 +42,7 @@ def forwarder_health() -> JSONResponse:
 
 
 @router.post("/system/vacuum")
-def vacuum_forwarder_db() -> JSONResponse:
+def vacuum_forwarder_db(_auth: None = Depends(_require_admin)) -> JSONResponse:
     settings = get_settings()
     # FORWARDER_HEALTH_URL ends in /health; rewrite to /admin/vacuum.
     base_url = settings.forwarder_health_url.rsplit("/", 1)[0] if settings.forwarder_health_url else ""

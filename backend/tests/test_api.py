@@ -1300,6 +1300,82 @@ def test_stale_patterns_auto_expire(client):
         session_gen2.close()
 
 
+def test_system_status_requires_viewer_when_auth_enabled(client, monkeypatch):
+    monkeypatch.setenv("API_AUTH_ENABLED", "true")
+    monkeypatch.setenv(
+        "API_AUTH_TOKENS_JSON",
+        json.dumps([
+            {"token": "viewer-token", "actor_id": "viewer", "role": "viewer"},
+        ]),
+    )
+    no_creds = client.get("/system/status")
+    assert no_creds.status_code in {401, 403}
+
+
+def test_system_status_allowed_when_auth_disabled(client, monkeypatch):
+    monkeypatch.setenv("API_AUTH_ENABLED", "false")
+    response = client.get("/system/status")
+    assert response.status_code == 200
+
+
+def test_system_forwarder_health_requires_viewer_when_auth_enabled(client, monkeypatch):
+    monkeypatch.setenv("API_AUTH_ENABLED", "true")
+    monkeypatch.setenv(
+        "API_AUTH_TOKENS_JSON",
+        json.dumps([
+            {"token": "viewer-token", "actor_id": "viewer", "role": "viewer"},
+        ]),
+    )
+    no_creds = client.get("/system/forwarder-health")
+    assert no_creds.status_code in {401, 403}
+
+
+def test_system_forwarder_health_allowed_when_auth_disabled(client, monkeypatch):
+    monkeypatch.setenv("API_AUTH_ENABLED", "false")
+    response = client.get("/system/forwarder-health")
+    assert response.status_code == 200
+
+
+def test_system_vacuum_requires_admin_when_auth_enabled(client, monkeypatch):
+    monkeypatch.setenv("API_AUTH_ENABLED", "true")
+    monkeypatch.setenv(
+        "API_AUTH_TOKENS_JSON",
+        json.dumps([
+            {"token": "viewer-token", "actor_id": "viewer", "role": "viewer"},
+            {"token": "admin-token", "actor_id": "admin", "role": "admin"},
+        ]),
+    )
+    no_creds = client.post("/system/vacuum")
+    viewer = client.post("/system/vacuum", headers={"Authorization": "Bearer viewer-token"})
+    assert no_creds.status_code in {401, 403}
+    assert viewer.status_code == 403
+
+
+def test_system_vacuum_allowed_when_auth_disabled(client, monkeypatch):
+    monkeypatch.setenv("API_AUTH_ENABLED", "false")
+    # vacuum may fail for other reasons (forwarder unreachable) but must not return 401/403
+    response = client.post("/system/vacuum")
+    assert response.status_code not in {401, 403}
+
+
+def test_summary_methods_requires_viewer_when_auth_enabled(client, monkeypatch):
+    monkeypatch.setenv("API_AUTH_ENABLED", "true")
+    monkeypatch.setenv(
+        "API_AUTH_TOKENS_JSON",
+        json.dumps([
+            {"token": "viewer-token", "actor_id": "viewer", "role": "viewer"},
+        ]),
+    )
+    no_creds = client.get("/summary/methods")
+    assert no_creds.status_code in {401, 403}
+
+
+def test_summary_methods_allowed_when_auth_disabled(client, monkeypatch):
+    monkeypatch.setenv("API_AUTH_ENABLED", "false")
+    response = client.get("/summary/methods")
+    assert response.status_code == 200
+
+
 def test_summary_flow_groups_subject_display_name(client):
     """flow_groups items include subject_display_name when actor has an enriched name."""
     from backend.app.db.models import AuditEvent as AuditEventModel

@@ -56,7 +56,7 @@ def summary(
 
 @router.get("/summary/methods", response_model=MethodDistributionResponse)
 @limiter.limit("10/minute")
-def summary_methods(request: Request, db: Session = Depends(get_db)) -> dict:
+def summary_methods(request: Request, db: Session = Depends(get_db), _auth: None = Depends(_require_viewer)) -> dict:
     """Unified method distribution across audit_events and audit_events_noise.
 
     The two physical tables are queried independently and merged client-side
