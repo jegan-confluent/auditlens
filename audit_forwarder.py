@@ -232,7 +232,6 @@ def load_env():
             secrets_path = alt
     if secrets_path.exists():
         load_dotenv(secrets_path)
-load_env()
 
 # ──────────── environment variables ────────────
 AUDIT_BOOTSTRAP        = os.getenv("AUDIT_BOOTSTRAP")
@@ -4745,6 +4744,7 @@ def main():
 
 
 def run_cli(argv: list[str] | None = None) -> int:
+    load_env()
     parser = argparse.ArgumentParser(description="AuditLens foundation runtime")
     subparsers = parser.add_subparsers(dest="command")
 
