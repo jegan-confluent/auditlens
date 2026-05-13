@@ -14,6 +14,7 @@ from src.classification.methods import (
     AUTHORIZATION_CHECK_METHODS,
     AUTHENTICATION_METHODS,
 )
+from src.product.event_normalization import derive_action_category
 
 
 class TestCriticalityLevel:
@@ -514,3 +515,30 @@ class TestAuthenticationMethods:
         }
         result = calculate_criticality(event)
         assert result.criticality == CriticalityLevel.LOW
+
+
+class TestBindRoleForPrincipal:
+    """Regression tests for BindRoleForPrincipal classification.
+
+    This method grants a role to a principal — a privileged RBAC mutation
+    that must be classified as HIGH / Security rather than falling through
+    to the informational catch-all.
+    """
+
+    def test_bind_role_for_principal_in_high_methods(self):
+        """BindRoleForPrincipal must be present in HIGH_METHODS."""
+        assert 'BindRoleForPrincipal' in HIGH_METHODS
+
+    def test_bind_role_for_principal_criticality_is_high(self):
+        """calculate_criticality returns HIGH for BindRoleForPrincipal."""
+        event = {
+            'methodName': 'BindRoleForPrincipal',
+            'resultStatus': 'SUCCESS',
+            'principal': 'User:admin',
+        }
+        result = calculate_criticality(event)
+        assert result.criticality == CriticalityLevel.HIGH
+
+    def test_bind_role_for_principal_action_category_is_security(self):
+        """derive_action_category returns Security for BindRoleForPrincipal."""
+        assert derive_action_category('BindRoleForPrincipal', '') == 'Security'
