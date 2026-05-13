@@ -229,7 +229,7 @@ def _classify_signal_core(event_or_fields: Any) -> dict[str, str]:
             "recommended_action": "Verify owner and change window",
             "decision_label": "Review",
         }
-    if risk in {"high", "medium"} or change in {"created", "updated", "configured"} or family in {"service_account", "user", "api_key", "acl", "rbac", "network", "connector", "topic", "schema_registry", "cluster", "environment"} and impact == "constructive":
+    if risk in {"high", "medium"} or change in {"created", "updated", "configured"} or (family in {"service_account", "user", "api_key", "acl", "rbac", "network", "connector", "topic", "schema_registry", "cluster", "environment"} and impact == "constructive"):
         return {
             "signal_type": "attention",
             "signal_reason": "security_sensitive_change" if family in {"service_account", "user", "api_key", "acl", "rbac", "network"} else "config_changed",

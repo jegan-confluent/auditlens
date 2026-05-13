@@ -209,3 +209,98 @@ def test_schema_register_success_keeps_original_signal():
         "result": "Success",
     })
     assert result["signal_reason"] != "schema_incompatible"
+
+
+# ── Operator-precedence fix: line 232 parenthesisation ────────────────────
+# The fix adds explicit parentheses around (family in {...} and impact ==
+# "constructive") so that Python's and-before-or rule is visible in the
+# source.  The tests below pin the *intended* behavior and would fail if
+# the parens were placed around the entire condition (i.e. if someone
+# accidentally wrote "(A or B or C) and impact == 'constructive'", which
+# would break tests 2 and 3 by returning "informational" instead of
+# "attention").
+
+def _signal_with_digest(impact_type: str, risk_level: str, change_type: str, resource_family: str, **extra) -> dict[str, str]:
+    """Call classify_signal with a pre-computed digest dict to bypass event_intelligence."""
+    payload = {
+        "impact_type": impact_type,
+        "risk_level": risk_level,
+        "change_type": change_type,
+        "resource_family": resource_family,
+        **extra,
+    }
+    return signal(payload)
+
+
+def test_high_risk_non_constructive_returns_attention():
+    """risk="high" with any impact must return "attention".
+
+    Would FAIL with the wrong parenthesisation (A or B or C) and impact=="constructive"
+    because impact="access_change" != "constructive" would prevent the match.
+    Note: access_change/destructive are caught before line 232; use an
+    impact that reaches line 232 — e.g. "security_sensitive" without
+    is_denied/is_failure flags.
+    """
+    result = _signal_with_digest(
+        impact_type="security_sensitive",
+        risk_level="high",
+        change_type="updated",
+        resource_family="cluster",
+    )
+    assert result["signal_type"] == "attention", (
+        f"expected 'attention' for risk=high, got {result['signal_type']!r}"
+    )
+
+
+def test_medium_risk_constructive_returns_attention():
+    """risk="medium" + impact="constructive" must return "attention".
+
+    This is the baseline case — all interpretations agree on this.
+    """
+    result = _signal_with_digest(
+        impact_type="constructive",
+        risk_level="medium",
+        change_type="created",
+        resource_family="topic",
+    )
+    assert result["signal_type"] == "attention", (
+        f"expected 'attention' for risk=medium+constructive, got {result['signal_type']!r}"
+    )
+
+
+def test_medium_risk_non_constructive_returns_attention():
+    """risk="medium" + impact != "constructive" must still return "attention".
+
+    Would FAIL with (A or B or C) and impact == "constructive" because
+    impact="configuration_change" != "constructive" while risk="medium"
+    alone SHOULD be enough to reach the attention branch.
+    Note: configuration_change is caught at line 225 first, so we use
+    impact="security_sensitive" with risk="medium" to reach line 232.
+    """
+    result = _signal_with_digest(
+        impact_type="security_sensitive",
+        risk_level="medium",
+        change_type="updated",
+        resource_family="service_account",
+    )
+    assert result["signal_type"] == "attention", (
+        f"expected 'attention' for risk=medium+security_sensitive, got {result['signal_type']!r}"
+    )
+
+
+def test_low_risk_matching_family_constructive_returns_attention():
+    """risk="low" + family in the checked set + impact="constructive" → "attention".
+
+    The (family in {...} and impact == "constructive") clause fires here.
+    Would still pass with or without the paren fix; included to document
+    the family+constructive path.
+    """
+    result = _signal_with_digest(
+        impact_type="constructive",
+        risk_level="low",
+        change_type="created",
+        resource_family="service_account",
+    )
+    assert result["signal_type"] == "attention", (
+        f"expected 'attention' for family=service_account+constructive, got {result['signal_type']!r}"
+    )
