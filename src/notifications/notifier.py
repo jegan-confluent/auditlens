@@ -9,9 +9,11 @@ catches every exception and never raises into the caller.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import os
+import socket
 import threading
 import time
 import urllib.error
@@ -20,6 +22,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import yaml
 
@@ -120,6 +123,26 @@ _RISK_ORDER = {
 }
 
 
+def _validate_webhook_url(url: str) -> None:
+    """Validate webhook URL is https and does not resolve to a private/internal IP (SSRF protection)."""
+    parsed = urlparse(url)
+    if parsed.scheme != "https":
+        raise ValueError(f"Webhook URL must use https, got '{parsed.scheme}': {url}")
+    host = parsed.hostname or ""
+    if not host:
+        raise ValueError(f"Webhook URL has no hostname: {url}")
+    try:
+        resolved_ip = socket.gethostbyname(host)
+        ip = ipaddress.ip_address(resolved_ip)
+    except socket.gaierror as exc:
+        raise ValueError(f"Cannot resolve webhook hostname '{host}': {exc}")
+    if (ip.is_private or ip.is_loopback or ip.is_link_local
+            or ip.is_reserved or ip.is_unspecified):
+        raise ValueError(
+            f"Webhook URL resolves to non-public IP ({ip}) — SSRF risk. Host: {host}"
+        )
+
+
 @dataclass
 class NotificationDestination:
     """Single notification target loaded from notifications.yml."""
@@ -216,6 +239,11 @@ class AuditLensNotifier:
             logger.warning(
                 "notifications.yml: %s has invalid type %r — skipping", name, dtype
             )
+            return None
+        try:
+            _validate_webhook_url(webhook_url)
+        except ValueError as exc:
+            logger.error("Skipping destination '%s': %s", name, exc)
             return None
         signal_types = filters.get("signal_type")
         if not isinstance(signal_types, list) or not signal_types:
