@@ -323,7 +323,13 @@ class TopicRouter:
 
         # Flush if we have a producer
         if self.producer and not self.config.dry_run:
-            self.producer.flush(timeout=10)
+            unconfirmed = self.producer.flush(timeout=10)
+            if unconfirmed > 0:
+                logger.warning(
+                    "producer.flush() timed out with %d message(s) still in queue — "
+                    "delivery not confirmed for this batch",
+                    unconfirmed,
+                )
 
         return results
 
