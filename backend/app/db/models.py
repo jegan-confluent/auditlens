@@ -691,3 +691,13 @@ class AppSettings(Base):
 
 
 Index("idx_app_settings_category", AppSettings.category)
+
+# Composite partial index for the default non-noise attention query
+# (mirrors Alembic revision 0016_add_attention_time_index).
+Index(
+    "idx_audit_events_attention_time",
+    AuditEvent.timestamp.desc(),
+    AuditEvent._signal_type,
+    postgresql_where=AuditEvent.is_routine_noise.is_(False),
+    sqlite_where=AuditEvent.is_routine_noise.is_(False),
+)
