@@ -5,6 +5,18 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+try:
+    import orjson as _orjson
+
+    def _dumps_payload(obj: Any) -> str:
+        return _orjson.dumps(
+            obj,
+            option=_orjson.OPT_SORT_KEYS | _orjson.OPT_NON_STR_KEYS,
+        ).decode("utf-8")
+except ImportError:
+    def _dumps_payload(obj: Any) -> str:  # type: ignore[misc]
+        return json.dumps(obj, sort_keys=True, default=str)
+
 from sqlalchemy import (
     BigInteger,
     Boolean,
@@ -306,7 +318,7 @@ class AuditEventDbWriter:
         return {
             "event_fingerprint": event_fingerprint(payload),
             "timestamp": parse_event_timestamp(payload),
-            "raw_payload_json": json.dumps(payload, sort_keys=True, default=str),
+            "raw_payload_json": _dumps_payload(payload),
             **normalized,
         }
 
