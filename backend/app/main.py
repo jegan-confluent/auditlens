@@ -122,6 +122,10 @@ def create_app() -> FastAPI:
                 logger.info("audit_events_noise table present — noise query path active")
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning("audit_events_noise existence check failed: %s", exc)
+        logger.info(
+            "AuditLens API started — no telemetry, no phone-home. "
+            "All audit data stays within this deployment."
+        )
 
     app.include_router(health.router)
     app.include_router(readiness.router)

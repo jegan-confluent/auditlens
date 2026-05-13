@@ -3486,6 +3486,10 @@ def main():
     logger.info("=" * 70)
     _mem_limit = os.getenv("MEMORY_LIMIT_MB", "unknown")
     logger.info("Starting PID=%d mem_limit=%sMB", os.getpid(), _mem_limit)
+    logger.info(
+        "No telemetry — audit data stays within this deployment. "
+        "Outbound connections: Kafka bootstrap + (optional) Confluent IAM API + user-configured webhooks."
+    )
 
     startup_config = validate_startup_config()
     if not startup_config["valid"]:
