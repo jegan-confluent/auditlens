@@ -1,13 +1,14 @@
-"""Actor IP baseline endpoint — per-actor IP history and trust status."""
+"""Actor endpoints — IP baseline and narrative story."""
 
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from backend.app.db.database import get_db
 from backend.app.db.models import ActorIpBaseline, AuditEvent
 from backend.app.api.routes.patterns import _require_viewer
+from backend.app.services.narrative_service import get_actor_narrative
 
 router = APIRouter(tags=["actors"])
 
@@ -69,3 +70,13 @@ def get_actor_ip_baseline(actor_id: str, db: Session = Depends(get_db), _auth: N
         "new_ips_last_24h": new_ips_last_24h,
         "trusted_ips_configured": trusted_ips_configured,
     }
+
+
+@router.get("/actors/{actor_id}/narrative")
+def get_actor_narrative_endpoint(
+    actor_id: str,
+    time_window: str = Query(default="24h"),
+    db: Session = Depends(get_db),
+    _auth: None = Depends(_require_viewer),
+) -> dict:
+    return get_actor_narrative(db, actor_id, time_window)
