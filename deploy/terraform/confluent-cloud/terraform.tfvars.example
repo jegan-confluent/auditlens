@@ -23,7 +23,7 @@ dest_cluster_admin_secret = "ADMIN_SECRET_FOR_DEST_CLUSTER"
 
 # Topics
 dest_topic         = "audit-logs-processed"
-dlq_topic          = "audit-logs-dlq"
+dlq_topic          = "audit.dlq.v1"
 topic_partitions   = 6
 topic_retention_ms = 604800000  # 7 days
 dlq_retention_ms   = 2592000000 # 30 days

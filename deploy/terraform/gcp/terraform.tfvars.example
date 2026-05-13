@@ -38,7 +38,7 @@ dest_bootstrap  = "pkc-xxxxx.us-central1.gcp.confluent.cloud:9092"
 dest_topic      = "audit-logs-processed"
 dest_api_key    = "YOUR_DEST_API_KEY"
 dest_api_secret = "YOUR_DEST_API_SECRET"
-dlq_topic       = "audit-logs-dlq"
+dlq_topic       = "audit.dlq.v1"
 
 # Schema Registry
 schema_registry_url    = "https://psrc-xxxxx.us-central1.gcp.confluent.cloud"

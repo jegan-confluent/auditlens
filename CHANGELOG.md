@@ -109,7 +109,7 @@ work only.
 ### Added
 
 #### Forwarder
-- **Dead Letter Queue (DLQ)**: Failed events are now sent to `audit_events_dlq` topic for later reprocessing
+- **Dead Letter Queue (DLQ)**: Failed events are now sent to `audit.dlq.v1` topic for later reprocessing
   - Includes original event, error message, source topic/partition/offset, timestamp
   - Configurable via `ENABLE_DLQ` and `DLQ_TOPIC` environment variables
 - **DLQ metrics in heartbeat**: Logs now show `DLQ: X sent/Y failed` every 30 seconds
