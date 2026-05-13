@@ -370,20 +370,20 @@ def _normalize_mode(mode: str | None) -> str:
 
 def _decision_mode_condition():
     return or_(
-        func.lower(AuditEvent._signal_type).in_({"action_required", "attention"}),
-        func.lower(AuditEvent._impact_type).in_({"destructive", "configuration_change", "access_change", "security_sensitive"}),
-        func.lower(AuditEvent._risk_level).in_({"medium", "high", "critical"}),
-        func.lower(AuditEvent._change_type).in_({"created", "deleted", "updated", "configured", "denied"}),
-        func.lower(AuditEvent.action_category).in_(DECISION_ACTION_CATEGORIES),
+        AuditEvent._signal_type.in_({"action_required", "attention"}),
+        AuditEvent._impact_type.in_({"destructive", "configuration_change", "access_change", "security_sensitive"}),
+        AuditEvent._risk_level.in_({"medium", "high", "critical"}),
+        AuditEvent._change_type.in_({"created", "deleted", "updated", "configured", "denied"}),
+        AuditEvent.action_category.in_(DECISION_ACTION_CATEGORIES),
         AuditEvent.is_failure.is_(True),
         AuditEvent.is_denied.is_(True),
-        func.lower(AuditEvent.result).in_({"failure", "denied"}),
-        func.lower(AuditEvent.normalized_action).like("%acl%"),
-        func.lower(AuditEvent.normalized_action).like("%api key%"),
-        func.lower(AuditEvent.normalized_action).like("%apikey%"),
-        func.lower(AuditEvent.normalized_action).like("%role%"),
-        func.lower(AuditEvent.normalized_action).like("%grant%"),
-        func.lower(AuditEvent.normalized_action).like("%revoke%"),
+        AuditEvent.result.in_({"failure", "denied"}),
+        AuditEvent.normalized_action.like("%acl%"),
+        AuditEvent.normalized_action.like("%api key%"),
+        AuditEvent.normalized_action.like("%apikey%"),
+        AuditEvent.normalized_action.like("%role%"),
+        AuditEvent.normalized_action.like("%grant%"),
+        AuditEvent.normalized_action.like("%revoke%"),
     )
 
 
