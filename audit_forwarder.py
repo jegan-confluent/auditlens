@@ -85,6 +85,7 @@ from src.product.event_normalization import BULK_NOISE_METHODS, parse_event_time
 from src.product.event_intelligence import decision_snapshot
 from src.product.actor_enrichment import get_actor_mapping_file, wait_for_iam_cache_ready
 from src.notifications.notifier import AuditLensNotifier
+from src.forwarder.utils import extract_from_crn, utc_now_iso
 
 # ──────────── graceful shutdown handler ────────────
 _shutdown_requested = False
@@ -101,13 +102,6 @@ def _signal_handler(sig, frame):
 signal.signal(signal.SIGTERM, _signal_handler)
 signal.signal(signal.SIGINT, _signal_handler)
 
-
-def extract_from_crn(crn, field):
-    """Extract field from CRN string."""
-    if not crn:
-        return None
-    match = re.search(f'{field}=([^/]+)', str(crn))
-    return match.group(1) if match else None
 
 # ──────────── secrets masking for safe logging ────────────
 # Single source of truth for "is this field name sensitive?". Lower-case tokens
@@ -500,11 +494,6 @@ HIGH_RISK_SIGNAL_METHODS = HIGH_RISK_ALERT_METHODS | {
     "DeleteWorkspace",
     "DeleteConnector",
 }
-
-
-def utc_now_iso() -> str:
-    """Return RFC3339 UTC timestamp."""
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 # ─────────────────── DB-writer freshness helpers ───────────────────────
