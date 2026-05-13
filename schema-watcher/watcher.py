@@ -746,6 +746,17 @@ class ConfluentSchemaWatcher:
                 if not self.dry_run:
                     with open(snapshot_file, 'wb') as f:
                         f.write(orjson.dumps(new_schema, option=orjson.OPT_INDENT_2))
+                    # Prune old snapshots — keep only the 10 most recent
+                    _all_snapshots = sorted(
+                        self.versions_file.parent.glob("schema_snapshot_*.json"),
+                        key=lambda p: p.stat().st_mtime,
+                    )
+                    for _old in _all_snapshots[:-10]:
+                        try:
+                            _old.unlink()
+                            logger.debug("Pruned old snapshot: %s", _old.name)
+                        except OSError as _err:
+                            logger.warning("Could not prune snapshot %s: %s", _old.name, _err)
             else:
                 logger.info("No schema changes detected")
 
