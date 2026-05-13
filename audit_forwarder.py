@@ -4162,6 +4162,9 @@ def main():
             if batch_size > 0:
                 metrics.record_processed(batch_size)
 
+            # Cache health result for this batch — avoids per-event SQLite COUNT(*)
+            _ps_health = product_store.health() if product_store else None
+
             for msg in batch:
                 if msg is None or msg.error():
                     if msg and msg.error().code() != KafkaError._PARTITION_EOF:
@@ -4188,7 +4191,8 @@ def main():
                             product_store.persist_enriched_event,
                             enriched_event, msg.topic(), msg.partition(), msg.offset(),
                         )
-                        metrics.record_persistence_success(product_store.health())
+                        if _ps_health:
+                            metrics.record_persistence_success(_ps_health)
                     if ENABLE_DB_WRITER:
                         # Route into the priority lane based on methodName
                         # (critical / normal / bulk). Writer threads drain
@@ -4291,7 +4295,8 @@ def main():
                             metrics.record_signal(anomaly.anomaly_type.value)
                             if product_store:
                                 persist_safely("anomaly_alert", product_store.persist_alert, anomaly_alert)
-                                metrics.record_persistence_success(product_store.health())
+                                if _ps_health:
+                                    metrics.record_persistence_success(_ps_health)
 
                     # Configurable notification layer (slack/teams/webhook)
                     # — runs before the legacy webhook so dedup keys are
@@ -4342,7 +4347,8 @@ def main():
                                 product_store.persist_high_risk_event,
                                 enriched_event, msg.partition(), msg.offset(),
                             )
-                            metrics.record_persistence_success(product_store.health())
+                            if _ps_health:
+                                metrics.record_persistence_success(_ps_health)
                         safe_produce(
                             producer,
                             AUDIT_SIGNALS_HIGHRISK_TOPIC,
@@ -4364,7 +4370,8 @@ def main():
                         metrics.record_signal("operator_alert")
                         if product_store:
                             persist_safely("operator_alert", product_store.persist_alert, operator_alert)
-                            metrics.record_persistence_success(product_store.health())
+                            if _ps_health:
+                                metrics.record_persistence_success(_ps_health)
 
                     if ENABLE_MULTI_TOPIC_ROUTING and topic_router:
                         topic_router.route_event(enriched_event)
