@@ -61,6 +61,7 @@ class TriageUpdate(BaseModel):
 @limiter.limit("20/minute")
 def events(
     request: Request,
+    _auth: None = Depends(_require_viewer),
     time_window: str | None = Query(default=None, pattern=r"^[1-9][0-9]*[mh]$"),
     mode: str = Query(default="decision"),
     resource_type: str | None = None,
@@ -196,7 +197,7 @@ def events(
 
 @router.get("/events/{event_id}", response_model=AuditEventDetailOut)
 @limiter.limit("20/minute")
-def event_detail(event_id: int, request: Request, db: Session = Depends(get_db)):
+def event_detail(event_id: int, request: Request, db: Session = Depends(get_db), _auth: None = Depends(_require_viewer)):
     event = get_event(db, event_id)
     if event is None:
         raise HTTPException(status_code=404, detail="Event not found")

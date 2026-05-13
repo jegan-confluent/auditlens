@@ -99,6 +99,7 @@ def get_patterns(
     limit: int = Query(default=50, ge=1, le=200),
     db: Session = Depends(get_db),
 ) -> dict:
+    _require_viewer(request)
     try:
         return list_patterns(db, status=status, actor=actor, limit=limit)
     except Exception as exc:
