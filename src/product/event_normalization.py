@@ -574,12 +574,28 @@ def event_fingerprint(payload: dict[str, Any]) -> str:
     # to a single row. The fingerprint covers actor+action+resource+second so
     # rapid-but-distinct operations are not incorrectly merged.
     if _is_management_plane(payload):
-        normalized = normalize_event(payload)
+        # Direct extraction avoids normalize_event() → enrich_actor() IAM HTTP
+        # calls on the write hot path. The fingerprint only needs stable identity
+        # fields, not enriched display names.
         ts_second = parse_event_timestamp(payload).replace(microsecond=0).isoformat()
+        _method = _as_text(payload.get("methodName") or payload.get("method_name"))
+        _actor_raw = _as_text(_first_present(payload, ("user_display", "user", "principal", "actor"), ""))
+        _pn = _as_text(payload.get("principal_normalized") or "")
+        _actor = (_pn if (_pn and not _pn.isdigit()) else _actor_raw) or ""
+        _d = _data(payload)
+        _az = _d.get("authorizationInfo") if isinstance(_d.get("authorizationInfo"), dict) else {}
+        _resource = _as_text(
+            _d.get("resourceName")
+            or _az.get("resourceName")
+            or payload.get("resourceName")
+            or payload.get("resource_name")
+            or payload.get("authzResourceName")
+            or ""
+        )
         stable = {
-            "actor": normalized["actor"],
-            "action": normalized["action"],
-            "resource_name": normalized["resource_name"],
+            "actor": _actor,
+            "action": _as_text(payload.get("action")) or _method,
+            "resource_name": _resource,
             "timestamp": ts_second,
         }
         return hashlib.sha256(json.dumps(stable, sort_keys=True, default=str).encode("utf-8")).hexdigest()

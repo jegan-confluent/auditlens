@@ -1052,3 +1052,40 @@ def test_db_writer_init_circuit_breaker(monkeypatch):
     result2 = af.initialize_db_writer_if_enabled()
     assert result2 is None
     assert call_count[0] == 1, "Circuit breaker failed: init called twice"
+
+
+def test_event_fingerprint_no_iam_call(monkeypatch):
+    """Management-plane fingerprint must not call enrich_actor (IAM HTTP risk on write hot path)."""
+    import src.product.event_normalization as en
+    called = []
+    monkeypatch.setattr(en, "enrich_actor", lambda *a, **kw: called.append(a) or {
+        "actor_id": "x", "actor_display_name": "", "actor_email": "",
+        "actor_type": "unknown", "actor_source": "fallback",
+        "actor_confidence": "low", "actor_enriched_at": "",
+    })
+    payload = {
+        "methodName": "CreateAPIKey",
+        "user": "u-12g806",
+        "resourceName": "76NATGA2SWTNEZX5",
+        "time": "2026-05-04T13:06:37Z",
+    }
+    fp = en.event_fingerprint(payload)
+    assert fp, "fingerprint must be non-empty"
+    assert called == [], "event_fingerprint must not call enrich_actor for management-plane events"
+
+
+def test_always_noise_methods_matches_bulk_noise_methods():
+    """_ALWAYS_NOISE_METHODS must be derived from BULK_NOISE_METHODS so they cannot diverge."""
+    from src.product.event_signals import _ALWAYS_NOISE_METHODS
+    from src.product.event_normalization import BULK_NOISE_METHODS
+    assert _ALWAYS_NOISE_METHODS == BULK_NOISE_METHODS, (
+        f"diverged — in BULK but not ALWAYS: {BULK_NOISE_METHODS - _ALWAYS_NOISE_METHODS}; "
+        f"in ALWAYS but not BULK: {_ALWAYS_NOISE_METHODS - BULK_NOISE_METHODS}"
+    )
+
+
+def test_signin_classified_as_authentication_not_read_only():
+    """SignIn is an authentication event; must not appear in READ_ONLY_METHODS."""
+    from src.classification.methods import READ_ONLY_METHODS, AUTHENTICATION_METHODS
+    assert "SignIn" not in READ_ONLY_METHODS, "SignIn must not be in READ_ONLY_METHODS"
+    assert "SignIn" in AUTHENTICATION_METHODS, "SignIn must be in AUTHENTICATION_METHODS"
