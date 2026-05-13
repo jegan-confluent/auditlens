@@ -999,3 +999,90 @@ def backfill_actor_display_names(
         "errors": errors,
         "dry_run": dry_run,
     }
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Normalize User: prefix in stored actor values.
+# Events stored before the normalize_event() fix carry "User:u-xxxxx" or
+# "User:sa-xxxxx" as the actor value.  This job strips the prefix so the
+# same person is no longer stored as two distinct actors.
+# ──────────────────────────────────────────────────────────────────────
+
+_NORMALIZE_PREFIX_BATCH = 10_000
+_NORMALIZE_PREFIX_SLEEP_MS = 10
+
+
+def backfill_normalize_actor_prefixes(
+    db: Session,
+    *,
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    """Strip spurious 'User:u-' and 'User:sa-' prefixes from the actor column.
+
+    Processes in batches of 10K rows, committing after each batch.
+    Events with 'User:NNNN' (numeric) are intentionally excluded — those
+    need principalResourceId resolution, not simple prefix stripping.
+
+    Returns {"updated": N, "batches": N, "dry_run": bool}.
+    """
+    is_postgres = db.get_bind().dialect.name == "postgresql"
+    total = 0
+    batches = 0
+
+    while True:
+        if is_postgres:
+            db.execute(text(
+                f"SET LOCAL statement_timeout = {_ACTOR_BACKFILL_STATEMENT_TIMEOUT_MS}"
+            ))
+            result = db.execute(text(
+                "UPDATE audit_events"
+                " SET actor = SUBSTRING(actor FROM 6),"
+                "     actor_id = SUBSTRING(actor FROM 6)"
+                " WHERE id IN ("
+                "   SELECT id FROM audit_events"
+                "   WHERE actor LIKE 'User:u-%' OR actor LIKE 'User:sa-%'"
+                f"  LIMIT {_NORMALIZE_PREFIX_BATCH}"
+                " )"
+            ))
+        else:
+            result = db.execute(text(
+                "UPDATE audit_events"
+                " SET actor = SUBSTR(actor, 6),"
+                "     actor_id = SUBSTR(actor, 6)"
+                " WHERE rowid IN ("
+                "   SELECT rowid FROM audit_events"
+                "   WHERE actor LIKE 'User:u-%' OR actor LIKE 'User:sa-%'"
+                f"  LIMIT {_NORMALIZE_PREFIX_BATCH}"
+                " )"
+            ))
+        rows = result.rowcount
+        if not dry_run:
+            db.commit()
+        else:
+            db.rollback()
+            # In dry_run mode, count via SELECT and stop after one iteration
+            count_result = db.execute(text(
+                "SELECT COUNT(*) FROM audit_events"
+                " WHERE actor LIKE 'User:u-%' OR actor LIKE 'User:sa-%'"
+            ))
+            rows = count_result.scalar() or 0
+            total = rows
+            batches = (rows + _NORMALIZE_PREFIX_BATCH - 1) // _NORMALIZE_PREFIX_BATCH if rows else 0
+            break
+
+        total += rows
+        batches += 1
+        logger.info(
+            "normalize-actor-prefixes: batch %d — %d rows updated (total=%d, dry_run=%s)",
+            batches, rows, total, dry_run,
+        )
+        if rows < _NORMALIZE_PREFIX_BATCH:
+            break
+        if _NORMALIZE_PREFIX_SLEEP_MS > 0:
+            sleep(_NORMALIZE_PREFIX_SLEEP_MS / 1000.0)
+
+    logger.info(
+        "normalize-actor-prefixes complete: updated=%d batches=%d dry_run=%s",
+        total, batches, dry_run,
+    )
+    return {"updated": total, "batches": batches, "dry_run": dry_run}

@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from backend.app.core.config import get_settings
 from backend.app.db.database import get_db
 from backend.app.services.backfill_service import (
+    backfill_normalize_actor_prefixes,
     get_actor_backfill_status,
     start_actor_display_name_backfill,
 )
@@ -95,3 +96,17 @@ def backfill_actor_display_names_status(
     _: None = Depends(require_admin),
 ) -> dict:
     return get_actor_backfill_status()
+
+
+@router.post("/admin/backfill/normalize-actor-prefixes")
+def normalize_actor_prefixes_endpoint(
+    payload: ActorBackfillRequest = Body(default_factory=ActorBackfillRequest),
+    _: None = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Strip spurious 'User:u-' / 'User:sa-' prefixes from the actor column.
+
+    Synchronous — runs inline and returns when complete.  Batched at 10K rows
+    to avoid table locks.  Safe to re-run: rows already normalized are
+    unaffected (LIKE 'User:u-%' no longer matches)."""
+    return backfill_normalize_actor_prefixes(db, dry_run=payload.dry_run)
