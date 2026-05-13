@@ -247,7 +247,7 @@ services:
 
   postgres:
     profiles: ["postgres", "dev"]
-    image: postgres:16-alpine
+    image: postgres:16-alpine@sha256:4e6e670bb069649261c9c18031f0aded7bb249a5b6664ddec29c013a89310d50
     shm_size: '256mb'
     container_name: auditlens-postgres
     restart: unless-stopped
@@ -294,7 +294,7 @@ services:
       - no-new-privileges:true
 
   prometheus:
-    image: prom/prometheus:v2.54.1
+    image: prom/prometheus:v2.54.1@sha256:69961df6ffa67598048a31aa2822d61f3c93b91d7db24e44d9bb03f99d520da9
     container_name: audit-prometheus
     restart: unless-stopped
     user: "65534:65534"  # nobody user
@@ -334,7 +334,7 @@ services:
       - ALL
 
   grafana:
-    image: grafana/grafana:11.3.1
+    image: grafana/grafana:11.3.1@sha256:cc51212998c91d624fdbb6d1a6903234ddcf97108d56a7a2d1c85bffdb749b6a
     container_name: audit-grafana
     restart: unless-stopped
     user: "472:472"  # grafana user
@@ -603,7 +603,7 @@ services:
 
   postgres-exporter:
     profiles: ["postgres", "dev"]
-    image: prometheuscommunity/postgres-exporter:v0.15.0
+    image: prometheuscommunity/postgres-exporter:v0.15.0@sha256:31bdf410910646a05c7edde8d95ab771c9d78fbfbc26b50a52548707496c284d
     container_name: auditlens-postgres-exporter
     environment:
       - DATA_SOURCE_NAME=postgresql://${POSTGRES_USER:-auditlens}:${POSTGRES_PASSWORD:-auditlens}@postgres:5432/${POSTGRES_DB:-auditlens}?sslmode=disable
