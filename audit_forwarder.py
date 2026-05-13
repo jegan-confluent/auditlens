@@ -2698,6 +2698,16 @@ def flatten_audit(event):
 delivery_errors = {"count": 0, "last_error": None}
 _delivery_errors_lock = threading.Lock()
 dlq_stats = {"sent": 0, "failed": 0, "enqueued": 0}
+_dlq_stats_lock = threading.Lock()
+
+
+def _dlq_delivery_callback(err, msg):
+    with _dlq_stats_lock:
+        if not err:
+            dlq_stats["sent"] += 1
+        else:
+            dlq_stats["failed"] += 1
+
 
 def delivery_callback(err, msg):
     """Track delivery errors."""
@@ -2731,18 +2741,20 @@ def send_to_dlq(producer, raw_value: bytes, error_msg: str, source_topic: str, p
             "source_topic": source_topic,
             "source_partition": partition,
             "source_offset": offset,
-            "failed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "failed_at": utc_now_iso(),
             "forwarder_version": VERSION,
         }
         producer.produce(
             DLQ_TOPIC,
             key=f"{source_topic}-{partition}-{offset}".encode('utf-8'),
             value=orjson.dumps(dlq_event),
-            callback=lambda err, msg: dlq_stats.update({"sent": dlq_stats["sent"] + 1}) if not err else dlq_stats.update({"failed": dlq_stats["failed"] + 1})
+            callback=_dlq_delivery_callback,
         )
-        dlq_stats["enqueued"] += 1
+        with _dlq_stats_lock:
+            dlq_stats["enqueued"] += 1
     except Exception as e:
-        dlq_stats["failed"] += 1
+        with _dlq_stats_lock:
+            dlq_stats["failed"] += 1
         logger.warning("Failed to send to DLQ: %s", e)
 
 # ──────────── safe produce helper ────────────
