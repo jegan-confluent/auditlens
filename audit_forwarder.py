@@ -22,6 +22,7 @@ import sys
 import traceback
 import argparse
 import signal
+import ipaddress
 import orjson
 import logging
 import time
@@ -4258,8 +4259,8 @@ def main():
                                     _last_alerted = _ip_alert_dedup.get(_dedup_key, 0.0)
                                     _dedup_ok = (_now_ts - _last_alerted) >= _IP_ALERT_DEDUP_WINDOW
                                     _in_trusted = any(
-                                        __import__("ipaddress").ip_address(_ip_src)
-                                        in __import__("ipaddress").ip_network(cidr, strict=False)
+                                        ipaddress.ip_address(_ip_src)
+                                        in ipaddress.ip_network(cidr, strict=False)
                                         for cidr in _trusted
                                         if cidr
                                     ) if _trusted else False
