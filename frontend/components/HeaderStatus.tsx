@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { getSystemStatus, isAbortError } from "../lib/api";
 import type { SystemStatus } from "../lib/types";
 
-type Tone = "loading" | "connected" | "degraded" | "critical" | "down";
+type Tone = "loading" | "connected" | "degraded" | "critical" | "down" | "auth-off";
 
 const POLL_INTERVAL_MS = 30_000;
 
@@ -35,7 +35,12 @@ function classify(state: FetchState): { tone: Tone; label: string } {
 
   if (pipeline === "stalled") return { tone: "critical", label: `Stalled${lagSuffix}` };
   if (pipeline === "degraded") return { tone: "degraded", label: `Degraded${lagSuffix}` };
-  if (pipeline === "unknown") return { tone: "down", label: "Unknown" };
+  if (pipeline === "unknown") {
+    if (!status.auth_enabled) {
+      return { tone: "auth-off", label: "Auth off" };
+    }
+    return { tone: "down", label: "Unknown" };
+  }
   return { tone: "connected", label: "Connected" };
 }
 
@@ -67,5 +72,13 @@ export default function HeaderStatus() {
   }, []);
 
   const { tone, label } = classify(state);
-  return <span className={`header-status ${tone}`}>{label}</span>;
+  const tooltip =
+    tone === "auth-off"
+      ? "Authentication is disabled. Set API_AUTH_ENABLED=true to require login."
+      : undefined;
+  return (
+    <span className={`header-status ${tone}`} title={tooltip}>
+      {label}
+    </span>
+  );
 }

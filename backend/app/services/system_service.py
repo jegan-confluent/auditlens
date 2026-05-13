@@ -500,4 +500,5 @@ def get_system_status(db: Session) -> dict[str, Any]:
         status["cold_storage"] = get_cold_storage_status(db)
     except Exception as exc:
         status["cold_storage"] = {"enabled": False, "status": "error", "error": str(exc)}
+    status["auth_enabled"] = os.getenv("API_AUTH_ENABLED", "false").lower() == "true"
     return status

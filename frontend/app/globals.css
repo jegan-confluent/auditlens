@@ -2482,4 +2482,11 @@ pre {
   padding: 8px 0;
   border-top: 1px solid var(--line);
 }
+
+/* ── Nav badge — auth disabled state ── */
+.header-status.auth-off {
+  background: var(--warn-soft);
+  border-color: #fedf89;
+  color: var(--warn);
+}
 .settings-tab-content { padding-top: 4px; }

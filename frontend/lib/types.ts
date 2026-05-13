@@ -173,6 +173,7 @@ export type SystemStatus = {
     retention_days?: number;
     error?: string;
   } | null;
+  auth_enabled?: boolean;
 };
 
 // Shape of GET /system/forwarder-health (proxies the forwarder's /health).
