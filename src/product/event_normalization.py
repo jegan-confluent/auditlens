@@ -162,9 +162,13 @@ def minimal_normalize(event: dict[str, Any]) -> dict[str, Any]:
 
     # actor: principal extraction handles both dict-shaped principals (raw)
     # and pre-scalarized strings (flat dicts post flatten_audit).
+    # principal_normalized (set by flatten_audit) is preferred over principal
+    # because it has already stripped "User:" and resolved numeric IDs via
+    # principalResourceId — using the raw principal would store "User:u-xxxxx".
     principal_raw = auth_info.get("principal")
     actor = _principal_to_scalar(principal_raw) or str(
-        event.get("principal")
+        event.get("principal_normalized")
+        or event.get("principal")
         or event.get("principal_raw")
         or event.get("actor")
         or event.get("user_display")

@@ -43,6 +43,21 @@ def actor_raw_id(value: str) -> str:
     return text
 
 
+def normalize_principal(principal: str) -> str:
+    """Strip User: prefix from Confluent principal strings.
+
+    Handles the three formats produced by Confluent Cloud audit events:
+      "User:u-zmknkp7"  → "u-zmknkp7"   (user principal)
+      "User:sa-8nwyn7"  → "sa-8nwyn7"   (service account)
+      "u-zmknkp7"       → "u-zmknkp7"   (already clean — unchanged)
+
+    Numeric principals ("User:3958188") are stripped to "3958188"; the
+    caller is responsible for resolving these via principalResourceId
+    (which flatten_audit already does before writing the actor column).
+    """
+    return actor_raw_id(principal)
+
+
 def infer_actor_type(raw_id: str, fallback: str = "") -> str:
     raw = actor_raw_id(raw_id)
     lowered = raw.lower()
