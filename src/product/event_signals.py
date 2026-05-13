@@ -2,6 +2,7 @@ import logging
 from typing import Any
 
 from src.product.event_intelligence import event_digest, event_digest_from_model
+from src.product.event_normalization import BULK_NOISE_METHODS
 
 
 logger = logging.getLogger(__name__)
@@ -50,18 +51,9 @@ def _digest(source: Any) -> dict[str, str]:
     return event_digest_from_model(source)
 
 
-_ALWAYS_NOISE_METHODS = frozenset({
-    # Routine RBAC checks. Confluent emits these constantly; both ALLOW and
-    # DENY outcomes are normal authorization-system traffic and should never
-    # land in action_required, regardless of granted/result.
-    "mds.authorize",
-    # Read-path data plane and platform-internal auth refresh that are
-    # by-definition noise. A failure on any of these is also noise — the
-    # user's explicit instruction is "ALWAYS noise".
-    "kafka.fetch",
-    "flink.authenticate",
-    "scheduledjwksrefresh",
-})
+# Derived directly from BULK_NOISE_METHODS so the two sets cannot diverge.
+# Previously hand-maintained and missing 8 entries that BULK_NOISE_METHODS had.
+_ALWAYS_NOISE_METHODS: frozenset[str] = BULK_NOISE_METHODS
 
 # Read-only methods that don't fit the Get*/List* prefix rule below but are
 # still pure reads (Tableflow's table-listing helpers).
