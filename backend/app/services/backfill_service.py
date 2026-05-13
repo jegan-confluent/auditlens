@@ -904,7 +904,15 @@ def backfill_actor_display_names(
                 AuditEvent._actor_source,
                 AuditEvent._actor_confidence,
             ))
-            .where(AuditEvent._actor_display_name.in_(_UNKNOWN_DISPLAY_NAMES))
+            .where(or_(
+                # Legacy "Unknown X" placeholder rows
+                AuditEvent._actor_display_name.in_(_UNKNOWN_DISPLAY_NAMES),
+                # Raw ID stored as display name — enrichment never produced a name
+                AuditEvent._actor_display_name == AuditEvent.actor,
+                # Fallback/low-confidence enrichment — IAM was never reached or
+                # returned nothing useful (e.g. "User:u-xxx" before prefix fix)
+                AuditEvent._actor_confidence == "low",
+            ))
             .order_by(AuditEvent.id.asc())
             .limit(_ACTOR_BACKFILL_BATCH_SIZE)
         )
