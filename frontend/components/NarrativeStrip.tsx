@@ -1,5 +1,9 @@
+"use client";
+
 import Link from "next/link";
-import type { SummaryResponse } from "../lib/types";
+import { useEffect, useState } from "react";
+import { getActorNarrative, isAbortError } from "../lib/api";
+import type { ActorNarrative, SummaryResponse } from "../lib/types";
 
 function resolveTopActorDisplay(summary: SummaryResponse): { display: string; rawId: string; count: number } | null {
   const group = summary.flow_groups?.[0];
@@ -30,6 +34,26 @@ export default function NarrativeStrip({
   const topActor = resolveTopActorDisplay(summary);
   const destructiveActor = destructive > 0 ? resolveDestructiveActor(summary) : null;
 
+  const [narrative, setNarrative] = useState<ActorNarrative | null>(null);
+
+  useEffect(() => {
+    if (!topActor?.rawId) return;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 2000);
+    getActorNarrative(topActor.rawId, timeWindow, controller.signal)
+      .then(setNarrative)
+      .catch((err: unknown) => {
+        if (!isAbortError(err)) {
+          // non-abort errors → silent fallback (keep narrative null)
+        }
+      })
+      .finally(() => clearTimeout(timeout));
+    return () => {
+      clearTimeout(timeout);
+      controller.abort();
+    };
+  }, [topActor?.rawId, timeWindow]);
+
   return (
     <div className="narrative-strip">
       {/* Line 1 — status headline */}
@@ -46,17 +70,23 @@ export default function NarrativeStrip({
         </span>
       )}
 
-      {/* Line 2 — top actor */}
+      {/* Line 2 — top actor with narrative headline when available */}
       {topActor ? (
         <span className="narrative-line narrative-line-primary">
-          {topActor.count.toLocaleString()} events from{" "}
-          <Link
-            href={`/events?actor=${encodeURIComponent(topActor.rawId)}&time_window=${timeWindow}`}
-            className="narrative-actor-link"
-          >
-            {topActor.display}
-          </Link>{" "}
-          led activity.
+          {narrative ? (
+            narrative.headline
+          ) : (
+            <>
+              {topActor.count.toLocaleString()} events from{" "}
+              <Link
+                href={`/events?actor=${encodeURIComponent(topActor.rawId)}&time_window=${timeWindow}`}
+                className="narrative-actor-link"
+              >
+                {topActor.display}
+              </Link>{" "}
+              led activity.
+            </>
+          )}
         </span>
       ) : null}
 

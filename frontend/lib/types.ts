@@ -292,3 +292,29 @@ export type ActorIpBaseline = {
   new_ips_last_24h: number;
   trusted_ips_configured: boolean;
 };
+
+export type NarrativeChapter = {
+  category: string;
+  event_count: number;
+  peak_signal: string;
+  actions: string[];
+  resources: string[];
+};
+
+export type NarrativeAnomaly = {
+  type: string;
+  description: string;
+  severity: string;
+};
+
+export type ActorNarrative = {
+  actor: string;
+  actor_display_name: string | null;
+  time_window: string;
+  total_events: number;
+  non_noise_count: number;
+  headline: string;
+  chapters: NarrativeChapter[];
+  anomalies: NarrativeAnomaly[];
+  generated_at: string;
+};
