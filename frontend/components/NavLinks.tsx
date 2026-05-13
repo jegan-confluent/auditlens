@@ -1,0 +1,27 @@
+"use client";
+
+import Link from "next/link";
+import { usePathname } from "next/navigation";
+
+const NAV_LINKS = [
+  { href: "/dashboard", label: "Dashboard" },
+  { href: "/events", label: "Events" },
+  { href: "/system", label: "System" },
+  { href: "/settings", label: "Settings" },
+] as const;
+
+export default function NavLinks() {
+  const pathname = usePathname();
+  return (
+    <>
+      {NAV_LINKS.map(({ href, label }) => {
+        const isActive = pathname === href || pathname.startsWith(href + "/");
+        return (
+          <Link key={href} href={href} className={isActive ? "active" : undefined}>
+            {label}
+          </Link>
+        );
+      })}
+    </>
+  );
+}

@@ -1,5 +1,6 @@
 import Link from "next/link";
 import HeaderStatus from "../components/HeaderStatus";
+import NavLinks from "../components/NavLinks";
 import "./globals.css";
 
 export const metadata = {
@@ -21,10 +22,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
               </span>
             </Link>
             <nav className="nav">
-              <Link href="/dashboard">Dashboard</Link>
-              <Link href="/events">Events</Link>
-              <Link href="/system">System</Link>
-              <Link href="/settings">Settings</Link>
+              <NavLinks />
             </nav>
             <HeaderStatus />
           </header>
