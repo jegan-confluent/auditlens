@@ -134,3 +134,23 @@ def sample_request_event():
             }
         }
     }
+
+import os
+import pytest
+
+@pytest.fixture(autouse=True)
+def _clear_confluent_credentials(request):
+    """Ensure CONFLUENT_CLOUD_API_KEY/SECRET don't leak between tests.
+    Tests that explicitly need credentials should set them via monkeypatch.
+    """
+    marker = request.node.get_closest_marker("needs_confluent_credentials")
+    if marker:
+        yield
+        return
+    saved_key = os.environ.pop("CONFLUENT_CLOUD_API_KEY", None)
+    saved_secret = os.environ.pop("CONFLUENT_CLOUD_API_SECRET", None)
+    yield
+    if saved_key is not None:
+        os.environ["CONFLUENT_CLOUD_API_KEY"] = saved_key
+    if saved_secret is not None:
+        os.environ["CONFLUENT_CLOUD_API_SECRET"] = saved_secret
