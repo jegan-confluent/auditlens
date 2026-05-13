@@ -24,7 +24,7 @@ from __future__ import annotations
 from alembic import op
 from sqlalchemy import inspect, text
 
-revision = "0018_normalize_user_prefix_actors"
+revision = "0018_strip_actor_user_prefix"
 down_revision = "0017_add_client_tool"
 branch_labels = None
 depends_on = None
