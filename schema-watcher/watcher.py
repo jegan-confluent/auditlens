@@ -630,10 +630,14 @@ class ConfluentSchemaWatcher:
         # Keep only schema metadata, not full content (to save space)
         history.append(version_entry)
 
-        # Save to file
+        # Save atomically — a SIGKILL mid-write must not corrupt the file.
+        # Corrupted versions.json causes load_version_history() to return []
+        # which treats all current methods as "new" → mass CRITICAL escalation.
         try:
-            with open(self.versions_file, 'wb') as f:
+            tmp_path = self.versions_file.with_suffix(self.versions_file.suffix + ".tmp")
+            with open(tmp_path, 'wb') as f:
                 f.write(orjson.dumps(history, option=orjson.OPT_INDENT_2))
+            os.replace(tmp_path, self.versions_file)
             logger.info(f"Saved version {version_entry['version']} to history")
         except Exception as e:
             logger.error(f"Error saving version history: {e}")
