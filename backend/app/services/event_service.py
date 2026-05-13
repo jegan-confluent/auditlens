@@ -410,8 +410,6 @@ def _matches_derived_filters(
 
 def _apply_derived_prefilters(filters: dict[str, Any], impact_types: set[str], change_types: set[str]) -> dict[str, Any]:
     next_filters = dict(filters)
-    if not next_filters.get("action_category") and (impact_types == {"destructive"} or change_types == {"deleted"}):
-        next_filters["action_category"] = "Delete"
     if not next_filters.get("result") and change_types == {"denied"}:
         next_filters["result"] = "Failure"
     return next_filters
