@@ -99,6 +99,11 @@ def create_app() -> FastAPI:
                 AuthConfig.from_env()
             except Exception as exc:
                 logger.warning("API auth is enabled but no valid tokens are configured; continuing startup: %s", exc)
+        else:
+            logger.warning(
+                "API_AUTH_ENABLED is false — all endpoints are publicly accessible. "
+                "Set API_AUTH_ENABLED=true and configure tokens before any external exposure."
+            )
         # Probe for the noise table once at startup. Absence is non-fatal:
         # /summary/methods, /summary?include_noise, and /events?show_noise
         # all degrade gracefully — but operators benefit from a clear
