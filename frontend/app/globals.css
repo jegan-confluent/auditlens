@@ -2489,4 +2489,102 @@ pre {
   border-color: #fedf89;
   color: var(--warn);
 }
+
+/* ── Filter presets ── */
+.preset-controls {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 4px 0;
+}
+.preset-save-input {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.preset-name-input {
+  padding: 4px 8px;
+  font-size: 13px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  outline: none;
+}
+.preset-name-input:focus {
+  border-color: var(--accent);
+}
+.preset-btn {
+  padding: 4px 10px;
+  font-size: 12px;
+  border-radius: 6px;
+  border: 1px solid var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.preset-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.preset-btn.active {
+  background: var(--accent);
+  color: #fff;
+}
+.preset-btn.secondary {
+  background: transparent;
+  border-color: var(--line);
+  color: var(--muted);
+}
+.preset-limit-msg {
+  font-size: 12px;
+  color: var(--warn);
+}
+.preset-dropdown {
+  position: relative;
+}
+.preset-dropdown-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+  min-width: 200px;
+  z-index: 200;
+  overflow: hidden;
+}
+.preset-dropdown-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 2px 4px 2px 12px;
+}
+.preset-dropdown-item:hover {
+  background: var(--bg);
+}
+.preset-apply-btn {
+  flex: 1;
+  text-align: left;
+  padding: 6px 0;
+  font-size: 13px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text);
+}
+.preset-delete-btn {
+  padding: 4px 8px;
+  font-size: 14px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--muted);
+  border-radius: 4px;
+}
+.preset-delete-btn:hover {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
 .settings-tab-content { padding-top: 4px; }

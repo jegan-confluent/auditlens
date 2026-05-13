@@ -6,6 +6,10 @@ import { activeFilterLabels, applyQuickFilter, type EventFilters } from "../lib/
 export { activeFilterLabels, defaultFilters, type EventFilters } from "../lib/eventFilters";
 
 const ACTOR_DEBOUNCE_MS = 300;
+const PRESETS_KEY = "auditlens_filter_presets";
+const MAX_PRESETS = 5;
+
+type FilterPreset = { name: string; filters: EventFilters };
 
 const quickFilters: Array<{ label: string; patch: Partial<EventFilters> }> = [
   { label: "Needs Attention 🔴", patch: { mode: "decision", signal: "action_required,attention", hide_noise: "true", time_window: "24h" } },
@@ -65,6 +69,54 @@ export default function FilterBar({ filters, options, onChange, onReset }: {
   const [moreOpen, setMoreOpen] = useState(
     () => [filters.actor, filters.resource, filters.cluster_name, filters.environment_name, filters.resource_type, filters.result].some(Boolean)
   );
+
+  const [presets, setPresets] = useState<FilterPreset[]>(() => {
+    if (typeof window === "undefined") return [];
+    try {
+      const raw = localStorage.getItem(PRESETS_KEY);
+      return raw ? (JSON.parse(raw) as FilterPreset[]) : [];
+    } catch {
+      return [];
+    }
+  });
+  const [savingPreset, setSavingPreset] = useState(false);
+  const [presetName, setPresetName] = useState("");
+  const [presetsOpen, setPresetsOpen] = useState(false);
+  const presetMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!presetsOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (presetMenuRef.current && !presetMenuRef.current.contains(e.target as Node)) {
+        setPresetsOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [presetsOpen]);
+
+  const persistPresets = (next: FilterPreset[]) => {
+    setPresets(next);
+    localStorage.setItem(PRESETS_KEY, JSON.stringify(next));
+  };
+
+  const savePreset = () => {
+    const name = presetName.trim();
+    if (!name) return;
+    const next: FilterPreset[] = [...presets, { name, filters: { ...filters } }];
+    persistPresets(next);
+    setPresetName("");
+    setSavingPreset(false);
+  };
+
+  const deletePreset = (index: number) => {
+    persistPresets(presets.filter((_, i) => i !== index));
+  };
+
+  const applyPreset = (preset: FilterPreset) => {
+    onChange(preset.filters);
+    setPresetsOpen(false);
+  };
 
   // Debounced actor search: keep an internal draft so each keystroke doesn't
   // refetch /events. The committed `filters.actor` still drives the URL /
@@ -213,6 +265,70 @@ export default function FilterBar({ filters, options, onChange, onReset }: {
               <option key={opt.value} value={opt.value}>{opt.label}</option>
             ))}
           </select>
+        </div>
+      ) : null}
+
+      {activeLabels.length > 0 ? (
+        <div className="preset-controls">
+          {savingPreset ? (
+            <div className="preset-save-input">
+              <input
+                autoFocus
+                value={presetName}
+                onChange={(e) => setPresetName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") savePreset();
+                  if (e.key === "Escape") { setSavingPreset(false); setPresetName(""); }
+                }}
+                placeholder="Preset name…"
+                className="preset-name-input"
+                aria-label="Preset name"
+              />
+              {presets.length >= MAX_PRESETS ? (
+                <span className="preset-limit-msg">Remove a preset to save a new one.</span>
+              ) : (
+                <button type="button" className="preset-btn" onClick={savePreset}>Save</button>
+              )}
+              <button type="button" className="preset-btn secondary" onClick={() => { setSavingPreset(false); setPresetName(""); }}>Cancel</button>
+            </div>
+          ) : (
+            <button type="button" className="preset-btn" onClick={() => setSavingPreset(true)}>
+              Save preset
+            </button>
+          )}
+          <div className="preset-dropdown" ref={presetMenuRef}>
+            <button
+              type="button"
+              className={`preset-btn${presetsOpen ? " active" : ""}`}
+              onClick={() => setPresetsOpen(!presetsOpen)}
+              disabled={presets.length === 0}
+            >
+              Presets {presets.length > 0 ? `(${presets.length})` : ""}
+            </button>
+            {presetsOpen && presets.length > 0 ? (
+              <div className="preset-dropdown-menu">
+                {presets.map((preset, i) => (
+                  <div key={i} className="preset-dropdown-item">
+                    <button
+                      type="button"
+                      className="preset-apply-btn"
+                      onClick={() => applyPreset(preset)}
+                    >
+                      {preset.name}
+                    </button>
+                    <button
+                      type="button"
+                      className="preset-delete-btn"
+                      aria-label={`Delete preset ${preset.name}`}
+                      onClick={() => deletePreset(i)}
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+          </div>
         </div>
       ) : null}
 
