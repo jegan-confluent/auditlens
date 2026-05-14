@@ -38,6 +38,13 @@ type DataPoint = {
   noise?: number;
 };
 
+const SEGMENT_DEFS = [
+  { key: "noise" as const, label: "Noise", color: "#9ca3af" },
+  { key: "informational" as const, label: "Info", color: "#116466" },
+  { key: "attention" as const, label: "Review", color: "#b54708" },
+  { key: "action_required" as const, label: "Critical", color: "#b42318" },
+] as const;
+
 export default function EventVolumeChart({
   data,
   onBarClick,
@@ -48,6 +55,53 @@ export default function EventVolumeChart({
   height?: number;
 }) {
   if (!data.length) return null;
+
+  // Single bucket: horizontal stacked bar with per-segment count labels
+  if (data.length === 1) {
+    const d = data[0];
+    const total = (d.noise ?? 0) + d.informational + d.attention + d.action_required;
+    if (total === 0) return null;
+
+    const segments = SEGMENT_DEFS
+      .map((def) => ({ ...def, value: def.key === "noise" ? (d.noise ?? 0) : d[def.key] }))
+      .filter((s) => s.value > 0);
+
+    return (
+      <div
+        style={{ marginBottom: 16, padding: "12px 16px", background: "var(--panel)", border: "1px solid var(--line)", borderRadius: 8 }}
+        onClick={() => onBarClick?.(d.label)}
+      >
+        <div style={{ fontSize: 12, fontWeight: 700, color: "var(--muted)", textTransform: "uppercase", marginBottom: 8 }}>
+          Signal Breakdown
+          <span style={{ fontWeight: 400, marginLeft: 8, textTransform: "none" }}>{d.label} · {total.toLocaleString()} events</span>
+        </div>
+        <div style={{ display: "flex", height: 28, borderRadius: 4, overflow: "hidden", gap: 1, cursor: onBarClick ? "pointer" : undefined }}>
+          {segments.map((seg) => (
+            <div
+              key={seg.key}
+              title={`${seg.label}: ${seg.value.toLocaleString()}`}
+              style={{
+                flex: seg.value,
+                background: seg.color,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                fontSize: 11,
+                color: "white",
+                fontWeight: 600,
+                whiteSpace: "nowrap",
+                overflow: "hidden",
+                padding: "0 6px",
+                minWidth: 0,
+              }}
+            >
+              {seg.value.toLocaleString()} {seg.label}
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
 
   const handleClick = (e: unknown) => {
     const event = e as { activeLabel?: string } | null;

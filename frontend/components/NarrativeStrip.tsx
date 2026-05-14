@@ -1,24 +1,17 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
-import { getActorNarrative, isAbortError } from "../lib/api";
-import type { ActorNarrative, SummaryResponse } from "../lib/types";
+import type { SummaryResponse } from "../lib/types";
 
-function resolveTopActorDisplay(summary: SummaryResponse): { display: string; rawId: string; count: number } | null {
+function resolveTopActor(summary: SummaryResponse): { display: string; count: number } | null {
   const group = summary.flow_groups?.[0];
   if (!group) return null;
-  return {
-    display: group.subject_display_name || group.subject,
-    rawId: group.subject,
-    count: group.event_count,
-  };
-}
-
-function resolveDestructiveActor(summary: SummaryResponse): string | null {
-  const group = summary.flow_groups?.find((g) => g.impact_type === "destructive");
-  if (!group) return null;
-  return group.subject_display_name || group.subject || null;
+  const raw = group.subject_display_name || group.subject || "";
+  if (!raw || raw.startsWith("{")) return null;
+  const display = raw.startsWith("User:") ? raw.slice(5)
+    : raw.startsWith("ServiceAccount:") ? raw.slice(15)
+    : raw;
+  return { display, count: group.event_count };
 }
 
 export default function NarrativeStrip({
@@ -29,77 +22,32 @@ export default function NarrativeStrip({
   timeWindow?: string;
 }) {
   const actionRequired = summary.action_required_count ?? 0;
-  const destructive = summary.destructive_count ?? 0;
+  const attention = summary.attention_count ?? 0;
   const failures = summary.failure_count ?? 0;
-  const topActor = resolveTopActorDisplay(summary);
-  const destructiveActor = destructive > 0 ? resolveDestructiveActor(summary) : null;
-
-  const [narrative, setNarrative] = useState<ActorNarrative | null>(null);
-
-  useEffect(() => {
-    if (!topActor?.rawId) return;
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 2000);
-    getActorNarrative(topActor.rawId, timeWindow, controller.signal)
-      .then(setNarrative)
-      .catch((err: unknown) => {
-        if (!isAbortError(err)) {
-          // non-abort errors → silent fallback (keep narrative null)
-        }
-      })
-      .finally(() => clearTimeout(timeout));
-    return () => {
-      clearTimeout(timeout);
-      controller.abort();
-    };
-  }, [topActor?.rawId, timeWindow]);
+  const topActor = resolveTopActor(summary);
 
   return (
     <div className="narrative-strip">
-      {/* Line 1 — status headline */}
       {actionRequired > 0 ? (
         <Link
           href={`/events?signal=action_required&time_window=${timeWindow}`}
           className="narrative-line narrative-line-critical"
         >
-          🔴 {actionRequired} event{actionRequired === 1 ? "" : "s"} need immediate attention.
+          ⚠ {actionRequired} event{actionRequired === 1 ? "" : "s"} need action
+          {topActor
+            ? ` — ${topActor.display} is most active with ${topActor.count.toLocaleString()} changes in the last ${timeWindow}.`
+            : "."}
         </Link>
+      ) : attention > 0 ? (
+        <span className="narrative-line narrative-line-ok">
+          ✓ No critical events — {attention.toLocaleString()} event{attention === 1 ? "" : "s"} under review in the last {timeWindow}.
+        </span>
       ) : (
         <span className="narrative-line narrative-line-ok">
-          ✅ Nothing critical in the last {timeWindow}.
+          ✓ All clear in the last {timeWindow}.
         </span>
       )}
-
-      {/* Line 2 — top actor with narrative headline when available */}
-      {topActor ? (
-        <span className="narrative-line narrative-line-primary">
-          {narrative ? (
-            narrative.headline
-          ) : (
-            <>
-              {topActor.count.toLocaleString()} events from{" "}
-              <Link
-                href={`/events?actor=${encodeURIComponent(topActor.rawId)}&time_window=${timeWindow}`}
-                className="narrative-actor-link"
-              >
-                {topActor.display}
-              </Link>{" "}
-              led activity.
-            </>
-          )}
-        </span>
-      ) : null}
-
-      {/* Line 3 — destructive or failures (conditional) */}
-      {destructive > 0 ? (
-        <Link
-          href={`/events?action_category=Delete&signal=action_required&time_window=${timeWindow}`}
-          className="narrative-line narrative-line-warning"
-        >
-          {destructive} destructive action{destructive === 1 ? "" : "s"}
-          {destructiveActor ? ` — ${destructiveActor}` : ""}.
-        </Link>
-      ) : failures > 0 ? (
+      {failures > 0 ? (
         <Link
           href={`/events?result=Failure&time_window=${timeWindow}`}
           className="narrative-line narrative-line-secondary"

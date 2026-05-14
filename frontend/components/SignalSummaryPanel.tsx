@@ -12,13 +12,59 @@ const SIGNAL_CARDS: ReadonlyArray<{
   className: string;
   icon: string;
   label: string;
+  contextLabel: string;
   alertClass?: (count: number) => string;
 }> = [
-  { fieldKey: "noise_count", className: "noise", icon: "🔇", label: "Noise" },
-  { fieldKey: "informational_count", className: "info", icon: "ℹ️", label: "Info" },
-  { fieldKey: "attention_count", className: "review", icon: "👀", label: "Review", alertClass: (c) => c > 0 ? "amber" : "" },
-  { fieldKey: "action_required_count", className: "action", icon: "🔴", label: "Action", alertClass: (c) => c > 0 ? "red" : "" },
+  { fieldKey: "noise_count", className: "noise", icon: "🔇", label: "Noise", contextLabel: "all clear" },
+  { fieldKey: "informational_count", className: "info", icon: "ℹ️", label: "Info", contextLabel: "informational" },
+  { fieldKey: "attention_count", className: "review", icon: "👀", label: "Review", contextLabel: "monitored", alertClass: (c) => c > 0 ? "amber" : "" },
+  { fieldKey: "action_required_count", className: "action", icon: "🔴", label: "Action", contextLabel: "needs review", alertClass: (c) => c > 0 ? "red" : "" },
 ];
+
+type ActorFlow = {
+  subject: string;
+  subject_display_name: string | null | undefined;
+  signal_type: string;
+  count: number;
+  last_seen: string;
+};
+
+function groupFlowsByActor(groups: SummaryResponse["flow_groups"]): ActorFlow[] {
+  const map = new Map<string, ActorFlow>();
+  for (const g of groups) {
+    const key = `${g.subject}|${g.signal_type}`;
+    const existing = map.get(key);
+    if (!existing) {
+      map.set(key, {
+        subject: g.subject,
+        subject_display_name: g.subject_display_name,
+        signal_type: g.signal_type,
+        count: g.event_count,
+        last_seen: g.last_seen,
+      });
+    } else {
+      existing.count += g.event_count;
+      if (g.last_seen > existing.last_seen) existing.last_seen = g.last_seen;
+    }
+  }
+  return [...map.values()].sort((a, b) => b.count - a.count);
+}
+
+function actorSignalPatch(subject: string, signalType: string): Partial<EventFilters> {
+  return {
+    mode: signalType === "noise" ? "audit_trail" : "decision",
+    actor: subject || "",
+    signal: signalType || "",
+    hide_noise: signalType === "noise" ? "false" : "true",
+  };
+}
+
+function signalEventLabel(signalType: string): string {
+  if (signalType === "action_required") return "action-needed";
+  if (signalType === "attention") return "review-needed";
+  if (signalType === "noise") return "routine";
+  return "informational";
+}
 
 function resourceTypeForFamily(family: string): string {
   // Mirrors src/product/resource_intelligence.RESOURCE_TYPE_ALIASES (the
@@ -119,10 +165,11 @@ export default function SignalSummaryPanel({ summary, onApplyFlow, currentSignal
   onApplyFlow?: (patch: Partial<EventFilters>) => void;
   currentSignal?: string;
 }) {
+  const actorFlows = groupFlowsByActor(summary.flow_groups);
   return (
     <section className={`signal-panel ${summary.overall_status}`}>
       <div className="signal-stat-cards">
-        {SIGNAL_CARDS.map(({ fieldKey, className, icon, label, alertClass }) => {
+        {SIGNAL_CARDS.map(({ fieldKey, className, icon, label, contextLabel, alertClass }) => {
           const signalType = signalFromField(fieldKey);
           const count = summary[fieldKey];
           const isActive = currentSignal === signalType;
@@ -144,32 +191,36 @@ export default function SignalSummaryPanel({ summary, onApplyFlow, currentSignal
               <span className="signal-stat-icon" aria-hidden>{icon}</span>
               <span className="signal-stat-count">{count.toLocaleString()}</span>
               <span className="signal-stat-label">{label}</span>
+              <span className="signal-stat-context">{contextLabel}</span>
             </button>
           );
         })}
       </div>
-      {summary.flow_groups.length ? (
+      {actorFlows.length ? (
         <div className="flow-list">
           <div className="eyebrow">Top activity flows</div>
-          {summary.flow_groups.slice(0, 5).map((group) => {
-            const patch = flowPatch(group);
-            const clickable = Boolean(onApplyFlow && (patch.actor || patch.signal || patch.resource_type || patch.resource));
-            const signalClass = group.signal_type === "action_required" ? "action_required" : group.signal_type === "attention" ? "attention" : "informational";
+          {actorFlows.slice(0, 5).map((flow) => {
+            const patch = actorSignalPatch(flow.subject, flow.signal_type);
+            const display = formatSubject(flow.subject, flow.subject_display_name);
+            const evtLabel = signalEventLabel(flow.signal_type);
+            const clickable = Boolean(onApplyFlow && (patch.actor || patch.signal));
+            const signalClass = flow.signal_type === "action_required" ? "action_required"
+              : flow.signal_type === "attention" ? "attention"
+              : "informational";
             const ButtonOrDiv = clickable ? "button" : "div";
             return (
               <ButtonOrDiv
-                key={`${group.group_title}-${group.first_seen}`}
+                key={`${flow.subject}|${flow.signal_type}`}
                 type={clickable ? "button" : undefined}
                 className={`flow-row ${signalClass}`}
                 onClick={clickable ? () => onApplyFlow?.(patch) : undefined}
               >
-                <span className="flow-icon" aria-hidden>{iconForSignal(group.signal_type)}</span>
+                <span className="flow-icon" aria-hidden>{iconForSignal(flow.signal_type)}</span>
                 <span className="flow-body">
-                  <span className="flow-title">{group.subject ? group.group_title.replace(group.subject, formatSubject(group.subject, group.subject_display_name)) : group.group_title}</span>
-                  <span className="flow-meta">
-                    {formatSubject(group.subject, group.subject_display_name)} · {formatAge(group.last_seen)}
-                    {group.event_count > 1 ? ` · ${group.event_count.toLocaleString()} events` : ""}
+                  <span className="flow-title">
+                    {display} — {flow.count.toLocaleString()} {evtLabel} event{flow.count === 1 ? "" : "s"}
                   </span>
+                  <span className="flow-meta">{formatAge(flow.last_seen)}</span>
                 </span>
                 <span className="flow-arrow" aria-hidden>{clickable ? "→" : ""}</span>
               </ButtonOrDiv>

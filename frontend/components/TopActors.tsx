@@ -7,6 +7,26 @@ import type { AuditEvent, EventListResponse } from "../lib/types";
 import { normalizeActorDisplay } from "../lib/utils";
 
 const SERVICE_ACCOUNT_TYPES = new Set(["service_account", "serviceaccount", "service-account"]);
+
+function buildActorHref(rawId: string, display: string, timeWindow: string): string | null {
+  if (!rawId) return null;
+  if (rawId.startsWith("{") || rawId.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(rawId) as Record<string, unknown>;
+      const ea = parsed.externalAccount as Record<string, unknown> | undefined;
+      if (typeof ea?.subject === "string" && ea.subject) {
+        return `/events?actor=${encodeURIComponent(ea.subject)}&time_window=${timeWindow}`;
+      }
+    } catch {
+      // ignore
+    }
+    if (display && !display.startsWith("{")) {
+      return `/events?actor=${encodeURIComponent(display)}&time_window=${timeWindow}`;
+    }
+    return null;
+  }
+  return `/events?actor=${encodeURIComponent(rawId)}&time_window=${timeWindow}`;
+}
 const UNKNOWN_PRINCIPAL_LABELS = new Set(["unknown actor", "unknown user", "unknown service account", "unknown principal"]);
 
 type ActorSummary = {
@@ -107,6 +127,7 @@ export default function TopActors({ timeWindow = "24h" }: { timeWindow?: string 
   const [actors, setActors] = useState<ActorSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [scanned, setScanned] = useState(0);
+  const [totalActors, setTotalActors] = useState(0);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -117,8 +138,10 @@ export default function TopActors({ timeWindow = "24h" }: { timeWindow?: string 
     });
     getEvents(params, controller.signal)
       .then((response: EventListResponse) => {
+        const all = aggregate(response.items, Infinity);
         setScanned(response.items.length);
-        setActors(aggregate(response.items));
+        setTotalActors(all.length);
+        setActors(all.slice(0, 5));
       })
       .catch((err: Error) => {
         if (isAbortError(err)) return;
@@ -158,22 +181,29 @@ export default function TopActors({ timeWindow = "24h" }: { timeWindow?: string 
       <p className="muted">Most active principals in the last 24 hours (sample of {scanned.toLocaleString()} events).</p>
       <ul className="top-actors-list">
         {actors.map((actor) => {
-          const filterValue = actor.rawId || actor.key;
-          const href = `/events?actor=${encodeURIComponent(filterValue)}&time_window=${timeWindow}`;
+          const href = buildActorHref(actor.rawId || actor.key, actor.display, timeWindow);
           const mostly = actor.topCategories.length ? `mostly: ${actor.topCategories.join(", ")}` : "";
+          const inner = (
+            <>
+              <span className="top-actor-icon">{actor.isServiceAccount ? "🤖" : "👤"}</span>
+              <span className={`top-actor-name${actor.unenriched ? " unenriched" : ""}`}>{actor.display}</span>
+              {actor.isServiceAccount ? <span className="actor-badge sa" title="Service account">SA</span> : null}
+              <span className="top-actor-count">{actor.count.toLocaleString()} event{actor.count === 1 ? "" : "s"}</span>
+              {mostly ? <span className="top-actor-mostly">{mostly}</span> : null}
+              {actor.hasDeletes ? <span className="top-actor-flag" title="Performed delete operations today">⚠ has deletes</span> : null}
+            </>
+          );
           return (
             <li key={actor.key} className={`top-actor-row${actor.hasDeletes ? " has-deletes" : ""}`}>
-              <Link href={href}>
-                <span className="top-actor-icon">{actor.isServiceAccount ? "🤖" : "👤"}</span>
-                <span className={`top-actor-name${actor.unenriched ? " unenriched" : ""}`}>{actor.display}</span>
-                {actor.isServiceAccount ? <span className="actor-badge sa" title="Service account">SA</span> : null}
-                <span className="top-actor-count">{actor.count.toLocaleString()} event{actor.count === 1 ? "" : "s"}</span>
-                {mostly ? <span className="top-actor-mostly">{mostly}</span> : null}
-                {actor.hasDeletes ? <span className="top-actor-flag" title="Performed delete operations today">⚠ has deletes</span> : null}
-              </Link>
+              {href ? <Link href={href}>{inner}</Link> : <span>{inner}</span>}
             </li>
           );
         })}
+        {totalActors > 5 ? (
+          <li className="top-actor-view-all">
+            <Link href={`/events?time_window=${timeWindow}`}>View all {totalActors} actors →</Link>
+          </li>
+        ) : null}
       </ul>
     </section>
   );
