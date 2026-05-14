@@ -291,6 +291,20 @@ After changing, rebuild the frontend:
 docker compose build frontend && docker compose up -d frontend
 ```
 
+### Postgres Auto-Tuning
+
+AuditLens automatically tunes Postgres at container start via `infra/postgres/tune.sh`. It reads `/proc/meminfo` and sets `shared_buffers`, `effective_cache_size`, `work_mem`, `maintenance_work_mem`, and `wal_buffers` relative to available RAM. No manual configuration required.
+
+| Instance | RAM | shared_buffers | work_mem | Notes |
+|----------|-----|----------------|----------|-------|
+| t3.small | 2GB | 512MB | 4MB | Minimum supported |
+| t3.medium | 4GB | 1GB | 8MB | Dev/demo |
+| t3.large | 8GB | 2GB | 16MB | Recommended |
+| t3.xlarge | 16GB | 4GB | 32MB | High volume |
+| t3.2xlarge | 32GB | 8GB | 64MB | Enterprise |
+
+Tuning happens automatically at container start. No manual configuration required.
+
 ### Postgres disk filling up
 
 The default retention is 7 days for events and 3 days for noise. To reduce storage:
