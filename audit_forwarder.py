@@ -30,14 +30,10 @@ import re
 import queue
 import threading
 from concurrent.futures import ThreadPoolExecutor, Future
-import csv
 import random
 from datetime import datetime, timezone
-from http.server import HTTPServer, BaseHTTPRequestHandler
 from collections import deque
 from pathlib import Path
-from io import StringIO
-from urllib.parse import parse_qs, urlparse
 from dotenv import load_dotenv
 from cachetools import TTLCache
 
