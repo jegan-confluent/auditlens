@@ -1,7 +1,7 @@
 # Makefile for Audit Forwarder
 # Production-ready build, test, and deployment tasks
 
-.PHONY: help build build-alpine build-distroless test scan clean deploy migrate setup start stop restart status monitoring
+.PHONY: help build build-alpine build-distroless test scan clean deploy deploy-check migrate setup start stop restart status monitoring logs health ps sync
 
 ##############################################################################
 # Quickstart Lifecycle (Phase 3 — single-command install + service control)
@@ -53,6 +53,12 @@ VERSION := 2.1.0
 REGISTRY ?= localhost
 DOCKER_BUILDKIT := 1
 export DOCKER_BUILDKIT
+
+# EC2 deployment config — update before running make deploy
+EC2_IP    ?= 98.95.144.160
+EC2_USER  ?= ec2-user
+PEM       ?= ~/.ssh/auditlens.pem
+REMOTE     = $(EC2_USER)@$(EC2_IP):~/AuditLens/
 
 # Colors for output
 GREEN  := \033[0;32m
@@ -177,18 +183,50 @@ stop-compose: ## Stop docker-compose services
 	docker-compose down
 	@echo "$(GREEN)✓ Services stopped$(NC)"
 
-logs: ## View container logs
-	docker logs -f audit-forwarder
+logs: ## Tail EC2 prod logs
+	ssh -i $(PEM) $(EC2_USER)@$(EC2_IP) \
+		"cd ~/AuditLens && \
+		docker compose -f docker-compose.prod.yml logs -f --tail=50"
 
 ##############################################################################
-# Kubernetes Deployment
+# EC2 Deployment
 ##############################################################################
 
-deploy: ## Deploy to Kubernetes
-	@echo "$(GREEN)Deploying to Kubernetes...$(NC)"
-	kubectl apply -f deploy/kubernetes/deployment.yaml
-	kubectl apply -f deploy/kubernetes/service.yaml
-	@echo "$(GREEN)✓ Deployment complete$(NC)"
+deploy: ## Rsync to EC2 + rebuild containers
+	@echo "→ Syncing to EC2 $(EC2_IP)..."
+	rsync -avz --progress \
+		--exclude='.venv' \
+		--exclude='node_modules' \
+		--exclude='frontend/.next' \
+		--exclude='__pycache__' \
+		--exclude='**/*.pyc' \
+		--exclude='.git' \
+		--exclude='logs' \
+		--exclude='data' \
+		--exclude='*.log' \
+		--exclude='.env' \
+		--exclude='.secrets' \
+		./ $(REMOTE)
+	@echo "→ Rebuilding and restarting on EC2..."
+	ssh -i $(PEM) $(EC2_USER)@$(EC2_IP) \
+		"cd ~/AuditLens && \
+		docker compose -f docker-compose.prod.yml up -d --build 2>&1 | tail -5"
+	@echo "✅  Deploy complete."
+
+deploy-check: ## Dry-run rsync (shows what would change)
+	rsync -avzn --progress \
+		--exclude='.venv' \
+		--exclude='node_modules' \
+		--exclude='frontend/.next' \
+		--exclude='__pycache__' \
+		--exclude='**/*.pyc' \
+		--exclude='.git' \
+		--exclude='logs' \
+		--exclude='data' \
+		--exclude='*.log' \
+		--exclude='.env' \
+		--exclude='.secrets' \
+		./ $(REMOTE)
 
 deploy-aws: ## Deploy to AWS EKS
 	@echo "$(GREEN)Deploying to AWS EKS...$(NC)"
@@ -201,6 +239,11 @@ deploy-gcp: ## Deploy to GCP GKE
 deploy-azure: ## Deploy to Azure AKS
 	@echo "$(GREEN)Deploying to Azure AKS...$(NC)"
 	./deploy/cloud/azure/setup-azure.sh
+
+ps: ## Show EC2 container status
+	ssh -i $(PEM) $(EC2_USER)@$(EC2_IP) \
+		"cd ~/AuditLens && \
+		docker compose -f docker-compose.prod.yml ps"
 
 k8s-status: ## Check Kubernetes deployment status
 	@echo "$(GREEN)Checking deployment status...$(NC)"
@@ -266,9 +309,21 @@ metrics: ## View Prometheus metrics
 	@echo "$(GREEN)Fetching metrics...$(NC)"
 	curl -s http://localhost:8003/metrics | grep audit_
 
-health: ## Check health endpoint
-	@echo "$(GREEN)Checking health...$(NC)"
-	curl -s http://localhost:8003/health | jq
+health: ## Check EC2 forwarder + API health
+	@echo "=== Forwarder ==="
+	ssh -i $(PEM) $(EC2_USER)@$(EC2_IP) \
+		"curl -s http://localhost:8003/health | \
+		python3 -c \"import json,sys; d=json.load(sys.stdin); \
+		print('Status:', d.get('status')); \
+		print('Processed:', d.get('processed_total', 0)); \
+		print('Lag:', f\\\"{d.get('consumer_lag', 0):,}\\\"); \
+		print('DB Writer:', d.get('db_writer_status', 'n/a'))\""
+	@echo ""
+	@echo "=== API ==="
+	ssh -i $(PEM) $(EC2_USER)@$(EC2_IP) \
+		"curl -s http://localhost:8080/health | \
+		python3 -c \"import json,sys; d=json.load(sys.stdin); \
+		print('Status:', d.get('status'))\""
 
 ##############################################################################
 # Utilities
@@ -286,4 +341,14 @@ version: ## Show version information
 	@echo "Docker: $$(docker --version)"
 	@echo "Trivy: $$(trivy --version | head -1)"
 
-.PHONY: help build build-alpine build-distroless test scan clean deploy migrate
+sync: ## Sync files to EC2 without restart
+	rsync -avz -e "ssh -i $(PEM)" \
+	  --exclude='.git' \
+	  --exclude='.env' \
+	  --exclude='.secrets' \
+	  --exclude='.venv' \
+	  --exclude='__pycache__' \
+	  --exclude='*.pyc' \
+	  --exclude='node_modules' \
+	  --exclude='.next' \
+	  ./ $(REMOTE)
