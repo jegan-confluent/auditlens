@@ -1,6 +1,6 @@
 import type { ActorIpBaseline, ActorNarrative, AuditEvent, EventListResponse, FilterOptions, ForwarderHealth, PatternListResponse, SummaryResponse, SystemStatus, VacuumResult } from "./types";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8080";
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost/api";
 
 async function request<T>(path: string, signal?: AbortSignal): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, { cache: "no-store", signal });

@@ -6,6 +6,9 @@ VIEWER token sufficient for retention category reads.
 """
 from __future__ import annotations
 
+import os
+import time
+
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -20,6 +23,7 @@ router = APIRouter(tags=["settings"])
 _SECRET_KEYS: dict[str, set[str]] = {
     "cold_storage": {"aws_secret_key", "gcs_credentials"},
     "notifications": {"webhook_url"},
+    "schema_registry": {"api_key", "api_secret"},
 }
 
 
@@ -102,3 +106,57 @@ def test_notification(
         return {"success": True, "message": f"Notification config accessible for '{destination_name}'"}
     except Exception as exc:
         return {"success": False, "message": str(exc)}
+
+
+def _get_sr_creds(db: Session) -> tuple[str, str, str]:
+    """Return (url, api_key, api_secret) from settings table, falling back to env vars."""
+    url = settings_service.get(db, "schema_registry", "url") or os.getenv("SCHEMA_REGISTRY_URL", "")
+    api_key = settings_service.get(db, "schema_registry", "api_key") or os.getenv("SCHEMA_REGISTRY_API_KEY", "")
+    api_secret = settings_service.get(db, "schema_registry", "api_secret") or os.getenv("SCHEMA_REGISTRY_API_SECRET", "")
+    return url, api_key, api_secret
+
+
+@router.get("/settings/schema_registry/status")
+def get_sr_status(
+    _: None = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> dict:
+    url, api_key, api_secret = _get_sr_creds(db)
+    if not url:
+        return {"configured": False, "url": None, "subjects": [], "error": None}
+    try:
+        from confluent_kafka.schema_registry import SchemaRegistryClient  # type: ignore[import-untyped]
+        conf: dict = {"url": url}
+        if api_key and api_secret:
+            conf["basic.auth.user.info"] = f"{api_key}:{api_secret}"
+        client = SchemaRegistryClient(conf)
+        subjects: list[str] = client.get_subjects()
+        return {"configured": True, "url": url, "subjects": subjects, "error": None}
+    except ImportError:
+        return {"configured": True, "url": url, "subjects": [], "error": "confluent-kafka not installed"}
+    except Exception as exc:
+        return {"configured": True, "url": url, "subjects": [], "error": str(exc)}
+
+
+@router.post("/settings/test_sr")
+def test_sr(
+    _: None = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> dict:
+    url, api_key, api_secret = _get_sr_creds(db)
+    if not url:
+        return {"ok": False, "latency_ms": None, "error": "Schema Registry URL not configured"}
+    try:
+        from confluent_kafka.schema_registry import SchemaRegistryClient  # type: ignore[import-untyped]
+        conf: dict = {"url": url}
+        if api_key and api_secret:
+            conf["basic.auth.user.info"] = f"{api_key}:{api_secret}"
+        client = SchemaRegistryClient(conf)
+        t0 = time.monotonic()
+        client.get_subjects()
+        latency_ms = round((time.monotonic() - t0) * 1000)
+        return {"ok": True, "latency_ms": latency_ms, "error": None}
+    except ImportError:
+        return {"ok": False, "latency_ms": None, "error": "confluent-kafka not installed"}
+    except Exception as exc:
+        return {"ok": False, "latency_ms": None, "error": str(exc)}

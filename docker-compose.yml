@@ -57,6 +57,10 @@ services:
       - API_EXPORT_MAX_ROWS=${API_EXPORT_MAX_ROWS:-5000}
       - API_EXPORT_MAX_HOURS=${API_EXPORT_MAX_HOURS:-168}
       - MEMORY_LIMIT_MB=512
+      # Schema Registry — optional Avro serialization
+      - SCHEMA_REGISTRY_URL=${SCHEMA_REGISTRY_URL:-}
+      - SCHEMA_REGISTRY_API_KEY=${SCHEMA_REGISTRY_API_KEY:-}
+      - SCHEMA_REGISTRY_API_SECRET=${SCHEMA_REGISTRY_API_SECRET:-}
     volumes:
       - ./audit_forwarder.py:/app/audit_forwarder.py:ro
       - ./src:/app/src:ro

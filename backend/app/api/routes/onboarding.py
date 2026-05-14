@@ -67,6 +67,7 @@ async def discover(request: Request, body: DiscoverRequest) -> dict[str, Any]:
             env_id = env.get("id", "")
             env_name = env.get("display_name") or env.get("name") or env_id
             clusters: list[dict[str, Any]] = []
+            schema_registry: dict[str, Any] | None = None
             try:
                 cr = await client.get(
                     f"{base}/cmk/v2/clusters",
@@ -92,7 +93,29 @@ async def discover(request: Request, body: DiscoverRequest) -> dict[str, Any]:
                             tableflow_eligible_count += 1
             except Exception:
                 pass
-            environments.append({"id": env_id, "name": env_name, "clusters": clusters})
+            try:
+                sr_resp = await client.get(
+                    f"{base}/srcm/v3/clusters",
+                    params={"environment": env_id},
+                )
+                if sr_resp.is_success:
+                    sr_data = (sr_resp.json().get("data") or [])
+                    if sr_data:
+                        sr = sr_data[0]
+                        sr_spec = sr.get("spec", {})
+                        schema_registry = {
+                            "id": sr.get("id", ""),
+                            "endpoint": sr_spec.get("http_endpoint", ""),
+                            "package": sr_spec.get("package", ""),
+                        }
+            except Exception:
+                pass
+            environments.append({
+                "id": env_id,
+                "name": env_name,
+                "clusters": clusters,
+                "schema_registry": schema_registry,
+            })
 
     return {
         "environments": environments,

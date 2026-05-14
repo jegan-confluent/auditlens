@@ -1,0 +1,17 @@
+{
+  "namespace": "io.confluent.auditlens",
+  "name": "AuditNoiseEvent",
+  "type": "record",
+  "doc": "Lean noise event from audit_events_noise — bulk routine activity (auth checks, reads).",
+  "fields": [
+    {"name": "id",                "type": ["null", "int"],    "default": null},
+    {"name": "event_fingerprint", "type": "string"},
+    {"name": "timestamp",         "type": "string",           "doc": "ISO 8601 UTC"},
+    {"name": "actor",             "type": ["null", "string"], "default": null},
+    {"name": "action",            "type": ["null", "string"], "default": null},
+    {"name": "resource_name",     "type": ["null", "string"], "default": null},
+    {"name": "cluster_id",        "type": ["null", "string"], "default": null},
+    {"name": "source_ip",         "type": ["null", "string"], "default": null},
+    {"name": "is_routine_noise",  "type": "boolean",          "default": true}
+  ]
+}

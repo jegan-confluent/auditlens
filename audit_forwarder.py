@@ -1972,26 +1972,47 @@ def main():
     if _shutdown_requested:
         return
 
-    # Load schema (optional - only if Schema Registry is configured)
-    json_serializer = None
-    if SCHEMA_REGISTRY_URL:
+    # Schema Registry — optional Avro serialization for audit.enriched.v1.
+    # Falls back to orjson JSON production transparently if SR is not configured
+    # or if registration fails (e.g. network issues at startup).
+    from src.product.schema_registry import (
+        get_sr_client, register_schema, get_avro_serializer, project_enriched,
+    )
+    _sr_client = get_sr_client()
+    _enriched_serializer = None
+    _noise_serializer = None
+
+    if _sr_client:
         try:
-            sr = SchemaRegistryClient({
-                "url": SCHEMA_REGISTRY_URL,
-                "basic.auth.user.info": f"{SCHEMA_REGISTRY_KEY}:{SCHEMA_REGISTRY_SECRET}"
-            })
-            subject = f"{AUDIT_ENRICHED_TOPIC}-value"
-            meta = sr.get_latest_version(subject)
-            json_serializer = JSONSerializer(
-                meta.schema.schema_str, sr,
-                to_dict=None,
-                conf={"auto.register.schemas": False}
+            _SCHEMA_DIR = os.path.join(os.path.dirname(__file__), "src", "schema")
+            register_schema(
+                _sr_client,
+                f"{AUDIT_ENRICHED_TOPIC}-value",
+                os.path.join(_SCHEMA_DIR, "audit_enriched_v1.avsc"),
             )
-            logger.info("Loaded schema v%d for %s", meta.version, subject)
-        except Exception as e:
-            logger.error("Schema Registry load failed (continuing without Schema Registry): %s", e)
+            register_schema(
+                _sr_client,
+                "audit.noise.v1-value",
+                os.path.join(_SCHEMA_DIR, "audit_noise_v1.avsc"),
+            )
+            _enriched_serializer = get_avro_serializer(
+                _sr_client,
+                os.path.join(_SCHEMA_DIR, "audit_enriched_v1.avsc"),
+            )
+            _noise_serializer = get_avro_serializer(
+                _sr_client,
+                os.path.join(_SCHEMA_DIR, "audit_noise_v1.avsc"),
+            )
+            logger.info(
+                "Schema Registry configured — producing with Avro serialization"
+            )
+        except Exception as _sr_exc:
+            logger.warning(
+                "Schema Registry init failed (%s) — falling back to JSON production",
+                _sr_exc,
+            )
             record_schema_registry_failure()
-            json_serializer = None
+            _sr_client = None
     else:
         logger.info("Schema Registry not configured - using JSON serialization without schema validation")
 
@@ -2456,7 +2477,15 @@ def main():
                                     logger.warning("IP alert dispatch failed: %s", _ip_exc)
 
                     safe_produce(producer, AUDIT_NORMALIZED_TOPIC, event_key, orjson.dumps(normalized_event))
-                    safe_produce(producer, AUDIT_ENRICHED_TOPIC, event_key, orjson.dumps(enriched_event))
+                    if _enriched_serializer:
+                        from confluent_kafka.serialization import SerializationContext, MessageField  # noqa: PLC0415
+                        _enriched_value = _enriched_serializer(
+                            project_enriched(enriched_event),
+                            SerializationContext(AUDIT_ENRICHED_TOPIC, MessageField.VALUE),
+                        )
+                    else:
+                        _enriched_value = orjson.dumps(enriched_event)
+                    safe_produce(producer, AUDIT_ENRICHED_TOPIC, event_key, _enriched_value)
                     api_state.record_enriched_event(enriched_event)
                     metrics.record_processed(0, enriched_event.get("time"))
                     record_event_metrics(enriched_event)
