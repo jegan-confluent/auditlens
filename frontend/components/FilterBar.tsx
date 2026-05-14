@@ -59,10 +59,11 @@ export default function FilterBar({ filters, options, onChange, onReset }: {
     filters.environment_name,
     filters.resource_type,
     filters.result,
+    filters.production_hint,
   ].filter(Boolean).length;
 
   const [moreOpen, setMoreOpen] = useState(
-    () => [filters.actor, filters.resource, filters.cluster_name, filters.environment_name, filters.resource_type, filters.result].some(Boolean)
+    () => [filters.actor, filters.resource, filters.cluster_name, filters.environment_name, filters.resource_type, filters.result, filters.production_hint].some(Boolean)
   );
 
   const [presets, setPresets] = useState<FilterPreset[]>(() => {
@@ -294,6 +295,22 @@ export default function FilterBar({ filters, options, onChange, onReset }: {
               <option key={opt.value} value={opt.value}>{opt.label}</option>
             ))}
           </select>
+          <div className="signal-pills" role="group" aria-label="Environment filter">
+            {[
+              { value: "", label: "All envs" },
+              { value: "production", label: "Production" },
+              { value: "non_production", label: "Non-production" },
+            ].map((opt) => (
+              <button
+                key={opt.value}
+                type="button"
+                className={`signal-pill${filters.production_hint === opt.value ? " active" : ""}`}
+                onClick={() => update("production_hint", opt.value)}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
         </div>
       ) : null}
 

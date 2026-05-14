@@ -95,6 +95,10 @@ def events(
         max_length=200,
         description="Free-text search across event title, actor, resource name, and request ID.",
     ),
+    production_hint: str | None = Query(
+        default=None,
+        description="Filter by production_hint value. Use 'production', 'non_production' (matches anything except production), or exact value.",
+    ),
     db: Session = Depends(get_db),
 ):
     if show_noise:
@@ -184,6 +188,7 @@ def events(
             cursor=cursor,
             include_suppressed=include_suppressed,
             q=q,
+            production_hint=production_hint,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

@@ -110,14 +110,59 @@ export default function EventDetailDrawer({ event, onClose, onTriage }: {
         </div>
       ) : null}
 
-      <section className="why-this-matters">
-        <div className="eyebrow">Why this matters</div>
-        <strong>{reason || event.decision_label || "Audit activity"}</strong>
-        {recommended ? <p>→ Recommended: {recommended}</p> : null}
-      </section>
+      {(event.signal_type === "action_required" || event.signal_type === "attention") ? (
+        <section className="why-this-matters">
+          <div className="eyebrow" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            Why this matters
+            {event.risk_level && event.risk_level !== "unknown" && event.risk_level !== "-" ? (
+              <span style={{
+                display: "inline-block",
+                padding: "1px 7px",
+                borderRadius: 4,
+                fontSize: "0.7em",
+                fontWeight: 700,
+                letterSpacing: "0.04em",
+                textTransform: "uppercase",
+                color: "#fff",
+                background: event.risk_level === "critical" ? "#b42318"
+                  : event.risk_level === "high" ? "#b54708"
+                  : event.risk_level === "medium" ? "#ca8a04"
+                  : "#9ca3af",
+              }}>{event.risk_level}</span>
+            ) : null}
+          </div>
+          {(event.decision_label || reason) ? (
+            <div style={{ marginBottom: 8 }}>
+              <div className="detail-label">Decision</div>
+              <strong>{event.decision_label || "Audit activity"}</strong>
+              {reason ? <p style={{ margin: "2px 0 0" }}>{reason}</p> : null}
+            </div>
+          ) : null}
+          {recommended ? (
+            <div style={{ marginBottom: 8 }}>
+              <div className="detail-label">What to do</div>
+              <p style={{ margin: 0 }}>→ {recommended}</p>
+            </div>
+          ) : null}
+          {(event.resource_criticality || event.blast_radius_hint || event.production_hint) ? (
+            <div>
+              <div className="detail-label">Resource context</div>
+              {event.resource_criticality && event.resource_criticality !== "-" ? <p style={{ margin: "2px 0 0" }}>Criticality: {event.resource_criticality}</p> : null}
+              {event.blast_radius_hint && event.blast_radius_hint !== "-" ? <p style={{ margin: "2px 0 0" }}>Blast radius: {event.blast_radius_hint}</p> : null}
+              {event.production_hint && event.production_hint !== "-" ? <p style={{ margin: "2px 0 0" }}>Environment: {event.production_hint}</p> : null}
+            </div>
+          ) : null}
+        </section>
+      ) : (
+        <section className="why-this-matters">
+          <div className="eyebrow">Why this matters</div>
+          <strong>{reason || event.decision_label || "Audit activity"}</strong>
+          {recommended ? <p>→ Recommended: {recommended}</p> : null}
+        </section>
+      )}
 
       <div className="detail-grid">
-        <div><div className="detail-label">Who</div><strong>{actor.primary}{actor.isServiceAccount ? <span className="actor-badge sa">SA</span> : null}</strong>{actor.secondary ? <span className="detail-secondary">{actor.secondary}</span> : null}</div>
+        <div><div className="detail-label">Who</div><strong>{actor.primary}{actor.isServiceAccount ? <span className="actor-badge sa">SA</span> : null}</strong>{actor.secondary ? <span className="detail-secondary">{actor.secondary}</span> : null}{event.actor_confidence ? <span className="detail-secondary" title="Enrichment confidence">{event.actor_confidence} confidence</span> : null}</div>
         <div><div className="detail-label">What</div><strong>{event.event_title || displayAction(event)}</strong></div>
         <div><div className="detail-label">Resource</div><strong>{displayResource(event)}</strong>{event.resource_type ? <span className="detail-secondary">{event.resource_type}</span> : null}</div>
         <div><div className="detail-label">When</div><strong>{new Date(event.timestamp).toLocaleString()}</strong></div>

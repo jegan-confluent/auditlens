@@ -108,6 +108,8 @@ export type SummaryResponse = {
     resource_family: string;
     resource_display_short: string;
     recommended_action: string;
+    blast_radius_hint?: string;
+    production_hint?: string;
     representative_event_ids?: number[];
   }>;
   overall_status: string;

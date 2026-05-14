@@ -12,6 +12,7 @@ export type EventFilters = {
   hide_noise: string;
   impact_type: string;
   q: string;
+  production_hint: string;
 };
 
 // Default landing state = "Action Required": last 12h, decision-mode, only
@@ -31,6 +32,7 @@ export const defaultFilters: EventFilters = {
   hide_noise: "true",
   impact_type: "",
   q: "",
+  production_hint: "",
 };
 
 export const allActivityFilters: EventFilters = {
@@ -47,6 +49,7 @@ export const allActivityFilters: EventFilters = {
   hide_noise: "false",
   impact_type: "",
   q: "",
+  production_hint: "",
 };
 
 const RESULT_TO_QUERY: Record<string, { result?: string; is_denied?: string }> = {
@@ -127,6 +130,10 @@ export function paramsFromFilters(filters: EventFilters, offset = 0) {
       if (value.trim()) params.set("q", value.trim());
       return;
     }
+    if (key === "production_hint") {
+      if (value.trim()) params.set("production_hint", value.trim());
+      return;
+    }
     if (value.trim()) params.set(key, value.trim());
   });
   return params;
@@ -164,6 +171,8 @@ export function activeFilterLabels(filters: EventFilters) {
     if (key === "cluster_name") return `Cluster: ${value}`;
     if (key === "environment_name") return `Environment: ${value}`;
     if (key === "q") return `Search: "${value}"`;
+    if (key === "production_hint" && value === "production") return "Production only";
+    if (key === "production_hint" && value === "non_production") return "Non-production only";
     return `${key.replace("_", " ")}: ${value}`;
   };
   return Object.entries(filters)

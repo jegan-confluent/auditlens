@@ -3,6 +3,18 @@
 import Link from "next/link";
 import type { SummaryResponse } from "../lib/types";
 
+function resolveProductionQualifier(summary: SummaryResponse): string | null {
+  const groups = (summary.flow_groups ?? []).filter(g => g.signal_type === "action_required");
+  const hasProduction = groups.some(g => g.production_hint === "production");
+  if (hasProduction) return "including production cluster changes";
+  const hasBroadBlast = groups.some(g => {
+    const h = (g.blast_radius_hint || "").toLowerCase();
+    return h.includes("org") || h.includes("cluster");
+  });
+  if (hasBroadBlast) return "with broad blast radius";
+  return null;
+}
+
 function resolveTopActor(summary: SummaryResponse): { display: string; count: number } | null {
   const groups = summary.flow_groups ?? [];
   const byActor = new Map<string, { display: string; count: number }>();
@@ -34,6 +46,7 @@ export default function NarrativeStrip({
   const attention = summary.attention_count ?? 0;
   const failures = summary.failure_count ?? 0;
   const topActor = resolveTopActor(summary);
+  const qualifier = resolveProductionQualifier(summary);
 
   return (
     <div className="narrative-strip">
@@ -44,8 +57,8 @@ export default function NarrativeStrip({
         >
           ⚠ {actionRequired} event{actionRequired === 1 ? "" : "s"} need action
           {topActor
-            ? ` — ${topActor.display} is most active with ${topActor.count.toLocaleString()} changes in the last ${timeWindow}.`
-            : "."}
+            ? ` — ${topActor.display} is most active with ${topActor.count.toLocaleString()} changes in the last ${timeWindow}${qualifier ? `, ${qualifier}` : ""}.`
+            : qualifier ? ` — ${qualifier}.` : "."}
         </Link>
       ) : attention > 0 ? (
         <span className="narrative-line narrative-line-ok">

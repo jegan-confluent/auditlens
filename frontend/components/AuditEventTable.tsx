@@ -1,4 +1,5 @@
 import { Fragment, useMemo, useState } from "react";
+import type React from "react";
 import type { AuditEvent } from "../lib/types";
 import SignalBadge from "./SignalBadge";
 
@@ -170,6 +171,14 @@ function formatTimeRange(events: AuditEvent[]): string {
   return `${fmt(last)} — ${fmt(first)}`;
 }
 
+function riskBadgeStyle(riskLevel: string): React.CSSProperties {
+  const bg = riskLevel === "critical" ? "#b42318"
+    : riskLevel === "high" ? "#b54708"
+    : riskLevel === "medium" ? "#ca8a04"
+    : "#9ca3af";
+  return { display: "inline-block", marginLeft: 4, padding: "1px 5px", borderRadius: 3, fontSize: "0.65em", fontWeight: 700, letterSpacing: "0.04em", textTransform: "uppercase" as const, color: "#fff", background: bg, verticalAlign: "middle" };
+}
+
 // Phase 8 A2: signal border color
 function signalBorderColor(signalType: string): string {
   if (signalType === "action_required") return "#ef4444";
@@ -277,6 +286,9 @@ function EventRow({ event, options }: { event: AuditEvent; options: RowOptions }
         </td>
         <td style={{ width: 90, verticalAlign: "middle" }}>
           <SignalBadge signal={event.signal_type} />
+          {event.signal_type === "action_required" && event.risk_level && event.risk_level !== "unknown" && event.risk_level !== "-" ? (
+            <span style={riskBadgeStyle(event.risk_level)}>{event.risk_level}</span>
+          ) : null}
         </td>
         <td className="event-actor-time-cell">
           <div

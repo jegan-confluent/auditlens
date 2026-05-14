@@ -250,6 +250,7 @@ def _event_filter_conditions(
     action: str | None = None,
     result: str | None = None,
     is_denied: bool | None = None,
+    production_hint: str | None = None,
     q: str | None = None,
 ) -> list[Any]:
     conditions: list[Any] = []
@@ -305,6 +306,12 @@ def _event_filter_conditions(
         conditions.append(AuditEvent.result == result.strip())
     if is_denied is True:
         conditions.append(AuditEvent.is_denied.is_(True))
+    if production_hint and production_hint.strip():
+        ph = production_hint.strip()
+        if ph == "non_production":
+            conditions.append(AuditEvent._production_hint != "production")
+        else:
+            conditions.append(AuditEvent._production_hint == ph)
     if q and q.strip():
         pattern = f"%{q.strip().lower()}%"
         conditions.append(

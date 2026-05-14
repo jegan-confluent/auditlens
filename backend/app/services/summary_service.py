@@ -216,6 +216,8 @@ def _flow_groups(events: list[AuditEvent], limit: int = 5) -> list[dict[str, Any
                 "resource_family": family,
                 "resource_display_short": resource,
                 "recommended_action": representative.recommended_action,
+                "blast_radius_hint": representative._blast_radius_hint or "",
+                "production_hint": representative._production_hint or "",
                 "representative_event_ids": [event.id for event in group[:10]],
             }
         )
