@@ -11,6 +11,7 @@ import sys
 import threading
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from socketserver import ThreadingMixIn
 from io import StringIO
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -1058,7 +1059,9 @@ class MetricsHandler(BaseHTTPRequestHandler):
         # Suppress HTTP server logs to avoid cluttering the output
         pass
 
-class AuditLensHealthServer(HTTPServer):
+class AuditLensHealthServer(ThreadingMixIn, HTTPServer):
+    daemon_threads = True  # handler threads exit with the server, no join on shutdown
+
     def handle_error(self, request, client_address):
         exc_type = sys.exc_info()[0]
         if exc_type in (BrokenPipeError, ConnectionResetError):
