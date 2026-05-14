@@ -48,17 +48,12 @@ evaluation. Ports are bound to localhost only, so no traffic reaches external ne
 **Prerequisites:** Python 3.11+, Docker Desktop
 
 ```bash
-git clone <repo>
+git clone <repo-url>
 cd AuditLens
 ./setup
 ```
 
-That's it. The setup wizard will:
-
-- Validate your Confluent Cloud credentials
-- Validate your audit log topic access
-- Generate your configuration
-- Start all services
+The setup wizard handles everything: validates your Confluent Cloud credentials, generates `.env` and `.secrets`, and starts all services. See [INSTALL.md](INSTALL.md) for full configuration options and [USER_GUIDE.md](USER_GUIDE.md) for how to use the dashboard.
 
 When complete:
 
@@ -67,14 +62,18 @@ When complete:
     Open http://localhost:3000
 ```
 
-**Other commands:**
+**Common commands** (after setup):
 
 ```bash
-make start      # start services
-make stop       # stop services
-make status     # check health
-make logs       # follow forwarder logs
-make help       # all commands
+make start        # Start all services
+make stop         # Stop all services
+make status       # Check local service health
+make health       # Check EC2 forwarder + API health
+make deploy       # Rsync to EC2 + rebuild containers
+make deploy-check # Dry-run rsync (shows what would change)
+make logs         # Tail EC2 prod logs
+make test         # Run the Python test suite
+make help         # Show all available commands
 ```
 
 Never commit `.env`, `.secrets`, API keys, tokens, or local database files.
