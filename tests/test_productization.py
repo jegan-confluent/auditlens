@@ -7,6 +7,7 @@ from pathlib import Path
 
 import orjson
 import audit_forwarder as forwarder
+import src.forwarder.health_server as health_server_module
 import src.product.db_writer as db_writer_module
 from src.product.auth import AccessToken, AuthConfig, Authenticator, Role
 from src.product.db_writer import AuditEventDbWriter, DbWriteResult
@@ -611,6 +612,7 @@ def test_denial_summary_persisted(tmp_path):
 def test_api_search_can_return_persisted_results(tmp_path, monkeypatch):
     store = _store(tmp_path)
     monkeypatch.setattr(forwarder, "product_store", store)
+    monkeypatch.setattr(health_server_module, "product_store", store)
     event = {
         "id": "evt-search",
         "time": "2026-04-19T10:00:00Z",
@@ -634,6 +636,7 @@ def test_api_search_can_return_persisted_results(tmp_path, monkeypatch):
 def test_export_works_from_persisted_records(tmp_path, monkeypatch):
     store = _store(tmp_path)
     monkeypatch.setattr(forwarder, "product_store", store)
+    monkeypatch.setattr(health_server_module, "product_store", store)
     event = {
         "id": "evt-export",
         "time": "2026-04-19T10:00:00Z",
