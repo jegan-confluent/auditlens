@@ -1,0 +1,445 @@
+services:
+  auditlens-forwarder:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BUILDKIT_INLINE_CACHE: 1
+    image: auditlens-forwarder:v1.0.0
+    container_name: auditlens-forwarder
+    restart: always
+    env_file:
+      - path: .env
+        required: false
+      - path: .secrets
+        required: false
+    environment:
+      - AUDIT_TOPIC=${AUDIT_TOPIC:-confluent-audit-log-events}
+      - GROUP_ID=${GROUP_ID:-auditlens-forwarder-v1}
+      - AUTO_OFFSET_RESET=${AUTO_OFFSET_RESET:-latest}
+      - METRICS_PORT=${METRICS_PORT:-8003}
+      - AUDIT_RAW_TOPIC=${AUDIT_RAW_TOPIC:-audit.raw.v1}
+      - AUDIT_NORMALIZED_TOPIC=${AUDIT_NORMALIZED_TOPIC:-audit.normalized.v1}
+      - AUDIT_ENRICHED_TOPIC=${AUDIT_ENRICHED_TOPIC:-audit.enriched.v1}
+      - AUDIT_SIGNALS_DENIALS_TOPIC=${AUDIT_SIGNALS_DENIALS_TOPIC:-audit.signals.denials.v1}
+      - AUDIT_SIGNALS_HIGHRISK_TOPIC=${AUDIT_SIGNALS_HIGHRISK_TOPIC:-audit.signals.highrisk.v1}
+      - AUDIT_ALERTS_TOPIC=${AUDIT_ALERTS_TOPIC:-audit.alerts.v1}
+      - DLQ_TOPIC=${DLQ_TOPIC:-audit.dlq.v1}
+      - ALERT_ON_HIGH_RISK=${ALERT_ON_HIGH_RISK:-true}
+      - PERSISTENCE_ENABLED=${PERSISTENCE_ENABLED:-true}
+      - PERSISTENCE_BACKEND=${PERSISTENCE_BACKEND:-sqlite}
+      - PERSISTENCE_DB_PATH=${FORWARDER_PERSISTENCE_DB_PATH:-/app/data/auditlens.db}
+      - PERSISTENCE_DB_MAX_BYTES=${PERSISTENCE_DB_MAX_BYTES:-1073741824}
+      - PERSISTENCE_WAL_MAX_BYTES=${PERSISTENCE_WAL_MAX_BYTES:-134217728}
+      - PERSISTENCE_ENRICHED_RETENTION_DAYS=${PERSISTENCE_ENRICHED_RETENTION_DAYS:-3}
+      - PERSISTENCE_SIGNALS_RETENTION_DAYS=${PERSISTENCE_SIGNALS_RETENTION_DAYS:-7}
+      - PERSISTENCE_ALERTS_RETENTION_DAYS=${PERSISTENCE_ALERTS_RETENTION_DAYS:-14}
+      - PERSISTENCE_AUDIT_RETENTION_DAYS=${PERSISTENCE_AUDIT_RETENTION_DAYS:-14}
+      - KAFKA_CONSUME_BATCH_SIZE=${KAFKA_CONSUME_BATCH_SIZE:-100}
+      - CONSUMER_POLL_TIMEOUT_SECONDS=${CONSUMER_POLL_TIMEOUT_SECONDS:-2.0}
+      - CONSUMER_EMPTY_POLL_SLEEP_SECONDS=${CONSUMER_EMPTY_POLL_SLEEP_SECONDS:-0.25}
+      - CONSUMER_BATCH_SLEEP_SECONDS=${CONSUMER_BATCH_SLEEP_SECONDS:-0.25}
+      - KAFKA_RETRY_INITIAL_BACKOFF_SECONDS=${KAFKA_RETRY_INITIAL_BACKOFF_SECONDS:-1.0}
+      - KAFKA_RETRY_MAX_BACKOFF_SECONDS=${KAFKA_RETRY_MAX_BACKOFF_SECONDS:-60.0}
+      - KAFKA_QUEUED_MAX_MESSAGES_KBYTES=${KAFKA_QUEUED_MAX_MESSAGES_KBYTES:-65536}
+      - KAFKA_PRODUCER_QUEUE_MAX_KBYTES=${KAFKA_PRODUCER_QUEUE_MAX_KBYTES:-65536}
+      - ENABLE_DB_WRITER=${ENABLE_DB_WRITER:-true}
+      - DATABASE_URL=${FORWARDER_DATABASE_URL:-sqlite:////app/data/auditlens_api.db}
+      - DB_WRITE_BATCH_SIZE=${DB_WRITE_BATCH_SIZE:-500}
+      - DB_WRITE_FLUSH_INTERVAL_SECONDS=${DB_WRITE_FLUSH_INTERVAL_SECONDS:-2}
+      - DB_WRITE_BACKOFF_MAX_SECONDS=${DB_WRITE_BACKOFF_MAX_SECONDS:-60}
+      - EVENT_RETENTION_DAYS=${EVENT_RETENTION_DAYS:-7}
+      - DB_RETENTION_CLEANUP_INTERVAL_SECONDS=${DB_RETENTION_CLEANUP_INTERVAL_SECONDS:-3600}
+      - API_AUTH_ENABLED=${API_AUTH_ENABLED:-false}
+      - API_AUTH_TOKEN_FILE=${API_AUTH_TOKEN_FILE:-/run/secrets/auditlens-api-tokens.json}
+      - API_MAX_SEARCH_RESULTS=${API_MAX_SEARCH_RESULTS:-500}
+      - API_EXPORT_MAX_ROWS=${API_EXPORT_MAX_ROWS:-5000}
+      - API_EXPORT_MAX_HOURS=${API_EXPORT_MAX_HOURS:-168}
+      - MEMORY_LIMIT_MB=512
+    volumes:
+      - ./audit_forwarder.py:/app/audit_forwarder.py:ro
+      - ./src:/app/src:ro
+      - ./data/forwarder:/app/data
+      - ./secrets:/run/secrets:ro
+    ports:
+      - "127.0.0.1:${METRICS_PORT:-8003}:${METRICS_PORT:-8003}"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        compress: "true"
+    networks:
+      - kafka-network
+      - monitoring
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:$${METRICS_PORT:-8003}/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 512M
+        reservations:
+          cpus: '0.10'
+          memory: 128M
+    cpus: "0.25"
+    mem_limit: 512m
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777,size=100M
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+
+  api:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    image: auditlens-api:v0.1.0
+    container_name: auditlens-api
+    restart: always
+    env_file:
+      - path: .env
+        required: false
+      - path: .secrets
+        required: false
+    environment:
+      - DATABASE_URL=${DATABASE_URL:-sqlite:////var/lib/auditlens/auditlens_api.db}
+      - AUDITLENS_RUNTIME_DIR=/var/lib/auditlens
+      - FORWARDER_HEALTH_URL=${FORWARDER_HEALTH_URL:-http://auditlens-forwarder:${METRICS_PORT:-8003}/health}
+      - EVENT_RETENTION_DAYS=${EVENT_RETENTION_DAYS:-7}
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
+      - IAM_ENRICHMENT_ENABLED=${IAM_ENRICHMENT_ENABLED:-false}
+      - CONFLUENT_CLOUD_API_KEY=${CONFLUENT_CLOUD_API_KEY:-}
+      - CONFLUENT_CLOUD_API_SECRET=${CONFLUENT_CLOUD_API_SECRET:-}
+    volumes:
+      - auditlens_data:/var/lib/auditlens
+    networks:
+      - kafka-network
+      - frontend-network
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8080/health', timeout=2).read()\" || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 384M
+        reservations:
+          cpus: '0.10'
+          memory: 128M
+    cpus: "0.50"
+    mem_limit: 384m
+    security_opt:
+      - no-new-privileges:true
+    read_only: false
+    tmpfs:
+      - /tmp:mode=1777,size=100M
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    image: auditlens-frontend:v0.1.0
+    container_name: auditlens-frontend
+    restart: always
+    environment:
+      - NEXT_PUBLIC_API_BASE_URL=${NEXT_PUBLIC_API_BASE_URL:-http://localhost:${BACKEND_PORT:-8080}}
+    networks:
+      - frontend-network
+    depends_on:
+      - api
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://localhost:3000/dashboard').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 384M
+        reservations:
+          cpus: '0.10'
+          memory: 128M
+    cpus: "0.50"
+    mem_limit: 384m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: auditlens-caddy
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+    networks:
+      - frontend-network
+    depends_on:
+      - frontend
+      - api
+
+  postgres:
+    image: postgres:16-alpine@sha256:4e6e670bb069649261c9c18031f0aded7bb249a5b6664ddec29c013a89310d50
+    shm_size: '256mb'
+    container_name: auditlens-postgres
+    restart: always
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB:-auditlens}
+      - POSTGRES_USER=${POSTGRES_USER:-auditlens}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+    command: >
+      postgres
+      -c synchronous_commit=off
+      -c wal_buffers=16MB
+      -c checkpoint_completion_target=0.9
+      -c max_wal_size=1GB
+      -c shared_buffers=256MB
+      -c work_mem=16MB
+      -c autovacuum_vacuum_scale_factor=0.01
+      -c autovacuum_analyze_scale_factor=0.005
+      -c autovacuum_vacuum_cost_delay=2ms
+      -c autovacuum_vacuum_cost_limit=400
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    networks:
+      - kafka-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-auditlens} -d $${POSTGRES_DB:-auditlens}"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: '0.75'
+          memory: 768M
+        reservations:
+          cpus: '0.10'
+          memory: 256M
+    cpus: "0.75"
+    mem_limit: 768m
+    security_opt:
+      - no-new-privileges:true
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: audit-prometheus
+    restart: always
+    user: "65534:65534"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/alerts:/etc/prometheus/alerts:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=${PROMETHEUS_RETENTION_TIME:-7d}'
+      - '--storage.tsdb.retention.size=${PROMETHEUS_RETENTION_SIZE:-1GB}'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--web.enable-lifecycle'
+    ports:
+      - "127.0.0.1:9090:9090"
+    networks:
+      - monitoring
+      - frontend-network
+    deploy:
+      resources:
+        limits:
+          cpus: '0.75'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+    cpus: "0.75"
+    mem_limit: 512m
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777,size=100M
+    cap_drop:
+      - ALL
+
+  grafana:
+    image: grafana/grafana:11.6.0
+    container_name: audit-grafana
+    restart: always
+    user: "472:472"
+    env_file:
+      - path: .secrets
+        required: false
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GF_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD must be set in .env}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_SERVER_ROOT_URL=http://localhost:3001
+      - GF_ANALYTICS_REPORTING_ENABLED=false
+      - GF_ANALYTICS_CHECK_FOR_UPDATES=false
+      - GF_SECURITY_DISABLE_GRAVATAR=true
+      - GF_SNAPSHOTS_EXTERNAL_ENABLED=false
+      - GF_AUTH_ANONYMOUS_ENABLED=false
+    ports:
+      - "127.0.0.1:3001:3000"
+    networks:
+      - monitoring
+      - frontend-network
+    depends_on:
+      - prometheus
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 256M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+    cpus: "0.50"
+    mem_limit: 256m
+    security_opt:
+      - no-new-privileges:true
+    read_only: false
+    tmpfs:
+      - /tmp:mode=1777,size=100M
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+
+  loki:
+    profiles: ["observability"]
+    image: grafana/loki:3.3.2
+    container_name: loki
+    user: "10001:10001"
+    ports:
+      - "127.0.0.1:3100:3100"
+    command: -config.file=/etc/loki/local-config.yaml
+    volumes:
+      - loki_data:/loki
+      - ./loki/loki-config.yaml:/etc/loki/local-config.yaml:ro
+    networks:
+      - monitoring
+    restart: always
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+    cpus: "0.50"
+    mem_limit: 512m
+    security_opt:
+      - no-new-privileges:true
+    read_only: false
+    tmpfs:
+      - /tmp:mode=1777,size=100M
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+
+  promtail:
+    profiles: ["observability"]
+    image: grafana/promtail:3.3.2
+    container_name: promtail
+    user: "10001:10001"
+    volumes:
+      - ./logs:/var/log/audit:ro
+      - ./promtail-config.yml:/etc/promtail/config.yml:ro
+    command: -config.file=/etc/promtail/config.yml
+    networks:
+      - monitoring
+    restart: always
+    depends_on:
+      - loki
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 256M
+        reservations:
+          cpus: '0.1'
+          memory: 64M
+    cpus: "0.25"
+    mem_limit: 256m
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777,size=50M
+    cap_drop:
+      - ALL
+
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.15.0@sha256:31bdf410910646a05c7edde8d95ab771c9d78fbfbc26b50a52548707496c284d
+    container_name: auditlens-postgres-exporter
+    restart: always
+    environment:
+      - DATA_SOURCE_NAME=postgresql://${POSTGRES_USER:-auditlens}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}@postgres:5432/${POSTGRES_DB:-auditlens}?sslmode=disable
+    ports:
+      - "127.0.0.1:9187:9187"
+    mem_limit: 64m
+    cpus: "0.1"
+    read_only: true
+    cap_drop:
+      - ALL
+    networks:
+      - kafka-network
+      - monitoring
+    depends_on:
+      - postgres
+    security_opt:
+      - no-new-privileges:true
+
+networks:
+  kafka-network:
+    driver: bridge
+    internal: false
+  monitoring:
+    driver: bridge
+    internal: true
+  frontend-network:
+    driver: bridge
+    internal: false
+
+volumes:
+  auditlens_data:
+    name: auditlens_auditlens_data
+  prometheus_data:
+  grafana_data:
+  loki_data:
+  postgres_data:
+  caddy_data:
