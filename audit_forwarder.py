@@ -1635,6 +1635,20 @@ def _run_startup_display_name_backfill() -> None:
 
     conn_factory = db_writer.engine.begin
 
+    from sqlalchemy import text as sa_text  # noqa: PLC0415
+    with conn_factory() as _check_conn:
+        needs_work = _check_conn.execute(sa_text("""
+            SELECT 1 FROM audit_events
+            WHERE actor_confidence = 'low'
+               OR actor_display_name LIKE '{%'
+               OR actor_display_name LIKE 'User:u-%'
+               OR actor_display_name LIKE 'User:sa-%'
+            LIMIT 1
+        """)).fetchone()
+    if not needs_work:
+        logger.info("Startup backfill: nothing to fix, skipping")
+        return
+
     try:
         enricher = _confluent_identity_enricher()
 
