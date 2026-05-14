@@ -79,6 +79,8 @@ class AuditEventDetailOut(AuditEventListOut):
     connection_id: str | None = None
     request_id: str | None = None
     raw_payload_json: str | None = None
+    rbac_role: str | None = None
+    rbac_scope: str | None = None
 
 
 AuditEventOut = AuditEventListOut

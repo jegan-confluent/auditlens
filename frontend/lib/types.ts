@@ -60,6 +60,8 @@ export type AuditEvent = {
   triage_timestamp?: string | null;
   triage_note?: string | null;
   raw_payload_json?: string;
+  rbac_role?: string | null;
+  rbac_scope?: string | null;
 };
 
 export type EventListResponse = {

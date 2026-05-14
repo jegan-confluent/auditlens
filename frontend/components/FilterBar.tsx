@@ -243,17 +243,20 @@ export default function FilterBar({ filters, options, onChange, onReset }: {
 
       {moreOpen ? (
         <div className="filter-secondary-panel">
-          <span className="actor-search">
-            <input
-              value={actorDraft}
-              onChange={(e) => onActorInput(e.target.value)}
-              placeholder="Filter by actor name or ID..."
-              aria-label="Actor filter"
-            />
-            {actorDraft ? (
-              <button type="button" className="actor-search-clear" aria-label="Clear actor filter" onClick={onActorClear}>×</button>
-            ) : null}
-          </span>
+          <div>
+            <span className="actor-search">
+              <input
+                value={actorDraft}
+                onChange={(e) => onActorInput(e.target.value)}
+                placeholder="Actor ID or email..."
+                aria-label="Actor filter"
+              />
+              {actorDraft ? (
+                <button type="button" className="actor-search-clear" aria-label="Clear actor filter" onClick={onActorClear}>×</button>
+              ) : null}
+            </span>
+            <div style={{ fontSize: "0.72em", color: "var(--muted)", marginTop: 2 }}>Search by ID (u-xxx, sa-xxx) or email address</div>
+          </div>
           <input
             value={filters.resource}
             onChange={(e) => update("resource", e.target.value)}

@@ -171,6 +171,14 @@ function formatTimeRange(events: AuditEvent[]): string {
   return `${fmt(last)} — ${fmt(first)}`;
 }
 
+function resolveClientTool(tool: string | null | undefined): string | null {
+  if (!tool || !tool.trim()) return null;
+  const t = tool.trim();
+  if (t === "unknown") return null;
+  if (t.startsWith("confluent-") || t.startsWith("adminclient-")) return null;
+  return t;
+}
+
 function riskBadgeStyle(riskLevel: string): React.CSSProperties {
   const bg = riskLevel === "critical" ? "#b42318"
     : riskLevel === "high" ? "#b54708"
@@ -301,9 +309,12 @@ function EventRow({ event, options }: { event: AuditEvent; options: RowOptions }
           </div>
           <div className="event-relative-time">{formatRelativeCompact(event.timestamp)}</div>
           <div className="event-source-ip">{displaySourceIp(event)}</div>
+          {resolveClientTool(event.client_tool) ? (
+            <div style={{ fontSize: "0.72em", color: "var(--muted)", marginTop: 1 }}>via {resolveClientTool(event.client_tool)}</div>
+          ) : null}
         </td>
         <td className="event-client-tool-cell" style={{ textAlign: "right", fontSize: "0.75em", color: "var(--muted)", whiteSpace: "nowrap" }}>
-          {event.client_tool || null}
+          {resolveClientTool(event.client_tool) || null}
         </td>
       </tr>
       {isExpanded ? (

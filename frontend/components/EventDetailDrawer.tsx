@@ -4,6 +4,14 @@ import type { AuditEvent } from "../lib/types";
 import SignalBadge from "./SignalBadge";
 
 const UNKNOWN_PRINCIPAL_LABELS = new Set(["unknown actor", "unknown user", "unknown service account", "unknown principal"]);
+
+function resolveClientTool(tool: string | null | undefined): string | null {
+  if (!tool || !tool.trim()) return null;
+  const t = tool.trim();
+  if (t === "unknown") return null;
+  if (t.startsWith("confluent-") || t.startsWith("adminclient-")) return null;
+  return t;
+}
 const SERVICE_ACCOUNT_TYPES = new Set(["service_account", "serviceaccount", "service-account"]);
 const STALE_EVENT_THRESHOLD_MS = 2 * 60 * 60 * 1000; // 2 hours
 
@@ -162,7 +170,7 @@ export default function EventDetailDrawer({ event, onClose, onTriage }: {
       )}
 
       <div className="detail-grid">
-        <div><div className="detail-label">Who</div><strong>{actor.primary}{actor.isServiceAccount ? <span className="actor-badge sa">SA</span> : null}</strong>{actor.secondary ? <span className="detail-secondary">{actor.secondary}</span> : null}{event.actor_confidence ? <span className="detail-secondary" title="Enrichment confidence">{event.actor_confidence} confidence</span> : null}</div>
+        <div><div className="detail-label">Who</div><strong>{actor.primary}{actor.isServiceAccount ? <span className="actor-badge sa">SA</span> : null}</strong>{actor.secondary ? <span className="detail-secondary">{actor.secondary}</span> : null}{event.actor_confidence ? <span className="detail-secondary" title="Enrichment confidence">{event.actor_confidence} confidence</span> : null}{resolveClientTool(event.client_tool) ? <span className="detail-secondary">via {resolveClientTool(event.client_tool)}</span> : null}</div>
         <div><div className="detail-label">What</div><strong>{event.event_title || displayAction(event)}</strong></div>
         <div><div className="detail-label">Resource</div><strong>{displayResource(event)}</strong>{event.resource_type ? <span className="detail-secondary">{event.resource_type}</span> : null}</div>
         <div><div className="detail-label">When</div><strong>{new Date(event.timestamp).toLocaleString()}</strong></div>
@@ -172,6 +180,14 @@ export default function EventDetailDrawer({ event, onClose, onTriage }: {
         <div><div className="detail-label">Result</div><strong>{event.result || "Unknown"}</strong></div>
         <div><div className="detail-label">Triage Status</div><strong>{event.triage_status || "open"}</strong>{event.triage_note ? <span className="detail-secondary">{event.triage_note}</span> : null}</div>
       </div>
+
+      {event.action_category === "Security" && (event.rbac_role || event.rbac_scope) ? (
+        <section className="why-this-matters" style={{ borderLeftColor: "#6366f1" }}>
+          <div className="eyebrow">Access control</div>
+          {event.rbac_role ? <div><div className="detail-label">RBAC Role</div><strong>{event.rbac_role}</strong></div> : null}
+          {event.rbac_scope ? <div><div className="detail-label">RBAC Scope</div><strong>{event.rbac_scope}</strong></div> : null}
+        </section>
+      ) : null}
 
       <div className="triage-actions">
         {triageActions.map((action) => (

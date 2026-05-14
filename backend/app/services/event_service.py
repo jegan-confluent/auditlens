@@ -141,6 +141,7 @@ EVENT_LIST_COLUMNS = (
     AuditEvent.is_failure,
     AuditEvent.is_denied,
     AuditEvent.is_routine_noise,
+    AuditEvent.client_tool,
 )
 
 
@@ -235,6 +236,19 @@ def get_event(db: Session, event_id: int) -> AuditEvent | None:
     event = db.get(AuditEvent, event_id)
     if event is not None:
         setattr(event, "_triage_cache", get_triage_snapshot(db, event.event_fingerprint))
+        try:
+            raw = json.loads(event.raw_payload_json or "{}")
+            data = raw.get("data", {}) if isinstance(raw, dict) else {}
+            authz = data.get("authorizationInfo", {}) if isinstance(data, dict) else {}
+            rbac = authz.get("rbacAuthorization", {}) if isinstance(authz, dict) else {}
+            rbac_role = rbac.get("role") if isinstance(rbac, dict) else None
+            scope_list = rbac.get("scope", {}).get("outerScope", []) if isinstance(rbac, dict) else []
+            rbac_scope = scope_list[0] if scope_list else None
+        except Exception:
+            rbac_role = None
+            rbac_scope = None
+        setattr(event, "rbac_role", rbac_role)
+        setattr(event, "rbac_scope", rbac_scope)
     return event
 
 
@@ -299,7 +313,16 @@ def _event_filter_conditions(
     if action_category and action_category.strip():
         conditions.append(AuditEvent.action_category == action_category.strip())
     if actor and actor.strip():
-        conditions.append(func.lower(AuditEvent.actor).like(f"%{actor.strip().lower()}%"))
+        a = actor.strip().lower()
+        if "@" in a:
+            conditions.append(
+                or_(
+                    func.lower(AuditEvent.actor).like(f"%{a}%"),
+                    func.lower(AuditEvent._actor_email).like(f"%{a}%"),
+                )
+            )
+        else:
+            conditions.append(func.lower(AuditEvent.actor).like(f"%{a}%"))
     if action and action.strip():
         conditions.append(func.lower(AuditEvent.action).like(f"%{action.strip().lower()}%"))
     if result and result.strip():
