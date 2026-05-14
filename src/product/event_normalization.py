@@ -712,6 +712,8 @@ def _map_client_tool(client_id: str | None) -> str | None:
         return "Confluent Python client"
     if client_id.startswith("Apache Kafka"):
         return "Java Kafka client"
+    if client_id.startswith("adminclient-"):
+        return "Kafka Admin Client"
     if client_id.startswith("sarama/"):
         return "Go Sarama client"
     return client_id
