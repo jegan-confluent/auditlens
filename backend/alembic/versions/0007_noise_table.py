@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy import inspect as sa_inspect
 
 
 revision = "0007_noise_table"
@@ -31,6 +32,11 @@ depends_on = None
 def upgrade() -> None:
     bind = op.get_bind()
     dialect = bind.dialect.name
+
+    # The baseline (0001) creates all model tables via create_all(checkfirst=True),
+    # so audit_events_noise may already exist on fresh deployments.
+    if sa_inspect(bind).has_table("audit_events_noise"):
+        return
 
     if dialect == "postgresql":
         id_col = sa.Column("id", sa.BigInteger(), primary_key=True, autoincrement=True)
