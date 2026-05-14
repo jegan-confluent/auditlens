@@ -89,7 +89,7 @@ export type SummaryResponse = {
   destructive_count: number;
   configuration_change_count: number;
   access_change_count: number;
-  top_subjects: Array<{ value: string; count: number }>;
+  top_subjects: Array<{ value: string; count: number; display_name?: string }>;
   top_resources: Array<{ value: string; count: number }>;
   top_actions: Array<{ value: string; count: number }>;
   top_signal_reasons: Array<{ value: string; count: number }>;

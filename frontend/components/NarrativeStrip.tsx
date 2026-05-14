@@ -5,17 +5,22 @@ import type { SummaryResponse } from "../lib/types";
 
 function resolveTopActor(summary: SummaryResponse): { display: string; count: number } | null {
   const groups = summary.flow_groups ?? [];
-  // For the narrative, pick the actor with the most action_required events —
-  // not total events (which would pick the data-pipeline SA with 1000s of noise events).
-  const actionGroups = groups.filter((g) => g.signal_type === "action_required");
-  const group = actionGroups.sort((a, b) => b.event_count - a.event_count)[0] ?? groups[0];
-  if (!group) return null;
-  const raw = group.subject_display_name || group.subject || "";
-  if (!raw || raw.startsWith("{")) return null;
-  const display = raw.startsWith("User:") ? raw.slice(5)
-    : raw.startsWith("ServiceAccount:") ? raw.slice(15)
-    : raw;
-  return { display, count: group.event_count };
+  const byActor = new Map<string, { display: string; count: number }>();
+  for (const g of groups.filter(g => g.signal_type === "action_required")) {
+    const existing = byActor.get(g.subject);
+    const display = g.subject_display_name || g.subject || "";
+    if (!existing) {
+      byActor.set(g.subject, { display, count: g.event_count });
+    } else {
+      existing.count += g.event_count;
+    }
+  }
+  const top = [...byActor.values()].sort((a, b) => b.count - a.count)[0];
+  if (!top || !top.display || top.display.startsWith("{")) return null;
+  const d = top.display.startsWith("User:") ? top.display.slice(5)
+    : top.display.startsWith("ServiceAccount:") ? top.display.slice(15)
+    : top.display;
+  return { display: d, count: top.count };
 }
 
 export default function NarrativeStrip({

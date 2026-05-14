@@ -518,7 +518,7 @@ def normalize_event(payload: dict[str, Any]) -> dict[str, Any]:
     # Prefer it for IAM lookup; fall back to the raw principal if absent or numeric.
     _pn = _as_text(payload.get("principal_normalized") or "")
     actor = _pn if (_pn and not _pn.isdigit()) else actor_raw
-    actor_info = enrich_actor(actor)
+    actor_info = enrich_actor(actor, subject_type=payload.get("principal_type") or "")
     source_info = extract_source_info(payload)
     decision = decision_snapshot(payload)
     summary = _as_text(payload.get("summary") or payload.get("message"))

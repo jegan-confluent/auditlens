@@ -61,8 +61,9 @@ function buildActorRows(
 
     const isSa = raw.startsWith("sa-");
     const isUser = raw.startsWith("u-");
+    // Priority: flow_groups display map → top_subjects.display_name → normalizeActorDisplay
     const fromMap = displayMap.get(raw);
-    const display = fromMap ?? normalizeActorDisplay(raw);
+    const display = fromMap ?? (s.display_name && !s.display_name.startsWith("{") ? s.display_name : null) ?? normalizeActorDisplay(raw);
 
     return {
       rawId: raw,

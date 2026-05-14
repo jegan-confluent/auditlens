@@ -327,6 +327,26 @@ def get_summary(
     signal_counts: Counter[str] = Counter(event.signal_type for event in events)
     reason_counts: Counter[str] = Counter(event.signal_reason for event in events)
     subject_counts: Counter[str] = Counter(event.subject for event in events if event.subject)
+    _SIGNAL_WEIGHTS = {"action_required": 10, "attention": 3, "informational": 1, "noise": 0}
+    _subj_weight: Counter[str] = Counter()
+    _subj_count: Counter[str] = Counter()
+    _subj_display: dict[str, Counter[str]] = {}
+    for _ev in events:
+        if not _ev.subject:
+            continue
+        _subj_weight[_ev.subject] += _SIGNAL_WEIGHTS.get(_ev.signal_type or "", 1)
+        _subj_count[_ev.subject] += 1
+        _dn = _ev.actor_display_name
+        if _dn:
+            _subj_display.setdefault(_ev.subject, Counter())[_dn] += 1
+    _top_subjects = [
+        {
+            "value": _subj,
+            "count": _subj_count[_subj],
+            "display_name": _subj_display[_subj].most_common(1)[0][0] if _subj in _subj_display else None,
+        }
+        for _subj, _ in _subj_weight.most_common(5)
+    ]
     resource_counts: Counter[str] = Counter(
         event.resource_display_name or event.resource_display_short
         for event in events
@@ -385,7 +405,7 @@ def get_summary(
         "destructive_count": destructive,
         "configuration_change_count": config_changes,
         "access_change_count": access_changes,
-        "top_subjects": _top(subject_counts),
+        "top_subjects": _top_subjects,
         "top_resources": _top(resource_counts),
         "top_actions": _top(action_counts),
         "top_signal_reasons": _top(reason_counts),
