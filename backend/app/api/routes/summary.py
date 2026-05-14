@@ -55,7 +55,7 @@ def summary(
 
 
 @router.get("/summary/methods", response_model=MethodDistributionResponse)
-@limiter.limit("10/minute")
+@limiter.limit("60/minute")
 def summary_methods(request: Request, db: Session = Depends(get_db), _auth: None = Depends(_require_viewer)) -> dict:
     """Unified method distribution across audit_events and audit_events_noise.
 

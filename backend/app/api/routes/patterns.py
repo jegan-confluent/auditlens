@@ -91,7 +91,7 @@ class MarkExpectedRequest(BaseModel):
 
 
 @router.get("/patterns")
-@limiter.limit("20/minute")
+@limiter.limit("60/minute")
 def get_patterns(
     request: Request,
     status: str | None = Query(default=None),
@@ -107,7 +107,7 @@ def get_patterns(
 
 
 @router.post("/patterns/{pattern_id}/suppress")
-@limiter.limit("10/minute")
+@limiter.limit("60/minute")
 def suppress(
     pattern_id: int,
     payload: SuppressRequest,
@@ -128,7 +128,7 @@ def suppress(
 
 
 @router.post("/patterns/{pattern_id}/mark-expected")
-@limiter.limit("10/minute")
+@limiter.limit("60/minute")
 def mark_expected_endpoint(
     pattern_id: int,
     payload: MarkExpectedRequest,
@@ -146,7 +146,7 @@ def mark_expected_endpoint(
 
 
 @router.post("/patterns/{pattern_id}/reactivate")
-@limiter.limit("10/minute")
+@limiter.limit("60/minute")
 def reactivate(
     pattern_id: int,
     request: Request,

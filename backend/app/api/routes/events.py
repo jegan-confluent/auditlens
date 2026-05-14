@@ -58,7 +58,7 @@ class TriageUpdate(BaseModel):
     "/events",
     response_model=Union[EventListResponse, EventListNoiseResponse],
 )
-@limiter.limit("20/minute")
+@limiter.limit("60/minute")
 def events(
     request: Request,
     _auth: None = Depends(_require_viewer),
@@ -202,7 +202,7 @@ def events(
 
 
 @router.get("/events/{event_id}", response_model=AuditEventDetailOut)
-@limiter.limit("20/minute")
+@limiter.limit("60/minute")
 def event_detail(event_id: int, request: Request, db: Session = Depends(get_db), _auth: None = Depends(_require_viewer)):
     event = get_event(db, event_id)
     if event is None:
