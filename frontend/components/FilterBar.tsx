@@ -14,16 +14,10 @@ type FilterPreset = { name: string; filters: EventFilters };
 
 const quickFilters: Array<{ label: string; patch: Partial<EventFilters> }> = [
   { label: "Needs Attention 🔴", patch: { mode: "decision", signal: "action_required,attention", hide_noise: "true", time_window: "24h" } },
-  { label: "Decision mode", patch: { mode: "decision", time_window: "24h", signal: "", hide_noise: "false", impact_type: "" } },
-  { label: "Show full audit trail", patch: { mode: "audit_trail", time_window: "7d", signal: "", hide_noise: "false", impact_type: "" } },
-  { label: "Action Needed", patch: { mode: "decision", signal: "action_required", hide_noise: "true" } },
-  { label: "Review", patch: { mode: "decision", signal: "attention", hide_noise: "true" } },
-  { label: "Hide Noise", patch: { mode: "decision", hide_noise: "true", signal: "" } },
-  { label: "Show Noise", patch: { mode: "audit_trail", hide_noise: "false", signal: "" } },
-  { label: "Failed/Denied", patch: { mode: "decision", result: "Failure", hide_noise: "false" } },
   { label: "Destructive", patch: { mode: "decision", impact_type: "destructive", hide_noise: "false" } },
+  { label: "Access Changes", patch: { mode: "decision", impact_type: "access_change", hide_noise: "false" } },
   { label: "Config Changes", patch: { mode: "decision", impact_type: "configuration_change", hide_noise: "false" } },
-  { label: "Access Changes", patch: { mode: "decision", impact_type: "access_change", hide_noise: "false" } }
+  { label: "All Activity", patch: { mode: "audit_trail", time_window: "7d", signal: "", hide_noise: "false", impact_type: "" } },
 ];
 
 const SIGNAL_OPTIONS: Array<{ value: string; label: string }> = [
