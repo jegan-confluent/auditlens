@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import ActionFeed from "../../components/ActionFeed";
 import ErrorState from "../../components/ErrorState";
+import EventVolumeChart from "../../components/EventVolumeChart";
 import LoadingState from "../../components/LoadingState";
 import NarrativeStrip from "../../components/NarrativeStrip";
 import SignalSummaryPanel from "../../components/SignalSummaryPanel";
@@ -154,6 +155,18 @@ export default function DashboardPage() {
         <SignalSummaryPanel
           summary={summary}
           onApplyFlow={navigateToEvents}
+        />
+      ) : null}
+      {summary ? (
+        <EventVolumeChart
+          data={[{
+            label: timeWindow,
+            action_required: summary.action_required_count,
+            attention: summary.attention_count,
+            informational: summary.informational_count,
+            noise: summary.noise_count,
+          }]}
+          onBarClick={(label) => navigateToEvents({ time_window: label })}
         />
       ) : null}
       <ActionFeed
