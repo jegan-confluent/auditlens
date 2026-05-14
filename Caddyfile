@@ -1,4 +1,4 @@
-{$AUDITLENS_DOMAIN} {
+:80 {
     handle /api/* {
         reverse_proxy api:8080
     }
