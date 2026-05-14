@@ -175,7 +175,7 @@ export default function DashboardPage() {
           <TimeWindowPills value={timeWindow} onChange={onTimeWindowChange} />
         }
       />
-      <TopActors timeWindow={timeWindow} />
+      <TopActors timeWindow={timeWindow} summary={summary} />
 
       {system.loading ? (
         <LoadingState label="Loading system health" />

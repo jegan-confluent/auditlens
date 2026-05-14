@@ -76,28 +76,32 @@ export default function EventVolumeChart({
           <span style={{ fontWeight: 400, marginLeft: 8, textTransform: "none" }}>{d.label} · {total.toLocaleString()} events</span>
         </div>
         <div style={{ display: "flex", height: 28, borderRadius: 4, overflow: "hidden", gap: 1, cursor: onBarClick ? "pointer" : undefined }}>
-          {segments.map((seg) => (
-            <div
-              key={seg.key}
-              title={`${seg.label}: ${seg.value.toLocaleString()}`}
-              style={{
-                flex: seg.value,
-                background: seg.color,
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                fontSize: 11,
-                color: "white",
-                fontWeight: 600,
-                whiteSpace: "nowrap",
-                overflow: "hidden",
-                padding: "0 6px",
-                minWidth: 0,
-              }}
-            >
-              {seg.value.toLocaleString()} {seg.label}
-            </div>
-          ))}
+          {segments.map((seg) => {
+            const pct = total > 0 ? seg.value / total : 0;
+            const showLabel = pct >= 0.08;
+            return (
+              <div
+                key={seg.key}
+                title={`${seg.label}: ${seg.value.toLocaleString()}`}
+                style={{
+                  flex: seg.value,
+                  background: seg.color,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  fontSize: 11,
+                  color: "white",
+                  fontWeight: 600,
+                  whiteSpace: "nowrap",
+                  overflow: "hidden",
+                  padding: "0 6px",
+                  minWidth: 0,
+                }}
+              >
+                {showLabel ? `${seg.value.toLocaleString()} ${seg.label}` : ""}
+              </div>
+            );
+          })}
         </div>
       </div>
     );

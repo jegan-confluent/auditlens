@@ -4,7 +4,11 @@ import Link from "next/link";
 import type { SummaryResponse } from "../lib/types";
 
 function resolveTopActor(summary: SummaryResponse): { display: string; count: number } | null {
-  const group = summary.flow_groups?.[0];
+  const groups = summary.flow_groups ?? [];
+  // For the narrative, pick the actor with the most action_required events —
+  // not total events (which would pick the data-pipeline SA with 1000s of noise events).
+  const actionGroups = groups.filter((g) => g.signal_type === "action_required");
+  const group = actionGroups.sort((a, b) => b.event_count - a.event_count)[0] ?? groups[0];
   if (!group) return null;
   const raw = group.subject_display_name || group.subject || "";
   if (!raw || raw.startsWith("{")) return null;

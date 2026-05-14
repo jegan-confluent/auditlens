@@ -1,176 +1,98 @@
 "use client";
 
-import { useEffect, useState } from "react";
 import Link from "next/link";
-import { getEvents, isAbortError } from "../lib/api";
-import type { AuditEvent, EventListResponse } from "../lib/types";
+import type { SummaryResponse } from "../lib/types";
 import { normalizeActorDisplay } from "../lib/utils";
 
-const SERVICE_ACCOUNT_TYPES = new Set(["service_account", "serviceaccount", "service-account"]);
-
-function buildActorHref(rawId: string, display: string, timeWindow: string): string | null {
-  if (!rawId) return null;
-  if (rawId.startsWith("{") || rawId.startsWith("[")) {
-    try {
-      const parsed = JSON.parse(rawId) as Record<string, unknown>;
-      const ea = parsed.externalAccount as Record<string, unknown> | undefined;
-      if (typeof ea?.subject === "string" && ea.subject) {
-        return `/events?actor=${encodeURIComponent(ea.subject)}&time_window=${timeWindow}`;
-      }
-    } catch {
-      // ignore
-    }
-    if (display && !display.startsWith("{")) {
-      return `/events?actor=${encodeURIComponent(display)}&time_window=${timeWindow}`;
-    }
-    return null;
-  }
-  return `/events?actor=${encodeURIComponent(rawId)}&time_window=${timeWindow}`;
-}
-const UNKNOWN_PRINCIPAL_LABELS = new Set(["unknown actor", "unknown user", "unknown service account", "unknown principal"]);
-
-type ActorSummary = {
-  key: string;        // raw id, used for filter param
-  display: string;    // primary label shown to user
+type ActorRow = {
   rawId: string;
-  email: string;
-  unenriched: boolean;
-  isServiceAccount: boolean;
+  display: string;
+  emoji: string;
+  isSa: boolean;
   count: number;
-  topCategories: string[];
-  hasDeletes: boolean;
+  href: string | null;
 };
 
-function isServiceAccount(event: AuditEvent): boolean {
-  const type = (event.actor_type || event.subject_type || "").toLowerCase();
-  if (SERVICE_ACCOUNT_TYPES.has(type)) return true;
-  const raw = (event.actor_raw_id || event.actor || "").toLowerCase();
-  return raw.startsWith("sa-") || raw.startsWith("user:sa-");
+function parseExternalAccount(value: string): string | null {
+  try {
+    const parsed = JSON.parse(value) as Record<string, unknown>;
+    const ea = parsed.externalAccount as Record<string, unknown> | undefined;
+    if (typeof ea?.subject === "string" && ea.subject) return ea.subject;
+  } catch {
+    // ignore
+  }
+  return null;
 }
 
-function rawIdOf(event: AuditEvent): string {
-  return (event.actor_raw_id || event.subject || event.actor || "").trim();
-}
-
-function aggregate(events: AuditEvent[], limit = 5): ActorSummary[] {
-  const buckets = new Map<string, {
-    rawId: string;
-    display: string;
-    email: string;
-    isSA: boolean;
-    unenriched: boolean;
-    count: number;
-    categories: Map<string, number>;
-    hasDeletes: boolean;
-  }>();
-  for (const event of events) {
-    const raw = rawIdOf(event);
-    const key = raw || event.actor || "unknown";
-    const display = (event.actor_display_name || "").trim();
-    const email = (event.actor_email || "").trim();
-    const isSA = isServiceAccount(event);
-    const enriched = Boolean(display && display !== raw && !UNKNOWN_PRINCIPAL_LABELS.has(display.toLowerCase()));
-    const existing = buckets.get(key);
-    if (!existing) {
-      buckets.set(key, {
-        rawId: raw,
-        display: enriched ? display : (email || normalizeActorDisplay(raw) || "unknown"),
-        email,
-        isSA,
-        unenriched: !enriched && !email,
-        count: 1,
-        categories: new Map([[event.action_category || "Other", 1]]),
-        hasDeletes: event.action_category === "Delete"
-      });
-      continue;
-    }
-    existing.count += 1;
-    const cat = event.action_category || "Other";
-    existing.categories.set(cat, (existing.categories.get(cat) || 0) + 1);
-    if (cat === "Delete") existing.hasDeletes = true;
-    // Promote a richer label if a later event provides one (some events are
-    // enriched, others aren't; pick the best one we've seen).
-    if (enriched && (existing.unenriched || !existing.display.includes(display))) {
-      existing.display = normalizeActorDisplay(display);
-      existing.unenriched = false;
-    } else if (!existing.email && email) {
-      existing.email = email;
-      if (existing.unenriched) {
-        existing.display = email;
-        existing.unenriched = false;
-      }
+function buildDisplayMap(summary: SummaryResponse): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const g of summary.flow_groups ?? []) {
+    if (g.subject && g.subject_display_name && !map.has(g.subject)) {
+      map.set(g.subject, g.subject_display_name);
     }
   }
-  return [...buckets.entries()]
-    .map(([key, info]) => {
-      const topCats = [...info.categories.entries()]
-        .sort((a, b) => b[1] - a[1])
-        .slice(0, 2)
-        .map(([cat]) => cat);
+  return map;
+}
+
+function buildActorRows(
+  summary: SummaryResponse,
+  timeWindow: string,
+): { rows: ActorRow[]; total: number } {
+  const displayMap = buildDisplayMap(summary);
+  const subjects = summary.top_subjects ?? [];
+
+  const rows: ActorRow[] = subjects.map((s) => {
+    const raw = s.value;
+
+    // JSON blob — Confluent platform internal actor
+    if (raw.startsWith("{") || raw.startsWith("[")) {
+      const subject = parseExternalAccount(raw);
+      const display = subject ?? "Confluent (platform)";
+      const hrefId = subject ?? display;
       return {
-        key,
-        display: info.display,
-        rawId: info.rawId,
-        email: info.email,
-        unenriched: info.unenriched,
-        isServiceAccount: info.isSA,
-        count: info.count,
-        topCategories: topCats,
-        hasDeletes: info.hasDeletes
+        rawId: raw,
+        display,
+        emoji: "🏢",
+        isSa: false,
+        count: s.count,
+        href: `/events?actor=${encodeURIComponent(hrefId)}&time_window=${timeWindow}`,
       };
-    })
-    .sort((a, b) => b.count - a.count)
-    .slice(0, limit);
+    }
+
+    const isSa = raw.startsWith("sa-");
+    const isUser = raw.startsWith("u-");
+    const fromMap = displayMap.get(raw);
+    const display = fromMap ?? normalizeActorDisplay(raw);
+
+    return {
+      rawId: raw,
+      display,
+      emoji: isSa ? "🤖" : isUser ? "👤" : "",
+      isSa,
+      count: s.count,
+      href: `/events?actor=${encodeURIComponent(raw)}&time_window=${timeWindow}`,
+    };
+  });
+
+  return { rows: rows.slice(0, 5), total: subjects.length };
 }
 
-export default function TopActors({ timeWindow = "24h" }: { timeWindow?: string }) {
-  const [actors, setActors] = useState<ActorSummary[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [scanned, setScanned] = useState(0);
-  const [totalActors, setTotalActors] = useState(0);
+export default function TopActors({
+  timeWindow = "24h",
+  summary,
+}: {
+  timeWindow?: string;
+  summary?: SummaryResponse | null;
+}) {
+  if (!summary) return null;
 
-  useEffect(() => {
-    const controller = new AbortController();
-    const params = new URLSearchParams({
-      time_window: timeWindow,
-      mode: "audit_trail",
-      limit: "500"
-    });
-    getEvents(params, controller.signal)
-      .then((response: EventListResponse) => {
-        const all = aggregate(response.items, Infinity);
-        setScanned(response.items.length);
-        setTotalActors(all.length);
-        setActors(all.slice(0, 5));
-      })
-      .catch((err: Error) => {
-        if (isAbortError(err)) return;
-        setError(err.message);
-      });
-    return () => controller.abort();
-  }, [timeWindow]);
+  const { rows, total } = buildActorRows(summary, timeWindow);
 
-  if (error) {
+  if (!rows.length) {
     return (
       <section className="top-actors panel">
         <h2>Who was active — last {timeWindow}</h2>
-        <p className="panel-error">Could not load top actors — {error}</p>
-      </section>
-    );
-  }
-  if (!actors) {
-    return (
-      <section className="top-actors panel">
-        <h2>Who was active — last {timeWindow}</h2>
-        <p className="muted">Loading…</p>
-      </section>
-    );
-  }
-  if (!actors.length) {
-    return (
-      <section className="top-actors panel">
-        <h2>Who was active — last {timeWindow}</h2>
-        <p className="muted">No actor activity in the last 24 hours.</p>
+        <p className="muted">No actor activity in this window.</p>
       </section>
     );
   }
@@ -178,30 +100,27 @@ export default function TopActors({ timeWindow = "24h" }: { timeWindow?: string 
   return (
     <section className="top-actors panel">
       <h2>Who was active — last {timeWindow}</h2>
-      <p className="muted">Most active principals in the last 24 hours (sample of {scanned.toLocaleString()} events).</p>
       <ul className="top-actors-list">
-        {actors.map((actor) => {
-          const href = buildActorHref(actor.rawId || actor.key, actor.display, timeWindow);
-          const mostly = actor.topCategories.length ? `mostly: ${actor.topCategories.join(", ")}` : "";
+        {rows.map((actor) => {
           const inner = (
             <>
-              <span className="top-actor-icon">{actor.isServiceAccount ? "🤖" : "👤"}</span>
-              <span className={`top-actor-name${actor.unenriched ? " unenriched" : ""}`}>{actor.display}</span>
-              {actor.isServiceAccount ? <span className="actor-badge sa" title="Service account">SA</span> : null}
-              <span className="top-actor-count">{actor.count.toLocaleString()} event{actor.count === 1 ? "" : "s"}</span>
-              {mostly ? <span className="top-actor-mostly">{mostly}</span> : null}
-              {actor.hasDeletes ? <span className="top-actor-flag" title="Performed delete operations today">⚠ has deletes</span> : null}
+              {actor.emoji ? <span className="top-actor-icon">{actor.emoji}</span> : null}
+              <span className="top-actor-name">{actor.display}</span>
+              {actor.isSa ? <span className="actor-badge sa" title="Service account">SA</span> : null}
+              <span className="top-actor-count">
+                {actor.count.toLocaleString()} event{actor.count === 1 ? "" : "s"}
+              </span>
             </>
           );
           return (
-            <li key={actor.key} className={`top-actor-row${actor.hasDeletes ? " has-deletes" : ""}`}>
-              {href ? <Link href={href}>{inner}</Link> : <span>{inner}</span>}
+            <li key={actor.rawId} className="top-actor-row">
+              {actor.href ? <Link href={actor.href}>{inner}</Link> : <span>{inner}</span>}
             </li>
           );
         })}
-        {totalActors > 5 ? (
+        {total > 5 ? (
           <li className="top-actor-view-all">
-            <Link href={`/events?time_window=${timeWindow}`}>View all {totalActors} actors →</Link>
+            <Link href={`/events?time_window=${timeWindow}`}>View all {total} actors →</Link>
           </li>
         ) : null}
       </ul>

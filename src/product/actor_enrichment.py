@@ -247,12 +247,18 @@ def _lookup_confluent_principal(raw: str, config: EnrichmentConfig) -> dict[str,
         return None
     try:
         info = enricher.resolve(raw)
-    except Exception:
+    except Exception as exc:
+        logger.debug("Confluent IAM lookup for %r raised: %s", raw, exc)
         return None
     display_name = _as_text(getattr(info, "display_name", ""))
     email = _as_text(getattr(info, "email", ""))
     identity_id = _as_text(getattr(info, "id", raw)) or raw
     if not display_name or (display_name == identity_id and not email):
+        logger.debug(
+            "Confluent IAM for %r: principal exists but has no human-readable name "
+            "(id=%r, display_name=%r, email=%r) — set a display name in Confluent Cloud",
+            raw, identity_id, display_name, email,
+        )
         return None
     actor_type = "service_account" if raw.startswith("sa-") else "user"
     return {
@@ -550,6 +556,18 @@ def enrich_actor(actor: str, subject: str = "", subject_type: str = "") -> dict[
             "actor_enriched_at": datetime.now(timezone.utc).isoformat(),
         }
     else:
+        # Log once per TTL window so operators can see which principals lack enrichment
+        # and know whether to add them to actor_mappings.yml or fix their Confluent IAM display names.
+        if raw and raw.startswith(("sa-", "u-")):
+            logger.info(
+                "actor %r not resolved by any source — raw ID used as display name "
+                "(IAM_ENRICHMENT_ENABLED=%s, confluent_api_configured=%s, sources=%s). "
+                "To fix: add an entry to actor_mappings.yml or set a display name in Confluent Cloud.",
+                raw,
+                config.enabled,
+                config.confluent_api_configured,
+                list(config.sources),
+            )
         result = {
             **_fallback_identity(raw, subject_type),
             "actor_raw_id": raw or None,
