@@ -242,7 +242,7 @@ class MetricsHandler(BaseHTTPRequestHandler):
         return actor
 
     def _search_records(self, filters: dict, actor, limit: int):
-        if product_store and PERSISTENCE_CONFIG.enabled and product_store.health().get("healthy"):
+        if product_store and PERSISTENCE_CONFIG.enabled and (metrics and metrics.persistence_status.get("healthy", False)):
             return product_store.query_enriched(filters, actor, limit), "persistence"
         snapshot = api_state.snapshot()
         params = {k: [v] for k, v in filters.items() if v}
@@ -253,7 +253,7 @@ class MetricsHandler(BaseHTTPRequestHandler):
         ][:limit], "memory"
 
     def _high_risk_records(self, filters: dict, actor, limit: int):
-        if product_store and PERSISTENCE_CONFIG.enabled and product_store.health().get("healthy"):
+        if product_store and PERSISTENCE_CONFIG.enabled and (metrics and metrics.persistence_status.get("healthy", False)):
             return product_store.query_high_risk(filters, actor, limit), "persistence"
         snapshot = api_state.snapshot()
         params = {k: [v] for k, v in filters.items() if v}
@@ -264,7 +264,7 @@ class MetricsHandler(BaseHTTPRequestHandler):
         ][:limit], "memory"
 
     def _denial_records(self, actor, limit: int):
-        if product_store and PERSISTENCE_CONFIG.enabled and product_store.health().get("healthy"):
+        if product_store and PERSISTENCE_CONFIG.enabled and (metrics and metrics.persistence_status.get("healthy", False)):
             return product_store.query_denials(actor, limit), "persistence"
         snapshot = api_state.snapshot()
         return [
