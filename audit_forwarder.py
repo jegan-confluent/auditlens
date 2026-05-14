@@ -81,7 +81,15 @@ from src.product import (
     heal_sqlite_on_startup,
 )
 from src.product.db_writer import AuditEventDbWriter
-from src.product.event_normalization import BULK_NOISE_METHODS, parse_event_timestamp
+from src.product.event_normalization import (
+    BULK_NOISE_METHODS,
+    parse_event_timestamp,
+    flatten_audit,
+    _to_scalar,
+    _extract_email,
+    _extract_client_ip,
+    _map_client_tool,
+)
 from src.product.event_intelligence import decision_snapshot
 from src.product.actor_enrichment import get_actor_mapping_file, wait_for_iam_cache_ready
 from src.notifications.notifier import AuditLensNotifier
@@ -1796,216 +1804,6 @@ producer_conf = {
 # After each batch is processed and produced, we call consumer.commit() explicitly.
 # This is "at-least-once" delivery: commit AFTER successful produce.
 
-# ──────────── flatten helpers ────────────
-def _to_scalar(value):
-    """Convert principal object to scalar resourceId."""
-    if isinstance(value, dict):
-        for k in ("confluentServiceAccount", "confluentUser", "identityPool", "group"):
-            if k in value and isinstance(value[k], dict):
-                rid = value[k].get("resourceId")
-                if rid:
-                    return rid
-        return orjson.dumps(value).decode('utf-8')
-    if isinstance(value, list):
-        return orjson.dumps(value).decode('utf-8')
-    return value
-
-def _extract_email(principal_obj):
-    """Extract email from principal object if present."""
-    if not principal_obj or not isinstance(principal_obj, dict):
-        return None
-    # Direct email field
-    if 'email' in principal_obj:
-        return principal_obj['email']
-    # Check nested structures
-    for k in ("confluentServiceAccount", "confluentUser"):
-        if k in principal_obj and isinstance(principal_obj[k], dict):
-            if 'email' in principal_obj[k]:
-                return principal_obj[k]['email']
-    return None
-
-def _extract_client_ip(data):
-    """Extract client IP from various possible locations in the audit event."""
-    # Primary: clientAddress array
-    addr = data.get("clientAddress", [])
-    if addr and isinstance(addr, list) and len(addr) > 0:
-        ip = addr[0].get("ip")
-        if ip:
-            return ip
-
-    # Fallback: requestMetadata.clientAddress
-    meta = data.get("requestMetadata", {})
-    if isinstance(meta, dict):
-        meta_addr = meta.get("clientAddress", [])
-        if meta_addr and isinstance(meta_addr, list) and len(meta_addr) > 0:
-            ip = meta_addr[0].get("ip")
-            if ip:
-                return ip
-
-    # Fallback: authorizationInfo.requestMetadata.clientAddress
-    authz = data.get("authorizationInfo", {})
-    if isinstance(authz, dict):
-        authz_meta = authz.get("requestMetadata", {})
-        if isinstance(authz_meta, dict):
-            authz_addr = authz_meta.get("clientAddress", [])
-            if authz_addr and isinstance(authz_addr, list) and len(authz_addr) > 0:
-                ip = authz_addr[0].get("ip")
-                if ip:
-                    return ip
-
-    return None
-
-
-def _map_client_tool(client_id: str | None) -> str | None:
-    """Map raw clientId strings to human-readable tool names for narrative context."""
-    if not client_id:
-        return None
-    if client_id.startswith("proxy:"):
-        return "Confluent Console / VS Code / CLI"
-    if client_id.startswith("rdkafka/"):
-        return "librdkafka client (C/C++/Python/Go)"
-    if client_id.startswith("confluent-kafka-"):
-        return "Confluent Python client"
-    if client_id.startswith("Apache Kafka"):
-        return "Java Kafka client"
-    if client_id.startswith("sarama/"):
-        return "Go Sarama client"
-    return client_id
-
-
-def flatten_audit(event):
-    out = {
-        "id":             event.get("id"),
-        "specversion":    event.get("specversion"),
-        "source":         event.get("source"),
-        "subject":        event.get("subject"),
-        "type":           event.get("type"),
-        "time":           event.get("time"),
-        "datacontenttype":event.get("datacontenttype")
-    }
-    data = event.get("data", {})
-    out["serviceName"]         = data.get("serviceName")
-    out["methodName"]          = data.get("methodName")
-    out["resourceName"]        = data.get("resourceName")
-
-    authn = data.get("authenticationInfo", {})
-    principal_obj = authn.get("principal")
-    principal_raw = _to_scalar(principal_obj)
-    principal_normalized, principal_type = normalize_with_type(principal_raw)
-    principal_resource_id = authn.get("principalResourceId")
-    # "User:3958188" — bare numeric IDs cannot be resolved via IAM.
-    # When principalResourceId (e.g. "u-79z161") is present, use it for enrichment.
-    if (
-        principal_normalized.isdigit()
-        and principal_resource_id
-        and str(principal_resource_id).startswith(("u-", "sa-"))
-    ):
-        principal_normalized, principal_type = normalize_with_type(principal_resource_id)
-    out["principal"]           = principal_raw
-    out["principal_raw"]       = principal_raw
-    out["principal_normalized"] = principal_normalized
-    out["principal_type"]      = principal_type
-    out["principalResourceId"] = principal_resource_id
-    out["identity"]            = authn.get("identity")
-    out["email"]               = _extract_email(principal_obj)
-    authn_meta = authn.get("metadata", {})
-    out["auth_mechanism"]      = authn_meta.get("mechanism")
-    out["auth_identifier"]     = authn_meta.get("identifier")
-
-    authz = data.get("authorizationInfo", {})
-    out["granted"]             = authz.get("granted")
-    out["operation"]           = authz.get("operation")
-    out["resourceType"]        = authz.get("resourceType")
-    out["authzResourceName"]   = authz.get("resourceName")
-    out["patternType"]         = authz.get("patternType")
-
-    rbac = authz.get("rbacAuthorization", {})
-    out["rbacRole"]            = rbac.get("role")
-    scope = rbac.get("scope", {}).get("outerScope", [])
-    out["rbacScope"]           = scope[0] if scope else None
-
-    acl = authz.get("aclAuthorization", {})
-    out["aclPermissionType"]   = acl.get("permissionType")
-    out["aclHost"]             = acl.get("host")
-
-    req = data.get("request", {})
-    out["correlationId"]       = req.get("correlationId")
-    out["correlation_id"]      = req.get("correlation_id")
-    out["validateOnly"]        = bool(req.get("validateOnly") or req.get("validate_only"))
-
-    meta = data.get("requestMetadata", {})
-    out["requestId"]           = meta.get("request_id") or meta.get("requestId")
-    out["connectionId"]        = meta.get("connection_id") or meta.get("connectionId")
-    out["network_id"]          = meta.get("network_id") or meta.get("networkId")
-
-    # clientId can be in request.clientId OR requestMetadata.clientId (kafka.Fetch/Produce events)
-    out["clientId"] = req.get("clientId") or req.get("client_id") or meta.get("clientId") or meta.get("client_id")
-    out["client_tool"] = _map_client_tool(out["clientId"])
-
-    # Extract client IP from multiple possible locations
-    out["clientIp"] = _extract_client_ip(data)
-
-    out["data_json"] = orjson.dumps(data).decode('utf-8')
-
-    # ──────────── Computed fields for criticality and classification ────────────
-    # Get result status from result.status
-    result = data.get("result", {})
-    result_status = result.get("status") if isinstance(result, dict) else None
-    out["result_message"] = result.get("message") if isinstance(result, dict) else None
-
-    # Use the modular classification system
-    classification_result = calculate_criticality(out)
-    out["criticality"] = classification_result.criticality.value
-    out["classification_reason"] = classification_result.reason
-    out["criticality_elevated"] = classification_result.elevated
-    out["method_category"] = classification_result.method_category
-    out["is_security_event"] = classification_result.is_security_event
-
-    # Boolean classification flags
-    method_name = out.get("methodName", "") or ""
-    _method_lower = method_name.lower()
-    out["is_deletion"] = "delete" in _method_lower
-    out["is_creation"] = "create" in _method_lower
-    out["is_modification"] = any(op in _method_lower for op in ("update", "alter"))
-
-    # Extract IDs from CRN fields (source, resourceName, subject)
-    # mds.Authorize events have minimal source but full resourceName/subject
-    source = out.get("source", "")
-    resource_name = out.get("resourceName", "")
-    subject = out.get("subject", "")
-
-    # Try source first, then resourceName, then subject
-    out["organization_id"] = (
-        extract_from_crn(source, "organization") or
-        extract_from_crn(resource_name, "organization") or
-        extract_from_crn(subject, "organization")
-    )
-    out["environment_id"] = (
-        extract_from_crn(source, "environment") or
-        extract_from_crn(resource_name, "environment") or
-        extract_from_crn(subject, "environment")
-    )
-    out["cluster_id"] = (
-        extract_from_crn(source, "kafka") or
-        extract_from_crn(source, "schema-registry") or
-        extract_from_crn(source, "ksqldb") or
-        extract_from_crn(source, "flink") or
-        extract_from_crn(resource_name, "kafka") or
-        extract_from_crn(resource_name, "schema-registry") or
-        extract_from_crn(resource_name, "ksqldb") or
-        extract_from_crn(resource_name, "flink") or
-        extract_from_crn(subject, "kafka") or
-        extract_from_crn(subject, "schema-registry") or
-        extract_from_crn(subject, "ksqldb") or
-        extract_from_crn(subject, "flink")
-    )
-
-    # Store result status for reference
-    out["resultStatus"] = result_status
-    metrics.record_data_quality(out, classification_result)
-
-    return out
-
 # ──────────── delivery callback ────────────
 delivery_errors = {"count": 0, "last_error": None}
 _delivery_errors_lock = threading.Lock()
@@ -2700,6 +2498,7 @@ def replay_events(
                 if not base_event:
                     continue
                 flat = flatten_audit(base_event)
+                metrics.record_data_quality(flat, calculate_criticality(flat))
                 enriched_event = build_enriched_event(flat)
             else:
                 enriched_event = recompute_enriched_event(payload)
@@ -3541,6 +3340,7 @@ def main():
                     safe_produce(producer, AUDIT_RAW_TOPIC, None, orjson.dumps(build_raw_event(evt, msg)))
 
                     flat = flatten_audit(evt)
+                    metrics.record_data_quality(flat, calculate_criticality(flat))
                     normalized_event = build_normalized_event(flat)
                     enriched_event = build_enriched_event(flat)
                     event_key = enriched_event.get('id', '').encode('utf-8') if enriched_event.get('id') else None
