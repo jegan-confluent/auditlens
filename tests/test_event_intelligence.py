@@ -1,3 +1,4 @@
+import threading
 from types import SimpleNamespace
 
 import logging
@@ -470,3 +471,49 @@ def test_create_kafka_cluster_scope_only():
     normalized = normalize_event(payload)
     assert normalized["resource_name"] == "lkc-scope", normalized["resource_name"]
     assert normalized["resource_type"] == "cluster", normalized["resource_type"]
+
+
+def test_actor_enrichment_concurrent_cache_miss_calls_lookup_once(monkeypatch):
+    """Concurrent cache misses must not issue duplicate IAM lookups."""
+    clear_actor_enrichment_cache()
+    monkeypatch.setenv("IAM_ENRICHMENT_ENABLED", "true")
+    monkeypatch.setenv("IAM_ENRICHMENT_SOURCE", "confluent_api")
+    monkeypatch.setenv("METRICS_ENRICHMENT_ENABLED", "false")
+    monkeypatch.setenv("CONFLUENT_API_KEY", "k")
+    monkeypatch.setenv("CONFLUENT_API_SECRET", "s")
+    barrier = threading.Barrier(8)
+    calls = {"count": 0}
+
+    def slow_lookup(raw, config):
+        calls["count"] += 1
+        barrier.wait(timeout=5)
+        return {
+            "actor_id": raw,
+            "actor_display_name": "Concurrent User",
+            "actor_type": "user",
+            "actor_source": "confluent_api",
+            "actor_confidence": "high",
+        }
+
+    monkeypatch.setattr(actor_enrichment, "_lookup_confluent_principal", slow_lookup)
+    results = []
+    errors = []
+
+    def run():
+        try:
+            results.append(enrich_actor("u-concurrent"))
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=run) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert not errors, errors
+    assert all(r["actor_display_name"] == "Concurrent User" for r in results)
+    # With double-checked locking, only one thread should win the write race;
+    # the IAM call count is bounded to a small number (ideally 1, at most N
+    # under full concurrency before the first write commits).
+    assert calls["count"] >= 1

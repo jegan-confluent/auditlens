@@ -23,6 +23,8 @@ CONFIDENCE_LEVELS = {"high", "medium", "low"}
 UNKNOWN_DISPLAY_LABELS = {"unknown actor", "unknown user", "unknown service account", "unknown principal"}
 PRINCIPAL_PREFIXES = ("user:", "u-", "sa-", "api-key-", "apikey", "pool-", "org-", "lkc-", "env-")
 _CACHE: TTLCache = TTLCache(maxsize=50000, ttl=3600)
+# cachetools.TTLCache is not thread-safe; this lock guards every read/write.
+_CACHE_LOCK = threading.Lock()
 
 
 def _as_text(value: Any) -> str:
@@ -513,7 +515,9 @@ def enrich_actor(actor: str, subject: str = "", subject_type: str = "") -> dict[
     raw = _normalize_raw_actor(actor, subject)
     cache_key = (raw, subject, subject_type)
     now = time.monotonic()
-    cached = _CACHE.get(cache_key)
+    # Fast-path read under lock (TTLCache is not thread-safe for reads either).
+    with _CACHE_LOCK:
+        cached = _CACHE.get(cache_key)
     if cached and now - cached[0] < config.cache_ttl_seconds:
         return cached[1]
 
@@ -562,12 +566,19 @@ def enrich_actor(actor: str, subject: str = "", subject_type: str = "") -> dict[
         dn = dn[5:]
     result["actor_display_name"] = dn or None
 
-    _CACHE[cache_key] = (now, result)
+    # Double-checked write: another thread may have populated the cache while
+    # the IAM lookup was in-flight — prefer their result and avoid duplicate writes.
+    ts_now = time.monotonic()
+    with _CACHE_LOCK:
+        existing = _CACHE.get(cache_key)
+        if not existing or ts_now - existing[0] >= config.cache_ttl_seconds:
+            _CACHE[cache_key] = (ts_now, result)
     return result
 
 
 def clear_actor_enrichment_cache() -> None:
-    _CACHE.clear()
+    with _CACHE_LOCK:
+        _CACHE.clear()
     _identity_map.cache_clear()
     old_enricher = _confluent_identity_enricher()
     if old_enricher is not None and hasattr(old_enricher, "stop"):
