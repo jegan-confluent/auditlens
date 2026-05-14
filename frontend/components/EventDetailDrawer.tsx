@@ -1,6 +1,7 @@
 "use client";
 
 import type { AuditEvent } from "../lib/types";
+import SignalBadge from "./SignalBadge";
 
 const UNKNOWN_PRINCIPAL_LABELS = new Set(["unknown actor", "unknown user", "unknown service account", "unknown principal"]);
 const SERVICE_ACCOUNT_TYPES = new Set(["service_account", "serviceaccount", "service-account"]);
@@ -136,7 +137,7 @@ export default function EventDetailDrawer({ event, onClose, onTriage }: {
       <details className="technical-details">
         <summary>Technical details</summary>
         <div className="detail-grid">
-          <div><div className="detail-label">Signal Type</div><strong>{event.signal_type || "—"}</strong></div>
+          <div><div className="detail-label">Signal Type</div><SignalBadge signal={event.signal_type} size="md" /></div>
           <div><div className="detail-label">Signal Reason</div><strong>{event.signal_reason || "—"}</strong></div>
           <div><div className="detail-label">Risk Level</div><strong>{event.risk_level || "—"}</strong></div>
           <div><div className="detail-label">Impact Type</div><strong>{event.impact_type || "—"}</strong></div>

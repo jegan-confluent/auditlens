@@ -1,5 +1,6 @@
 import { Fragment, useMemo, useState } from "react";
 import type { AuditEvent } from "../lib/types";
+import SignalBadge from "./SignalBadge";
 
 const UNKNOWN_PRINCIPAL_LABELS = new Set(["unknown actor", "unknown user", "unknown service account", "unknown principal"]);
 const SERVICE_ACCOUNT_TYPES = new Set(["service_account", "serviceaccount", "service-account"]);
@@ -215,7 +216,7 @@ function ExpandedEventRow({ event, detail, loading, error }: {
   const resourceText = displayResource(data);
   return (
     <tr className="event-row-expanded">
-      <td colSpan={3}>
+      <td colSpan={4}>
         <div className="expanded-block">
           {loading ? <p className="muted">Loading details…</p> : null}
           {error ? <p className="panel-error">Could not load detail — {error}</p> : null}
@@ -274,6 +275,9 @@ function EventRow({ event, options }: { event: AuditEvent; options: RowOptions }
           <strong className="event-what-title">{plainEng || event.event_title || event.normalized_action}</strong>
           <div className="event-resource-secondary">{resourceText}</div>
         </td>
+        <td style={{ width: 90, verticalAlign: "middle" }}>
+          <SignalBadge signal={event.signal_type} />
+        </td>
         <td className="event-actor-time-cell">
           <div
             className={`event-actor-name${actor.unenriched ? " unenriched" : ""}${onActor ? " identity-clickable" : ""}`}
@@ -316,6 +320,9 @@ function GroupRow({ group, expanded, onToggle, onActorClick }: {
         {" "}
         <strong className="event-what-title">{plainEng || head.event_title || head.normalized_action}</strong>
         <div className="event-resource-secondary">{formatTimeRange(group.events)}</div>
+      </td>
+      <td style={{ width: 90, verticalAlign: "middle" }}>
+        <SignalBadge signal={head.signal_type} />
       </td>
       <td className="event-actor-time-cell">
         <div
@@ -375,6 +382,7 @@ export default function AuditEventTable({
         <thead>
           <tr>
             <th>Event</th>
+            <th style={{ width: 90 }}>Signal</th>
             <th style={{ textAlign: "right" }}>Who / When</th>
             <th style={{ textAlign: "right" }}>Client</th>
           </tr>
