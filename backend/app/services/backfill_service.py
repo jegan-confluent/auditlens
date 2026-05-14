@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from time import sleep
 from typing import Any
 
-from sqlalchemy import or_, select, text, tuple_
+from sqlalchemy import and_, or_, select, text, tuple_
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, load_only, sessionmaker
 
@@ -749,7 +749,7 @@ _UNKNOWN_DISPLAY_NAMES = (
 _ACTOR_BACKFILL_BATCH_SIZE = 500
 _ACTOR_BACKFILL_PROGRESS_LOG_EVERY = 10000
 _ACTOR_BACKFILL_BATCH_SLEEP_MS = 10
-_ACTOR_BACKFILL_STATEMENT_TIMEOUT_MS = 5000
+_ACTOR_BACKFILL_STATEMENT_TIMEOUT_MS = 300000  # 5 minutes; full-table scan on first run
 
 _actor_backfill_lock = threading.Lock()
 _actor_backfill_state: dict[str, Any] = {
@@ -886,15 +886,39 @@ def backfill_actor_display_names(
     updated = 0
     skipped = 0
     errors = 0
+    # Three sequential passes, mutually exclusive — each targets a single
+    # indexed condition so no OR forces a full sequential scan.
+    # Pass 0 uses the partial index on actor_confidence = 'low' (migration 0019).
+    # Passes 1 and 2 exclude confidence='low' rows (already owned by pass 0)
+    # via IS DISTINCT FROM so that rows are never double-counted across passes.
+    _not_low = AuditEvent._actor_confidence.is_distinct_from("low")
+    _PASSES = [
+        ("confidence_low",
+         AuditEvent._actor_confidence == "low"),
+        ("unknown_names",
+         and_(AuditEvent._actor_display_name.in_(_UNKNOWN_DISPLAY_NAMES), _not_low)),
+        ("raw_actor",
+         and_(AuditEvent._actor_display_name == AuditEvent.actor,
+              AuditEvent._actor_display_name.notin_(_UNKNOWN_DISPLAY_NAMES),
+              _not_low)),
+    ]
+    pass_idx = 0
     last_id: int | None = None
 
-    while True:
+    while pass_idx < len(_PASSES):
+        pass_name, filter_clause = _PASSES[pass_idx]
+
         if is_postgres:
             db.execute(
                 text(
                     f"SET LOCAL statement_timeout = {_ACTOR_BACKFILL_STATEMENT_TIMEOUT_MS}"
                 )
             )
+        logger.info(
+            "actor-display-name backfill: fetching next batch (pass=%s, after_id=%s, timeout=300s)",
+            pass_name,
+            last_id,
+        )
         query = (
             select(AuditEvent)
             .options(load_only(
@@ -904,15 +928,7 @@ def backfill_actor_display_names(
                 AuditEvent._actor_source,
                 AuditEvent._actor_confidence,
             ))
-            .where(or_(
-                # Legacy "Unknown X" placeholder rows
-                AuditEvent._actor_display_name.in_(_UNKNOWN_DISPLAY_NAMES),
-                # Raw ID stored as display name — enrichment never produced a name
-                AuditEvent._actor_display_name == AuditEvent.actor,
-                # Fallback/low-confidence enrichment — IAM was never reached or
-                # returned nothing useful (e.g. "User:u-xxx" before prefix fix)
-                AuditEvent._actor_confidence == "low",
-            ))
+            .where(filter_clause)
             .order_by(AuditEvent.id.asc())
             .limit(_ACTOR_BACKFILL_BATCH_SIZE)
         )
@@ -920,7 +936,9 @@ def backfill_actor_display_names(
             query = query.where(AuditEvent.id > last_id)
         batch = db.scalars(query).all()
         if not batch:
-            break
+            pass_idx += 1
+            last_id = None
+            continue
 
         batch_last_id: int | None = None
         for event in batch:
@@ -987,7 +1005,9 @@ def backfill_actor_display_names(
             )
 
         if len(batch) < _ACTOR_BACKFILL_BATCH_SIZE:
-            break
+            # Last page of this pass — advance to next
+            pass_idx += 1
+            last_id = None
 
         if _ACTOR_BACKFILL_BATCH_SLEEP_MS > 0:
             sleep(_ACTOR_BACKFILL_BATCH_SLEEP_MS / 1000.0)

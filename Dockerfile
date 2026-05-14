@@ -65,6 +65,7 @@ COPY --from=builder /install /usr/local
 # Copy application code
 COPY --chown=forwarder:forwarder audit_forwarder.py .
 COPY --chown=forwarder:forwarder src/ ./src/
+COPY --chown=forwarder:forwarder backend/ ./backend/
 
 # Create data directory with proper permissions
 RUN mkdir -p /app/data /tmp/forwarder && \
