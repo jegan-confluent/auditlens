@@ -151,3 +151,4 @@ class SystemStatusResponse(BaseModel):
     pipeline_status: Literal["healthy", "degraded", "stalled", "unknown"] = "unknown"
     storage_health: dict[str, Any] | None = None
     auth_enabled: bool = False
+    confluent_configured: bool = False

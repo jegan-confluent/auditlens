@@ -501,4 +501,7 @@ def get_system_status(db: Session) -> dict[str, Any]:
     except Exception as exc:
         status["cold_storage"] = {"enabled": False, "status": "error", "error": str(exc)}
     status["auth_enabled"] = os.getenv("API_AUTH_ENABLED", "false").lower() == "true"
+    _cf_key = os.getenv("CONFLUENT_CLOUD_API_KEY") or os.getenv("CONFLUENT_API_KEY") or ""
+    _cf_secret = os.getenv("CONFLUENT_CLOUD_API_SECRET") or os.getenv("CONFLUENT_API_SECRET") or ""
+    status["confluent_configured"] = bool(_cf_key and _cf_secret)
     return status
