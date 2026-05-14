@@ -1833,6 +1833,22 @@ def main():
     except Exception as exc:
         logger.warning("Actor mappings init failed (%s) — continuing", exc)
 
+    # Bulk prefetch all IAM identities into the enrich_actor TTL cache so the
+    # dashboard shows real display names immediately without waiting for the
+    # 55-minute background refresh or individual per-event lookups.
+    try:
+        from src.product.actor_enrichment import _bulk_prefetch_identities  # noqa: PLC0415
+        _prefetch_thread = threading.Thread(
+            target=_bulk_prefetch_identities,
+            args=(None,),  # None → uses EnrichmentConfig.from_env() internally
+            daemon=True,
+            name="iam-bulk-prefetch",
+        )
+        _prefetch_thread.start()
+        logger.info("IAM bulk prefetch started in background")
+    except Exception as _prefetch_exc:
+        logger.warning("IAM bulk prefetch start failed: %s", _prefetch_exc)
+
     # Initialize the configurable notification layer (slack/teams/webhook).
     # Failure here must not crash the forwarder — the legacy SLACK_WEBHOOK
     # path stays available via ENABLE_LEGACY_SLACK_WEBHOOK=true.
@@ -2031,6 +2047,8 @@ def main():
     start_ts       = time.time()
     last_heartbeat = start_ts
     last_lag_ts    = start_ts
+    last_iam_prefetch_ts = 0.0  # triggers immediately at first tick
+    _IAM_PREFETCH_INTERVAL = 6 * 3600
     loop_backoff = RuntimeBackoff()
     loop_log_state = {}
     db_write_backoff = RuntimeBackoff(maximum=DB_WRITE_BACKOFF_MAX_SECONDS)
@@ -2732,7 +2750,7 @@ def main():
     def _run_periodic_maintenance(now: float) -> None:
         """Heartbeat + 60 s tick. Runs from the processor thread (or its idle
         path when the queue is empty) so we don't need a third thread."""
-        nonlocal last_heartbeat, last_lag_ts
+        nonlocal last_heartbeat, last_lag_ts, last_iam_prefetch_ts
         if now - last_heartbeat >= 30:
             _refresh_queue_depths()
             _mem_mb_part = ""
@@ -2806,6 +2824,19 @@ def main():
                     metrics.record_persistence_failure(str(exc))
                     logger.warning("Persistence maintenance failed: %s", exc)
             last_lag_ts = now
+
+        if now - last_iam_prefetch_ts > _IAM_PREFETCH_INTERVAL:
+            try:
+                from src.product.actor_enrichment import _bulk_prefetch_identities  # noqa: PLC0415
+                threading.Thread(
+                    target=_bulk_prefetch_identities,
+                    args=(None,),
+                    daemon=True,
+                    name="iam-bulk-refresh",
+                ).start()
+            except Exception as _iam_exc:
+                logger.warning("IAM bulk refresh start failed: %s", _iam_exc)
+            last_iam_prefetch_ts = now
 
     consumer_thread = threading.Thread(target=_consume_thread, name="kafka-consumer")
     processor_thread = threading.Thread(target=_process_thread, name="event-processor")

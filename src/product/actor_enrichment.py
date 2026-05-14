@@ -4,11 +4,14 @@ import os
 import re
 import threading
 import time
+import urllib.parse as _urlparse
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
+
+import requests as _requests
 
 import yaml
 from cachetools import TTLCache
@@ -514,6 +517,103 @@ def _fallback_identity(raw: str, subject_type: str = "") -> dict[str, str | None
         "actor_source": "fallback",
         "actor_confidence": "low" if raw else "medium",
     }
+
+
+def _bulk_prefetch_identities(config: "EnrichmentConfig | None" = None) -> int:
+    """Bulk-load ALL users and service accounts into the TTL cache at startup.
+
+    Makes paginated calls to /iam/v2/users and /iam/v2/service-accounts.
+    Writes results with the exact key format that enrich_actor uses so
+    subsequent per-event calls get cache hits instead of individual lookups.
+
+    Returns count of identities loaded. Returns 0 when creds are not
+    configured (safe to call unconditionally).
+    """
+    if config is None:
+        config = EnrichmentConfig.from_env()
+    if not config.confluent_api_configured:
+        return 0
+
+    base_url = config.confluent_api_base_url
+    key = config.confluent_api_key
+    secret = config.confluent_api_secret
+    loaded = 0
+    ts_now = time.monotonic()
+
+    for endpoint, id_field, name_field, type_label in [
+        ("/iam/v2/users", "id", "full_name", "user"),
+        ("/iam/v2/service-accounts", "id", "display_name", "service_account"),
+    ]:
+        page_token = None
+        while True:
+            url = f"{base_url}{endpoint}?page_size=100"
+            if page_token:
+                url += f"&page_token={page_token}"
+            try:
+                resp = _requests.get(url, auth=(key, secret), timeout=15)
+                if resp.status_code == 401:
+                    logger.warning("IAM bulk prefetch: invalid credentials")
+                    break
+                if resp.status_code == 403:
+                    logger.warning(
+                        "IAM bulk prefetch: insufficient permissions "
+                        "(need OrganizationAdmin or MetricsViewer)"
+                    )
+                    break
+                resp.raise_for_status()
+                data = resp.json()
+            except Exception as exc:
+                logger.warning("IAM bulk prefetch failed (%s): %s", endpoint, exc)
+                break
+
+            for item in data.get("data", []):
+                actor_id = item.get(id_field)
+                if not actor_id:
+                    continue
+                display = item.get(name_field) or actor_id
+                email = item.get("email") or None
+                actor_type = type_label  # "user" or "service_account"
+                result: dict[str, str | None] = {
+                    "actor_id": actor_id,
+                    "actor_display_name": display,
+                    "actor_email": email,
+                    "actor_type": actor_type,
+                    "actor_source": "confluent_api",
+                    "actor_confidence": "high",
+                    "actor_raw_id": actor_id,
+                    "actor_enriched_at": datetime.now(timezone.utc).isoformat(),
+                }
+                # Write with the exact key format enrich_actor uses:
+                #   cache_key = (raw, subject, subject_type)
+                # actual calls: enrich_actor(actor, subject_type=...) → subject=""
+                # so the key is (actor_id, "", subject_type).
+                # Cache value format: (time.monotonic(), result_dict)
+                for st in ("", "user", "service_account", "USER", "SERVICE_ACCOUNT"):
+                    ck = (actor_id, "", st)
+                    with _CACHE_LOCK:
+                        existing = _CACHE.get(ck)
+                        # Only overwrite if absent or lower-quality (fallback)
+                        if not existing or existing[1].get("actor_source") == "fallback":
+                            _CACHE[ck] = (ts_now, result)
+                loaded += 1
+
+            # Handle pagination
+            meta = data.get("metadata", {})
+            next_url = meta.get("next", "") or ""
+            next_token: str | None = None
+            if next_url and "page_token=" in next_url:
+                params = dict(_urlparse.parse_qsl(_urlparse.urlparse(next_url).query))
+                next_token = params.get("page_token")
+            if not next_token:
+                break
+            page_token = next_token
+
+    logger.info("IAM bulk prefetch complete: %d identities loaded", loaded)
+    if loaded:
+        with _CACHE_LOCK:
+            sample = list(_CACHE.keys())[:5]
+        logger.info("IAM prefetch sample keys: %s", sample)
+    return loaded
 
 
 def enrich_actor(actor: str, subject: str = "", subject_type: str = "") -> dict[str, str | None]:
