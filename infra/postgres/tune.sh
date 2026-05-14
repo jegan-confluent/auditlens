@@ -19,7 +19,7 @@ EFFECTIVE_CACHE_MB=$((TOTAL_RAM_MB * 3 / 4))
 # work_mem: budget 4MB per connection, max_connections=50
 # but cap at 64MB to avoid runaway sorts
 WORK_MEM_MB=$((TOTAL_RAM_MB / 50))
-if [ "$WORK_MEM_MB" -gt 64 ]; then WORK_MEM_MB=64; fi
+if [ "$WORK_MEM_MB" -gt 32 ]; then WORK_MEM_MB=32; fi
 if [ "$WORK_MEM_MB" -lt 4 ];  then WORK_MEM_MB=4;  fi
 
 # maintenance_work_mem = 10% of RAM, cap at 512MB
