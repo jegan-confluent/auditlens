@@ -194,7 +194,7 @@ logs: ## Tail EC2 prod logs
 
 deploy: ## Rsync to EC2 + rebuild containers
 	@echo "→ Syncing to EC2 $(EC2_IP)..."
-	rsync -avz --progress \
+	rsync -avz -e "ssh -i $(PEM)" --progress \
 		--exclude='.venv' \
 		--exclude='node_modules' \
 		--exclude='frontend/.next' \
@@ -207,10 +207,13 @@ deploy: ## Rsync to EC2 + rebuild containers
 		--exclude='.env' \
 		--exclude='.secrets' \
 		./ $(REMOTE)
+	ssh -i $(PEM) $(EC2_USER)@$(EC2_IP) \
+		"sudo chown -R 1000:1000 ~/AuditLens/src ~/AuditLens/prometheus && \
+		 sudo chmod -R 755 ~/AuditLens/prometheus/alerts/"
 	@echo "→ Rebuilding and restarting on EC2..."
 	ssh -i $(PEM) $(EC2_USER)@$(EC2_IP) \
 		"cd ~/AuditLens && \
-		docker compose -f docker-compose.prod.yml up -d --build 2>&1 | tail -5"
+		docker compose -f docker-compose.prod.yml up -d --build --force-recreate --remove-orphans 2>&1 | tail -5"
 	@echo "✅  Deploy complete."
 
 deploy-check: ## Dry-run rsync (shows what would change)
@@ -244,6 +247,23 @@ ps: ## Show EC2 container status
 	ssh -i $(PEM) $(EC2_USER)@$(EC2_IP) \
 		"cd ~/AuditLens && \
 		docker compose -f docker-compose.prod.yml ps"
+
+backup-install: ## Install pg_dump cron on EC2 (runs daily at 2am)
+	ssh -i $(PEM) $(EC2_USER)@$(EC2_IP) \
+		"mkdir -p ~/backups/postgres && \
+		chmod +x ~/AuditLens/infra/backup/run_backup.sh && \
+		(crontab -l 2>/dev/null | grep -v run_backup; \
+		echo '0 2 * * * /home/ec2-user/AuditLens/infra/backup/run_backup.sh') | crontab -"
+	@echo "✅ Backup cron installed — runs daily at 2am UTC"
+
+backup-now: ## Run backup immediately on EC2
+	ssh -i $(PEM) $(EC2_USER)@$(EC2_IP) \
+		"bash ~/AuditLens/infra/backup/run_backup.sh"
+	@echo "✅ Backup complete"
+
+backup-list: ## List backups on EC2
+	ssh -i $(PEM) $(EC2_USER)@$(EC2_IP) \
+		"ls -lh ~/backups/postgres/ && echo '---' && tail -5 ~/backups/backup.log"
 
 k8s-status: ## Check Kubernetes deployment status
 	@echo "$(GREEN)Checking deployment status...$(NC)"
