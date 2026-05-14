@@ -6,6 +6,7 @@ import { activeFilterLabels, applyQuickFilter, type EventFilters } from "../lib/
 export { activeFilterLabels, defaultFilters, type EventFilters } from "../lib/eventFilters";
 
 const ACTOR_DEBOUNCE_MS = 300;
+const Q_DEBOUNCE_MS = 300;
 const PRESETS_KEY = "auditlens_filter_presets";
 const MAX_PRESETS = 5;
 
@@ -146,8 +147,42 @@ export default function FilterBar({ filters, options, onChange, onReset }: {
     onChange({ ...filters, actor: "" });
   };
 
+  const [qDraft, setQDraft] = useState(filters.q);
+  const qTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    setQDraft(filters.q);
+  }, [filters.q]);
+
+  const commitQ = (value: string) => {
+    if (qTimer.current) clearTimeout(qTimer.current);
+    qTimer.current = setTimeout(() => {
+      onChange({ ...filters, q: value });
+    }, Q_DEBOUNCE_MS);
+  };
+  const onQInput = (value: string) => {
+    setQDraft(value);
+    commitQ(value);
+  };
+  const onQClear = () => {
+    if (qTimer.current) clearTimeout(qTimer.current);
+    setQDraft("");
+    onChange({ ...filters, q: "" });
+  };
+
   return (
     <section className="filter-panel">
+      <span className="actor-search" style={{ display: "block", marginBottom: 12 }}>
+        <input
+          value={qDraft}
+          onChange={(e) => onQInput(e.target.value)}
+          placeholder="Search events, actors, resources, request IDs…"
+          aria-label="Free-text search"
+          style={{ width: "100%", paddingRight: 32 }}
+        />
+        {qDraft ? (
+          <button type="button" className="actor-search-clear" aria-label="Clear search" onClick={onQClear}>×</button>
+        ) : null}
+      </span>
       <div className="quick-filter-row" aria-label="Quick filters">
         {quickFilters.map((filter) => (
           <button

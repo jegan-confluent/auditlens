@@ -90,6 +90,11 @@ def events(
         default=False,
         description="When true, suppressed/expected patterns are included in decision mode results (for ops debugging).",
     ),
+    q: str | None = Query(
+        default=None,
+        max_length=200,
+        description="Free-text search across event title, actor, resource name, and request ID.",
+    ),
     db: Session = Depends(get_db),
 ):
     if show_noise:
@@ -178,6 +183,7 @@ def events(
             offset=offset,
             cursor=cursor,
             include_suppressed=include_suppressed,
+            q=q,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

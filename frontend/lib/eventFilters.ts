@@ -11,6 +11,7 @@ export type EventFilters = {
   signal: string;
   hide_noise: string;
   impact_type: string;
+  q: string;
 };
 
 // Default landing state = "Action Required": last 12h, decision-mode, only
@@ -28,7 +29,8 @@ export const defaultFilters: EventFilters = {
   result: "",
   signal: "action_required",
   hide_noise: "true",
-  impact_type: ""
+  impact_type: "",
+  q: "",
 };
 
 export const allActivityFilters: EventFilters = {
@@ -43,7 +45,8 @@ export const allActivityFilters: EventFilters = {
   result: "",
   signal: "",
   hide_noise: "false",
-  impact_type: ""
+  impact_type: "",
+  q: "",
 };
 
 const RESULT_TO_QUERY: Record<string, { result?: string; is_denied?: string }> = {
@@ -120,6 +123,10 @@ export function paramsFromFilters(filters: EventFilters, offset = 0) {
       if (encoded) params.set("time_window", encoded);
       return;
     }
+    if (key === "q") {
+      if (value.trim()) params.set("q", value.trim());
+      return;
+    }
     if (value.trim()) params.set(key, value.trim());
   });
   return params;
@@ -156,6 +163,7 @@ export function activeFilterLabels(filters: EventFilters) {
     if (key === "impact_type" && value === "access_change") return "Access changes";
     if (key === "cluster_name") return `Cluster: ${value}`;
     if (key === "environment_name") return `Environment: ${value}`;
+    if (key === "q") return `Search: "${value}"`;
     return `${key.replace("_", " ")}: ${value}`;
   };
   return Object.entries(filters)

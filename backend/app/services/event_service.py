@@ -250,6 +250,7 @@ def _event_filter_conditions(
     action: str | None = None,
     result: str | None = None,
     is_denied: bool | None = None,
+    q: str | None = None,
 ) -> list[Any]:
     conditions: list[Any] = []
     since = parse_time_window(time_window)
@@ -304,6 +305,17 @@ def _event_filter_conditions(
         conditions.append(AuditEvent.result == result.strip())
     if is_denied is True:
         conditions.append(AuditEvent.is_denied.is_(True))
+    if q and q.strip():
+        pattern = f"%{q.strip().lower()}%"
+        conditions.append(
+            or_(
+                func.lower(AuditEvent._event_title).like(pattern),
+                func.lower(AuditEvent.actor).like(pattern),
+                func.lower(AuditEvent._actor_display_name).like(pattern),
+                func.lower(AuditEvent.resource_name).like(pattern),
+                func.lower(AuditEvent._request_id).like(pattern),
+            )
+        )
     return conditions
 
 
