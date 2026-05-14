@@ -16,7 +16,7 @@ router = APIRouter(tags=["system"])
 
 # Browser hits the backend (CORS-allowed) instead of the forwarder's port
 # 8003 directly. The backend forwards the call inside Docker.
-_FORWARDER_REQUEST_TIMEOUT_SECONDS = 5.0
+_FORWARDER_REQUEST_TIMEOUT_SECONDS = 10.0
 _VACUUM_REQUEST_TIMEOUT_SECONDS = 30.0
 
 
