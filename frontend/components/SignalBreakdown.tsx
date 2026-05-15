@@ -113,7 +113,7 @@ export default function SignalBreakdown({
     if (onTierSelect) {
       onTierSelect(next);
     } else {
-      console.log("[SignalBreakdown] tier selected:", next);
+      if (process.env.NODE_ENV === "development") console.log("[SignalBreakdown] tier selected:", next);
     }
   }
 
