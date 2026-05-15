@@ -3016,3 +3016,104 @@ pre {
   text-decoration: underline;
 }
 .settings-tab-content { padding-top: 4px; }
+
+/* ── Actor Mappings UI ─────────────────────────────────────────── */
+.actor-map-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+.actor-map-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  margin-top: 12px;
+}
+.actor-map-table th,
+.actor-map-table td {
+  text-align: left;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+.actor-map-table th {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+}
+.actor-map-table tbody tr:hover {
+  background: var(--surface);
+}
+.actor-map-editing td,
+.actor-map-confirm-delete td {
+  background: var(--panel);
+}
+.actor-map-confirm-msg {
+  color: var(--danger);
+  font-size: 13px;
+}
+.actor-map-edit-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+}
+.actor-map-input {
+  flex: 1;
+  min-width: 120px;
+}
+.actor-map-actions {
+  display: flex;
+  gap: 6px;
+  white-space: nowrap;
+}
+.actor-map-btn {
+  padding: 5px 10px;
+  font-size: 12px;
+}
+.actor-map-danger {
+  background: var(--danger) !important;
+  color: #fff !important;
+}
+
+/* ── Resource Catalog ──────────────────────────────────────────── */
+.resource-catalog-filters {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+.resource-catalog-table td {
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.resource-id {
+  font-size: 12px;
+  color: var(--muted);
+}
+.resource-type-pill {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  color: #fff;
+  padding: 2px 7px;
+  border-radius: 10px;
+  white-space: nowrap;
+}
+.resource-count-col {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}

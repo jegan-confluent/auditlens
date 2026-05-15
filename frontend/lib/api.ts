@@ -168,6 +168,86 @@ export async function submitFeedback(payload: FeedbackPayload): Promise<Feedback
   return response.json() as Promise<FeedbackResponse>;
 }
 
+export type ActorMapping = {
+  raw_id: string;
+  display_name: string;
+  team: string | null;
+  notes: string | null;
+};
+
+export type ActorMappingIn = {
+  raw_id: string;
+  display_name: string;
+  team?: string | null;
+  notes?: string | null;
+};
+
+export async function getActorMappings(): Promise<ActorMapping[]> {
+  const r = await fetch(`${API_BASE}/actor-mappings`, { cache: "no-store" });
+  if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+  return r.json() as Promise<ActorMapping[]>;
+}
+
+export async function createActorMapping(payload: ActorMappingIn): Promise<ActorMapping> {
+  const r = await fetch(`${API_BASE}/actor-mappings`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    cache: "no-store",
+    body: JSON.stringify(payload),
+  });
+  if (!r.ok) {
+    const body = await r.text();
+    throw new Error(body || `${r.status} ${r.statusText}`);
+  }
+  return r.json() as Promise<ActorMapping>;
+}
+
+export async function updateActorMapping(rawId: string, payload: ActorMappingIn): Promise<ActorMapping> {
+  const r = await fetch(`${API_BASE}/actor-mappings/${encodeURIComponent(rawId)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    cache: "no-store",
+    body: JSON.stringify(payload),
+  });
+  if (!r.ok) {
+    const body = await r.text();
+    throw new Error(body || `${r.status} ${r.statusText}`);
+  }
+  return r.json() as Promise<ActorMapping>;
+}
+
+export async function deleteActorMapping(rawId: string): Promise<void> {
+  const r = await fetch(`${API_BASE}/actor-mappings/${encodeURIComponent(rawId)}`, {
+    method: "DELETE",
+    cache: "no-store",
+  });
+  if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+}
+
+export type ResourceCatalogItem = {
+  resource_id: string;
+  resource_type: string;
+  resource_name: string;
+  display_name: string | null;
+  environment_id: string | null;
+  environment_name: string | null;
+  cluster_id: string | null;
+  first_seen: string;
+  last_seen: string;
+  event_count: number;
+};
+
+export async function getResourceCatalog(params?: { resource_type?: string; search?: string; limit?: number }): Promise<ResourceCatalogItem[]> {
+  const q = new URLSearchParams();
+  if (params?.resource_type) q.set("resource_type", params.resource_type);
+  if (params?.search) q.set("search", params.search);
+  if (params?.limit) q.set("limit", String(params.limit));
+  const qs = q.toString();
+  const r = await fetch(`${API_BASE}/resources${qs ? `?${qs}` : ""}`, { cache: "no-store" });
+  if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+  return r.json() as Promise<ResourceCatalogItem[]>;
+}
+
 export type ReadinessSnapshot = {
   ok: boolean;
   status: number;
