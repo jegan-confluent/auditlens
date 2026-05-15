@@ -421,6 +421,72 @@ services:
     security_opt:
       - no-new-privileges:true
 
+  mcp-server:
+    build:
+      context: .
+      dockerfile: src/mcp/Dockerfile
+      args:
+        BUILDKIT_INLINE_CACHE: 1
+    image: audit-mcp-server:v1.0.0
+    container_name: audit-mcp-server
+    restart: always
+    env_file:
+      - path: .env
+        required: false
+      - path: .secrets
+        required: false
+    environment:
+      - MCP_PORT=${MCP_PORT:-8089}
+      - MCP_HOST=0.0.0.0
+      - MCP_AUTH_TOKEN=${MCP_AUTH_TOKEN:-}
+      - AUDIT_ENRICHED_TOPIC=${AUDIT_ENRICHED_TOPIC:-audit.enriched.v1}
+      - AUDIT_ALERTS_TOPIC=${AUDIT_ALERTS_TOPIC:-audit.alerts.v1}
+      - DEST_BOOTSTRAP=${DEST_BOOTSTRAP:-}
+      - DEST_API_KEY=${DEST_API_KEY:-}
+      - DEST_API_SECRET=${DEST_API_SECRET:-}
+      - SECURITY_PROTOCOL=${SECURITY_PROTOCOL:-SASL_SSL}
+      - SASL_MECHANISM=${SASL_MECHANISM:-PLAIN}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-1}
+      - GCS_PROJECT_ID=${GCS_PROJECT_ID:-}
+      - GOOGLE_APPLICATION_CREDENTIALS=${GOOGLE_APPLICATION_CREDENTIALS:-}
+      - CONFLUENT_CLOUD_API_KEY=${CONFLUENT_CLOUD_API_KEY:-}
+      - CONFLUENT_CLOUD_API_SECRET=${CONFLUENT_CLOUD_API_SECRET:-}
+    ports:
+      - "127.0.0.1:${MCP_PORT:-8089}:${MCP_PORT:-8089}"
+    networks:
+      - kafka-network
+      - frontend-network
+    depends_on:
+      - api
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:$${MCP_PORT:-8089}/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 256M
+        reservations:
+          cpus: '0.10'
+          memory: 64M
+    cpus: "0.50"
+    mem_limit: 256m
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777,size=100M
+      - /app/cache:mode=0700,size=100M,uid=1001,gid=1001
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+
 networks:
   kafka-network:
     driver: bridge
