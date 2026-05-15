@@ -258,8 +258,9 @@ def create_event(db: Session, payload: dict[str, Any]) -> AuditEvent:
     try:
         db.commit()
         db.refresh(event)
-    except Exception:
+    except Exception as exc:
         db.rollback()
+        logger.debug("commit failed (likely fingerprint collision, checking for existing): %s", exc)
         existing = db.scalar(select(AuditEvent).where(AuditEvent.event_fingerprint == fingerprint))
         if existing is None:
             raise
@@ -286,7 +287,8 @@ def get_event(db: Session, event_id: int) -> AuditEvent | None:
             rbac_role = rbac.get("role") if isinstance(rbac, dict) else None
             scope_list = rbac.get("scope", {}).get("outerScope", []) if isinstance(rbac, dict) else []
             rbac_scope = scope_list[0] if scope_list else None
-        except Exception:
+        except Exception as exc:
+            logger.debug("Failed to parse RBAC fields from raw payload: %s", exc)
             rbac_role = None
             rbac_scope = None
         setattr(event, "rbac_role", rbac_role)

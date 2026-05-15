@@ -85,7 +85,8 @@ class S3Backend:
             full_key = f"{self._prefix}/{key}" if self._prefix else key
             self._client().head_object(Bucket=self._bucket, Key=full_key)
             return True
-        except Exception:
+        except Exception as exc:
+            logger.debug("S3 exists check failed for key=%s: %s", key, exc)
             return False
 
     def test_connection(self) -> tuple[bool, str]:
@@ -131,7 +132,8 @@ class GCSBackend:
             bucket = client.bucket(self._bucket)
             full_key = f"{self._prefix}/{key}" if self._prefix else key
             return bucket.blob(full_key).exists()
-        except Exception:
+        except Exception as exc:
+            logger.debug("GCS exists check failed for key=%s: %s", key, exc)
             return False
 
     def test_connection(self) -> tuple[bool, str]:
@@ -282,7 +284,8 @@ def get_cold_storage_status(db: Session) -> dict[str, Any]:
         enabled = settings_service.get(db, "cold_storage", "enabled")
         provider = settings_service.get(db, "cold_storage", "provider")
         bucket = settings_service.get(db, "cold_storage", "bucket")
-    except Exception:
+    except Exception as exc:
+        logger.warning("Failed to read cold storage settings: %s", exc)
         enabled = None
         provider = None
         bucket = None

@@ -66,7 +66,8 @@ def get_masked(db: Session, category: str, key: str) -> str | None:
     if row.is_secret:
         try:
             decrypted = decrypt(row.value_enc) if row.value_enc else ""
-        except Exception:
+        except Exception as exc:
+            logger.warning("Failed to decrypt %s/%s for masking: %s", row.category, row.key, exc)
             decrypted = ""
         return _mask(decrypted or "****")
     return row.value

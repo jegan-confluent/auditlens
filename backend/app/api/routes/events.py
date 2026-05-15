@@ -1,7 +1,10 @@
 import csv
 import io
 import json
+import logging
 from typing import Any, Union
+
+logger = logging.getLogger("auditlens.backend.events")
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
@@ -44,7 +47,8 @@ class _RedactedEventView:
 def _can_view_raw_payload(headers) -> bool:
     try:
         auth_config = AuthConfig.from_env()
-    except Exception:
+    except Exception as exc:
+        logger.warning("Auth config unavailable, denying raw payload access: %s", exc)
         return False
     if not auth_config.enabled:
         return True

@@ -141,7 +141,8 @@ def _as_text(value: Any) -> str:
 def _has_column(event: AuditEvent, column_name: str) -> bool:
     try:
         return hasattr(type(event), column_name) or hasattr(event, column_name)
-    except Exception:
+    except Exception as exc:
+        logger.debug("_has_column check failed for %s: %s", column_name, exc)
         return False
 
 
@@ -511,7 +512,8 @@ def backfill_source_fields_from_raw_payload(
                 _ts_str, _id_str = _saved.rsplit("|", 1)
                 cursor = (datetime.fromisoformat(_ts_str), int(_id_str))
                 logger.info("backfill_source_fields: resuming from cursor %s", cursor)
-            except Exception:
+            except Exception as exc:
+                logger.warning("backfill_source_fields: invalid cursor '%s', restarting from beginning: %s", _saved, exc)
                 cursor = None
     while processed < limit:
         current_limit = 1 if target_id is not None else min(batch_size, limit - processed)

@@ -18,8 +18,8 @@ def _set_timeout(db: Session) -> None:
     if db.get_bind().dialect.name == "postgresql":
         try:
             db.execute(text(f"SET LOCAL statement_timeout = {PATTERN_TIMEOUT_MS}"))
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Could not set statement_timeout: %s", exc)
 
 
 def _expire_stale_patterns(db: Session) -> None:
