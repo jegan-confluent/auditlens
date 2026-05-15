@@ -195,3 +195,8 @@ verifynews.sh
 verifynew.sh
 verify.sh
 *.backup
+audit_forwarder.py.backup.*
+datalayersnew.py
+project-brief.html
+infra/backup/
+.claude/diary/
