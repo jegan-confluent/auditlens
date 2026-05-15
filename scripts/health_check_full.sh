@@ -3,7 +3,7 @@
 # Run on EC2: bash ~/AuditLens/scripts/health_check.sh
 # Produces a pass/fail report for all services, logs, and data pipeline
 
-set -euo pipefail
+set -uo pipefail
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -72,7 +72,7 @@ fi
 header "2. API HEALTH ENDPOINTS"
 
 # API health
-API_HEALTH=$(curl -s --max-time 5 http://localhost:8080/health 2>/dev/null || echo "")
+API_HEALTH=$(curl -s --max-time 5 http://localhost/api/health 2>/dev/null || echo "")
 if echo "$API_HEALTH" | grep -q '"status":"ok"'; then
   DB_MODE=$(echo "$API_HEALTH" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('database_mode','unknown'))" 2>/dev/null || echo "unknown")
   pass "API /health — OK (db_mode=$DB_MODE)"
@@ -102,7 +102,7 @@ else
 fi
 
 # Caddy / frontend
-FRONTEND=$(curl -s --max-time 5 -o /dev/null -w "%{http_code}" http://localhost/ 2>/dev/null || echo "000")
+FRONTEND=$(curl -s -L --max-time 5 -o /dev/null -w "%{http_code}" http://localhost/ 2>/dev/null || echo "000")
 if [ "$FRONTEND" = "200" ]; then
   pass "Caddy/Frontend — HTTP $FRONTEND"
 else
