@@ -33,6 +33,15 @@ _DATA_PLANE_PREFIXES: tuple[str, ...] = (
     "mds.",
 )
 _DATA_PLANE_EXACT: frozenset[str] = frozenset({"scheduledjwksrefresh"})
+_DATA_PLANE_PASCAL: tuple[str, ...] = (
+    "tableflow",
+    "getstatement",
+    "listworkspace",
+    "listcomputepool",
+    "getkafkacluster",
+    "getconnector",
+    "getflinkstatement",
+)
 
 
 def derive_plane_type(action: str | None) -> str:
@@ -41,6 +50,9 @@ def derive_plane_type(action: str | None) -> str:
         return "control_plane"
     action_lower = action.lower()
     for prefix in _DATA_PLANE_PREFIXES:
+        if action_lower.startswith(prefix):
+            return "data_plane"
+    for prefix in _DATA_PLANE_PASCAL:
         if action_lower.startswith(prefix):
             return "data_plane"
     if action_lower in _DATA_PLANE_EXACT:
