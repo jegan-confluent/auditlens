@@ -14,13 +14,13 @@ const SIGNAL_CARDS: ReadonlyArray<{
   className: string;
   icon: string;
   label: string;
-  contextLabel: string;
+  contextLabel: string | ((count: number) => string);
   alertClass?: (count: number) => string;
 }> = [
   { fieldKey: "noise_count", className: "noise", icon: "🔇", label: "Noise", contextLabel: "all clear" },
   { fieldKey: "informational_count", className: "info", icon: "ℹ️", label: "Info", contextLabel: "informational" },
   { fieldKey: "attention_count", className: "review", icon: "👀", label: "Review", contextLabel: "monitored", alertClass: (c) => c > 0 ? "amber" : "" },
-  { fieldKey: "action_required_count", className: "action", icon: "🔴", label: "Action", contextLabel: "needs review", alertClass: (c) => c > 0 ? "red" : "" },
+  { fieldKey: "action_required_count", className: "action", icon: "🔴", label: "Action", contextLabel: (c) => c > 0 ? "needs review" : "all clear", alertClass: (c) => c > 0 ? "red" : "" },
 ];
 
 type ActorFlow = {
@@ -203,7 +203,7 @@ export default function SignalSummaryPanel({ summary, onApplyFlow, currentSignal
               <span className="signal-stat-icon" aria-hidden>{icon}</span>
               <span className="signal-stat-count">{count.toLocaleString()}</span>
               <span className="signal-stat-label">{label}</span>
-              <span className="signal-stat-context">{contextLabel}</span>
+              <span className="signal-stat-context">{typeof contextLabel === "function" ? contextLabel(count) : contextLabel}</span>
             </button>
           );
         })}

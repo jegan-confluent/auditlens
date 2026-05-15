@@ -914,11 +914,14 @@ button.narrative-item:hover {
 .signal-stat-card.amber {
   background: var(--warn-soft);
   border-color: #fedf89;
+  border-left: 3px solid #BA7517;
 }
 .signal-stat-card.red {
   background: var(--danger-soft);
   border-color: #fecdca;
+  border-left: 3px solid #E24B4A;
 }
+.signal-stat-card.red .signal-stat-count { color: #A32D2D; }
 .signal-stat-card.active {
   outline: 2px solid var(--primary, #1d4ed8);
   outline-offset: -2px;
@@ -941,7 +944,7 @@ button.narrative-item:hover {
   font-variant-numeric: tabular-nums;
 }
 .signal-stat-card.amber .signal-stat-count { color: var(--warn); }
-.signal-stat-card.red .signal-stat-count { color: var(--danger); }
+.signal-stat-card.red .signal-stat-count { color: #A32D2D; }
 .signal-stat-label {
   font-size: 12px;
   text-transform: uppercase;
