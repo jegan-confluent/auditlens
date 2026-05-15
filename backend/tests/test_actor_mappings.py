@@ -22,6 +22,7 @@ def client(monkeypatch, tmp_path):
         db_path = Path(tmpdir) / "actor_mappings_test.db"
         monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path}")
         monkeypatch.setenv("FORWARDER_HEALTH_URL", "http://127.0.0.1:9/health")
+        monkeypatch.setenv("API_AUTH_ENABLED", "false")
         monkeypatch.setattr("backend.app.main.init_db", lambda: None)
         get_settings.cache_clear()
         from backend.app.core.limiter import limiter
@@ -109,3 +110,15 @@ def test_delete_actor_mapping_success(client):
 def test_delete_actor_mapping_not_found_returns_404(client):
     r = client.delete("/actor-mappings/sa-does-not-exist")
     assert r.status_code == 404
+
+
+def test_actor_mapping_post_requires_admin_when_auth_enabled(client, monkeypatch):
+    monkeypatch.setenv("API_AUTH_ENABLED", "true")
+    r = client.post("/actor-mappings", json={"raw_id": "sa-test", "display_name": "Test"})
+    assert r.status_code in (401, 403, 503)
+
+
+def test_actor_mapping_delete_requires_admin_when_auth_enabled(client, monkeypatch):
+    monkeypatch.setenv("API_AUTH_ENABLED", "true")
+    r = client.delete("/actor-mappings/sa-existing")
+    assert r.status_code in (401, 403, 503)

@@ -46,6 +46,7 @@ def noise_client(monkeypatch):
         db_path = Path(tmp) / "auditlens.db"
         monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path}")
         monkeypatch.setenv("FORWARDER_HEALTH_URL", "http://127.0.0.1:9/health")
+        monkeypatch.setenv("API_AUTH_ENABLED", "false")
         monkeypatch.setattr("backend.app.main.init_db", lambda: None)
         get_settings.cache_clear()
         from backend.app.services.system_service import reset_forwarder_health_cache
@@ -134,6 +135,7 @@ def noise_client_no_table(monkeypatch):
         db_path = Path(tmp) / "auditlens.db"
         monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path}")
         monkeypatch.setenv("FORWARDER_HEALTH_URL", "http://127.0.0.1:9/health")
+        monkeypatch.setenv("API_AUTH_ENABLED", "false")
         monkeypatch.setattr("backend.app.main.init_db", lambda: None)
         get_settings.cache_clear()
         from backend.app.services.system_service import reset_forwarder_health_cache

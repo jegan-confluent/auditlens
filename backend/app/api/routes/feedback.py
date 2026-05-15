@@ -70,6 +70,7 @@ class FeedbackOut(BaseModel):
 def submit_feedback(
     payload: FeedbackCreate,
     request: Request,
+    _auth: None = Depends(_require_viewer),
     db: Session = Depends(get_db),
 ) -> Any:
     ip = request.client.host if request.client else "unknown"

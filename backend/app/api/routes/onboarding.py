@@ -126,7 +126,8 @@ async def discover(request: Request, body: DiscoverRequest) -> dict[str, Any]:
 
 
 @router.post("/onboarding/validate-cluster")
-async def validate_cluster(body: ValidateClusterRequest) -> dict[str, Any]:
+@limiter.limit("5/minute")
+async def validate_cluster(request: Request, body: ValidateClusterRequest) -> dict[str, Any]:
     try:
         from confluent_kafka.admin import AdminClient  # type: ignore[import-untyped]
 

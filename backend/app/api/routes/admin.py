@@ -32,7 +32,7 @@ def _get_auth_config() -> AuthConfig:
     now = time.monotonic()
     # Include the key toggle in the cache key so env-var changes (e.g. in
     # tests via monkeypatch) invalidate the cache immediately.
-    enabled_flag = _os.getenv("API_AUTH_ENABLED", "false")
+    enabled_flag = _os.getenv("API_AUTH_ENABLED", "true")
     with _auth_config_lock:
         if (
             _auth_config_cache is not None

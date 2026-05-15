@@ -61,7 +61,7 @@ def _startup_checks() -> None:
         check_db_health()
     except Exception:
         logger.exception("Database startup check failed; API will continue and report not_ready on /ready")
-    if os.getenv("API_AUTH_ENABLED", "false").lower() == "true":
+    if os.getenv("API_AUTH_ENABLED", "true").lower() == "true":
         try:
             AuthConfig.from_env()
         except Exception as exc:

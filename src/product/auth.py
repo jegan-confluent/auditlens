@@ -59,7 +59,7 @@ class AuthConfig:
 
     @classmethod
     def from_env(cls) -> "AuthConfig":
-        enabled = os.getenv("API_AUTH_ENABLED", "false").lower() == "true"
+        enabled = os.getenv("API_AUTH_ENABLED", "true").lower() == "true"
         if not enabled:
             return cls(enabled=False, tokens={})
 

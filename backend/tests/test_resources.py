@@ -18,6 +18,7 @@ def client(monkeypatch):
         db_path = Path(tmp) / "resources_test.db"
         monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path}")
         monkeypatch.setenv("FORWARDER_HEALTH_URL", "http://127.0.0.1:9/health")
+        monkeypatch.setenv("API_AUTH_ENABLED", "false")
         monkeypatch.setattr("backend.app.main.init_db", lambda: None)
         get_settings.cache_clear()
         from backend.app.core.limiter import limiter

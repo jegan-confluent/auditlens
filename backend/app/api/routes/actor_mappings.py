@@ -13,7 +13,7 @@ import yaml
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from backend.app.api.routes.patterns import _require_viewer
+from backend.app.api.routes.patterns import _require_admin, _require_viewer
 
 router = APIRouter(tags=["actor_mappings"])
 
@@ -76,7 +76,7 @@ def list_actor_mappings(_auth: None = Depends(_require_viewer)) -> list[ActorMap
 @router.post("/actor-mappings", response_model=ActorMappingOut, status_code=201)
 def create_actor_mapping(
     payload: ActorMappingIn,
-    _auth: None = Depends(_require_viewer),
+    _auth: None = Depends(_require_admin),
 ) -> ActorMappingOut:
     with _write_lock:
         doc = _load_yaml()
@@ -108,7 +108,7 @@ def create_actor_mapping(
 def update_actor_mapping(
     raw_id: str,
     payload: ActorMappingIn,
-    _auth: None = Depends(_require_viewer),
+    _auth: None = Depends(_require_admin),
 ) -> ActorMappingOut:
     with _write_lock:
         doc = _load_yaml()
@@ -143,7 +143,7 @@ def update_actor_mapping(
 @router.delete("/actor-mappings/{raw_id}")
 def delete_actor_mapping(
     raw_id: str,
-    _auth: None = Depends(_require_viewer),
+    _auth: None = Depends(_require_admin),
 ) -> dict[str, Any]:
     with _write_lock:
         doc = _load_yaml()

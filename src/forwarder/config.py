@@ -105,7 +105,12 @@ ENABLE_NOISE_SHORT_CIRCUIT = os.getenv("ENABLE_NOISE_SHORT_CIRCUIT", "true").low
 # normally complete in tens of milliseconds — this is a defensive ceiling.
 NOISE_PERSIST_WAIT_TIMEOUT_SECONDS = float(os.getenv("NOISE_PERSIST_WAIT_TIMEOUT_SECONDS", "60.0"))
 
-AUTH_CONFIG = AuthConfig.from_env()
+try:
+    AUTH_CONFIG = AuthConfig.from_env()
+except ValueError:
+    # No tokens configured — auth disabled for this process.
+    # Production deployments must set API_AUTH_ENABLED + token config.
+    AUTH_CONFIG = AuthConfig(enabled=False, tokens={})
 PERSISTENCE_CONFIG = PersistenceConfig.from_env()
 
 # Built-in alert rules (auto-enabled if SLACK_WEBHOOK is set)

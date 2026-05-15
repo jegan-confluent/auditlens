@@ -10,8 +10,10 @@ import os
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
+
+from backend.app.api.routes.patterns import _require_admin
 
 router = APIRouter(tags=["tableflow"])
 
@@ -48,7 +50,7 @@ class EnableTableflowRequest(BaseModel):
 
 
 @router.get("/tableflow/status")
-async def tableflow_status() -> dict[str, Any]:
+async def tableflow_status(request: Request, _auth: None = Depends(_require_admin)) -> dict[str, Any]:
     key, secret = _require_creds()
     cluster_id, env_id, cluster_cloud = _cluster_context()
 
@@ -91,7 +93,7 @@ async def tableflow_status() -> dict[str, Any]:
 
 
 @router.post("/tableflow/enable")
-async def tableflow_enable(body: EnableTableflowRequest) -> dict[str, Any]:
+async def tableflow_enable(body: EnableTableflowRequest, request: Request, _auth: None = Depends(_require_admin)) -> dict[str, Any]:
     key, secret = _require_creds()
     cluster_id, env_id, cluster_cloud = _cluster_context()
 
@@ -136,7 +138,7 @@ async def tableflow_enable(body: EnableTableflowRequest) -> dict[str, Any]:
 
 
 @router.post("/tableflow/disable")
-async def tableflow_disable() -> dict[str, Any]:
+async def tableflow_disable(request: Request, _auth: None = Depends(_require_admin)) -> dict[str, Any]:
     key, secret = _require_creds()
     cluster_id, env_id, _ = _cluster_context()
 

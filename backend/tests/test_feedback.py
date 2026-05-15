@@ -18,6 +18,7 @@ def client(monkeypatch):
         db_path = Path(tmp) / "feedback_test.db"
         monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path}")
         monkeypatch.setenv("FORWARDER_HEALTH_URL", "http://127.0.0.1:9/health")
+        monkeypatch.setenv("API_AUTH_ENABLED", "false")
         monkeypatch.setattr("backend.app.main.init_db", lambda: None)
         get_settings.cache_clear()
         from backend.app.core.limiter import limiter
@@ -128,3 +129,13 @@ def test_list_feedback_filter_by_type(client):
     assert r.status_code == 200
     data = r.json()
     assert all(item["type"] == "bug" for item in data)
+
+
+def test_feedback_post_requires_auth_when_auth_enabled(client, monkeypatch):
+    monkeypatch.setenv("API_AUTH_ENABLED", "true")
+    r = client.post("/feedback", json={
+        "type": "bug",
+        "title": "Auth test feedback",
+        "description": "This request should be rejected without a valid token.",
+    })
+    assert r.status_code in (401, 403, 503)
