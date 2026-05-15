@@ -1,6 +1,9 @@
+import asyncio
+import contextlib
 import os
 import logging
 import time
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,10 +18,86 @@ from backend.app.api.routes import onboarding as onboarding_routes
 from backend.app.api.routes import tableflow as tableflow_routes
 from backend.app.core.config import get_settings
 from backend.app.core.limiter import limiter
-from backend.app.db.database import check_db_health, init_db
+from backend.app.db.database import check_db_health, init_db, SessionLocal
+from backend.app.services.event_service import cleanup_retention
 from src.product.auth import AuthConfig
 
 logger = logging.getLogger("auditlens.backend")
+
+_RETENTION_LOOP_STARTUP_DELAY_S = 300   # 5 min after API start
+_RETENTION_LOOP_INTERVAL_S = 86400      # 24 h
+
+
+async def _retention_loop() -> None:
+    """Run retention cleanup once daily in the background. Non-fatal."""
+    await asyncio.sleep(_RETENTION_LOOP_STARTUP_DELAY_S)
+    while True:
+        try:
+            settings = get_settings()
+            if settings.event_retention_days > 0:
+                def _run_cleanup():
+                    db = SessionLocal()
+                    try:
+                        return cleanup_retention(
+                            db,
+                            settings.event_retention_days,
+                            raw_payload_retention_days=settings.raw_payload_retention_days,
+                            noise_retention_days=settings.noise_retention_days,
+                        )
+                    finally:
+                        db.close()
+                result = await asyncio.to_thread(_run_cleanup)
+                logger.info("Auto-retention: %s", result)
+        except Exception as exc:
+            logger.warning("Auto-retention failed (non-fatal): %s", exc)
+        await asyncio.sleep(_RETENTION_LOOP_INTERVAL_S)
+
+
+def _startup_checks() -> None:
+    try:
+        init_db()
+        check_db_health()
+    except Exception:
+        logger.exception("Database startup check failed; API will continue and report not_ready on /ready")
+    if os.getenv("API_AUTH_ENABLED", "false").lower() == "true":
+        try:
+            AuthConfig.from_env()
+        except Exception as exc:
+            logger.warning("API auth is enabled but no valid tokens are configured; continuing startup: %s", exc)
+    else:
+        logger.warning(
+            "API_AUTH_ENABLED is false — all endpoints are publicly accessible. "
+            "Set API_AUTH_ENABLED=true and configure tokens before any external exposure."
+        )
+    try:
+        from sqlalchemy import inspect
+        from backend.app.db.database import engine
+
+        if "audit_events_noise" not in set(inspect(engine).get_table_names()):
+            logger.warning(
+                "audit_events_noise table not present — /summary/methods and "
+                "/events?show_noise=true will return empty results until Alembic "
+                "migration 0007_noise_table is applied"
+            )
+        else:
+            logger.info("audit_events_noise table present — noise query path active")
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("audit_events_noise existence check failed: %s", exc)
+    logger.info(
+        "AuditLens API started — no telemetry, no phone-home. "
+        "All audit data stays within this deployment."
+    )
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    _startup_checks()
+    task = asyncio.create_task(_retention_loop())
+    yield
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
 
 # Routes that must never be rate-limited (kubelet probes, API liveness checks).
 _EXEMPT_PATHS: frozenset[str] = frozenset(
@@ -51,7 +130,7 @@ class _ExemptingMiddleware(SlowAPIMiddleware):
 
 def create_app() -> FastAPI:
     settings = get_settings()
-    app = FastAPI(title=settings.api_title, version=settings.api_version)
+    app = FastAPI(title=settings.api_title, version=settings.api_version, lifespan=_lifespan)
 
     # Wire slowapi: install the limiter on app state, register the 429 handler,
     # and add the middleware that enforces default_limits across non-exempt
@@ -87,46 +166,6 @@ def create_app() -> FastAPI:
         return JSONResponse(
             status_code=500,
             content={"error": {"code": "internal_error", "message": "Internal server error"}},
-        )
-
-    @app.on_event("startup")
-    def startup() -> None:
-        try:
-            init_db()
-            check_db_health()
-        except Exception:
-            logger.exception("Database startup check failed; API will continue and report not_ready on /ready")
-        if os.getenv("API_AUTH_ENABLED", "false").lower() == "true":
-            try:
-                AuthConfig.from_env()
-            except Exception as exc:
-                logger.warning("API auth is enabled but no valid tokens are configured; continuing startup: %s", exc)
-        else:
-            logger.warning(
-                "API_AUTH_ENABLED is false — all endpoints are publicly accessible. "
-                "Set API_AUTH_ENABLED=true and configure tokens before any external exposure."
-            )
-        # Probe for the noise table once at startup. Absence is non-fatal:
-        # /summary/methods, /summary?include_noise, and /events?show_noise
-        # all degrade gracefully — but operators benefit from a clear
-        # signal that an older deployment is running pre-migration-0007.
-        try:
-            from sqlalchemy import inspect
-            from backend.app.db.database import engine
-
-            if "audit_events_noise" not in set(inspect(engine).get_table_names()):
-                logger.warning(
-                    "audit_events_noise table not present — /summary/methods and "
-                    "/events?show_noise=true will return empty results until Alembic "
-                    "migration 0007_noise_table is applied"
-                )
-            else:
-                logger.info("audit_events_noise table present — noise query path active")
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.warning("audit_events_noise existence check failed: %s", exc)
-        logger.info(
-            "AuditLens API started — no telemetry, no phone-home. "
-            "All audit data stays within this deployment."
         )
 
     app.include_router(health.router)
