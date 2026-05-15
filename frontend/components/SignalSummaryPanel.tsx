@@ -1,5 +1,6 @@
 import type { SummaryResponse } from "../lib/types";
 import type { EventFilters } from "../lib/eventFilters";
+import SignalBreakdown from "./SignalBreakdown";
 
 type SignalCountField = "noise_count" | "informational_count" | "attention_count" | "action_required_count";
 
@@ -160,14 +161,23 @@ function formatSubject(subject: string, displayName?: string | null): string {
   return stripActorPrefix(subject);
 }
 
-export default function SignalSummaryPanel({ summary, onApplyFlow, currentSignal }: {
+export default function SignalSummaryPanel({ summary, onApplyFlow, currentSignal, onTierSelect }: {
   summary: SummaryResponse;
   onApplyFlow?: (patch: Partial<EventFilters>) => void;
   currentSignal?: string;
+  onTierSelect?: (tier: string | null) => void;
 }) {
   const actorFlows = groupFlowsByActor(summary.flow_groups);
   return (
     <section className={`signal-panel ${summary.overall_status}`}>
+      <SignalBreakdown
+        noise={summary.noise_count}
+        informational={summary.informational_count}
+        attention={summary.attention_count}
+        action_required={summary.action_required_count}
+        activeTier={currentSignal ?? null}
+        onTierSelect={onTierSelect}
+      />
       <div className="signal-stat-cards">
         {SIGNAL_CARDS.map(({ fieldKey, className, icon, label, contextLabel, alertClass }) => {
           const signalType = signalFromField(fieldKey);
