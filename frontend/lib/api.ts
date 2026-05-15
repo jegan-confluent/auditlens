@@ -137,6 +137,37 @@ export async function exportEvents(
   return response.text();
 }
 
+export type FeedbackType = "bug" | "feature" | "general";
+
+export type FeedbackPayload = {
+  type: FeedbackType;
+  title: string;
+  description: string;
+  email?: string;
+  page_context?: string;
+};
+
+export type FeedbackResponse = {
+  id: string;
+  type: FeedbackType;
+  title: string;
+  created_at: string;
+};
+
+export async function submitFeedback(payload: FeedbackPayload): Promise<FeedbackResponse> {
+  const response = await fetch(`${API_BASE}/feedback`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    cache: "no-store",
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(body || `${response.status} ${response.statusText}`);
+  }
+  return response.json() as Promise<FeedbackResponse>;
+}
+
 export type ReadinessSnapshot = {
   ok: boolean;
   status: number;

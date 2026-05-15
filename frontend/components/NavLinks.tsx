@@ -10,6 +10,10 @@ const NAV_LINKS = [
   { href: "/settings", label: "Settings" },
 ] as const;
 
+const NAV_SECONDARY = [
+  { href: "/feedback", label: "Feedback" },
+] as const;
+
 export default function NavLinks() {
   const pathname = usePathname();
   return (
@@ -18,6 +22,14 @@ export default function NavLinks() {
         const isActive = pathname === href || pathname.startsWith(href + "/");
         return (
           <Link key={href} href={href} className={isActive ? "active" : undefined}>
+            {label}
+          </Link>
+        );
+      })}
+      {NAV_SECONDARY.map(({ href, label }) => {
+        const isActive = pathname === href || pathname.startsWith(href + "/");
+        return (
+          <Link key={href} href={href} className={`nav-secondary${isActive ? " active" : ""}`}>
             {label}
           </Link>
         );
