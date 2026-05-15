@@ -1541,3 +1541,12 @@ def test_filters_hierarchy_kafka_is_data_plane_service(client):
     assert response.status_code == 200
     service_names = [s["name"] for s in response.json()["services"]]
     assert "kafka" in service_names
+
+
+def test_actor_enriched_at_is_datetime(client):
+    r = client.get("/events", params={"limit": 1})
+    assert r.status_code == 200
+    items = r.json()["items"]
+    if items and items[0].get("actor_enriched_at"):
+        from datetime import datetime
+        datetime.fromisoformat(items[0]["actor_enriched_at"])

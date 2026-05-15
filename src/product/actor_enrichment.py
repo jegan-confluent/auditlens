@@ -581,7 +581,7 @@ def _bulk_prefetch_identities(config: "EnrichmentConfig | None" = None) -> int:
                     "actor_source": "confluent_api",
                     "actor_confidence": "high",
                     "actor_raw_id": actor_id,
-                    "actor_enriched_at": datetime.now(timezone.utc).isoformat(),
+                    "actor_enriched_at": datetime.now(timezone.utc),
                 }
                 # Write with the exact key format enrich_actor uses:
                 #   cache_key = (raw, subject, subject_type)
@@ -653,7 +653,7 @@ def enrich_actor(actor: str, subject: str = "", subject_type: str = "") -> dict[
             "actor_raw_id": raw or None,
             "actor_source": identity.get("actor_source") or "manual",
             "actor_confidence": identity.get("actor_confidence") or "high",
-            "actor_enriched_at": datetime.now(timezone.utc).isoformat(),
+            "actor_enriched_at": datetime.now(timezone.utc),
         }
     else:
         # Log once per TTL window so operators can see which principals lack enrichment
@@ -671,7 +671,7 @@ def enrich_actor(actor: str, subject: str = "", subject_type: str = "") -> dict[
         result = {
             **_fallback_identity(raw, subject_type),
             "actor_raw_id": raw or None,
-            "actor_enriched_at": datetime.now(timezone.utc).isoformat(),
+            "actor_enriched_at": datetime.now(timezone.utc),
         }
 
     # Normalize actor_display_name at the cache boundary — single gate for

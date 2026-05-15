@@ -52,7 +52,7 @@ class AuditEvent(Base):
     _actor_type: Mapped[str | None] = mapped_column("actor_type", String(64), nullable=True)
     _actor_source: Mapped[str | None] = mapped_column("actor_source", String(64), nullable=True)
     _actor_confidence: Mapped[str | None] = mapped_column("actor_confidence", String(32), nullable=True)
-    actor_enriched_at: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    actor_enriched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     action: Mapped[str] = mapped_column(String(255), default="", nullable=False)
     normalized_action: Mapped[str] = mapped_column(String(255), default="", nullable=False)
     action_category: Mapped[str] = mapped_column(String(64), default="Other", nullable=False)

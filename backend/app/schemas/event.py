@@ -43,7 +43,16 @@ class AuditEventListOut(BaseModel):
     actor_raw_id: str | None = None
     actor_source: str = "fallback"
     actor_confidence: str = "low"
-    actor_enriched_at: str | None = None
+    actor_enriched_at: datetime | str | None = None
+
+    @field_validator("actor_enriched_at", mode="before")
+    @classmethod
+    def _coerce_actor_enriched_at(cls, v: Any) -> str | None:
+        if v is None:
+            return None
+        if isinstance(v, datetime):
+            return v.isoformat()
+        return str(v)
     resource_display_short: str
     source_context: str
     environment_id: str | None = None

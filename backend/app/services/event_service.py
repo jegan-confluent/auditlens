@@ -766,15 +766,25 @@ def cleanup_retention(
         # ON DELETE CASCADE FK landed) do not leak orphans. On a fresh DB or on
         # Postgres the FK cascade would handle this automatically — running
         # the DELETE again is a cheap no-op there.
-        fingerprints = list(
-            db.scalars(select(AuditEvent.event_fingerprint).where(AuditEvent.timestamp < cutoff)).all()
-        )
-        if fingerprints:
+        # Batched to avoid loading millions of fingerprints into memory at once.
+        _TRIAGE_BATCH = 1000
+        _offset = 0
+        while True:
+            fingerprints = db.execute(
+                select(AuditEvent.event_fingerprint)
+                .where(AuditEvent.timestamp < cutoff)
+                .limit(_TRIAGE_BATCH)
+                .offset(_offset)
+            ).scalars().all()
+            if not fingerprints:
+                break
             db.execute(
                 delete(AuditEventTriage)
                 .where(AuditEventTriage.event_fingerprint.in_(fingerprints))
                 .execution_options(synchronize_session=False)
             )
+            db.commit()
+            _offset += _TRIAGE_BATCH
         db.execute(
             delete(AuditEvent)
             .where(AuditEvent.timestamp < cutoff)
