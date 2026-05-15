@@ -139,7 +139,10 @@ async def validate_cluster(request: Request, body: ValidateClusterRequest) -> di
             "sasl.password": body.api_secret,
             "socket.timeout.ms": 10000,
         })
-        metadata = admin.list_topics(timeout=10)
+        import asyncio
+        metadata = await asyncio.get_running_loop().run_in_executor(
+            None, lambda: admin.list_topics(timeout=10)
+        )
         audit_topic_exists = "confluent-audit-log-events" in metadata.topics
         return {"valid": True, "audit_topic_exists": audit_topic_exists}
     except ImportError:

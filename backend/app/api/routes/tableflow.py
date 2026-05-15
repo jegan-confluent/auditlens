@@ -6,7 +6,6 @@ the standard CONFLUENT_CLOUD_API_KEY / CONFLUENT_CLOUD_API_SECRET.
 """
 from __future__ import annotations
 
-import os
 from typing import Any
 
 import httpx
@@ -14,6 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from backend.app.api.routes.patterns import _require_admin
+from backend.app.core.config import get_settings
 
 router = APIRouter(tags=["tableflow"])
 
@@ -22,12 +22,13 @@ _AUDIT_TOPIC = "audit.enriched.v1"
 
 
 def _confluent_base() -> str:
-    return os.getenv("CONFLUENT_API_BASE_URL", "https://api.confluent.cloud")
+    return get_settings().confluent_api_base_url
 
 
 def _require_creds() -> tuple[str, str]:
-    key = os.getenv("CONFLUENT_CLOUD_API_KEY") or os.getenv("CONFLUENT_API_KEY") or ""
-    secret = os.getenv("CONFLUENT_CLOUD_API_SECRET") or os.getenv("CONFLUENT_API_SECRET") or ""
+    s = get_settings()
+    key = s.confluent_cloud_api_key or s.confluent_api_key
+    secret = s.confluent_cloud_api_secret or s.confluent_api_secret
     if not key or not secret:
         raise HTTPException(
             status_code=400,
