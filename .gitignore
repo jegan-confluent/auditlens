@@ -187,3 +187,11 @@ logs/audit-*.jsonl
 AUDIT_REPORT.md
 DASHBOARD_GAP_ANALYSIS.md
 docs/PHASE4_PREFLIGHT.md
+
+# Local scratch files
+datalayers.py
+gap-analysis.html
+verifynews.sh
+verifynew.sh
+verify.sh
+*.backup
