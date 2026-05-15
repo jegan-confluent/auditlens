@@ -335,6 +335,25 @@ services:
     cap_add:
       - NET_BIND_SERVICE
 
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: audit-alertmanager
+    restart: unless-stopped
+    volumes:
+      - ./prometheus/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    ports:
+      - "127.0.0.1:9093:9093"
+    networks:
+      - monitoring
+    mem_limit: 64m
+    cpus: "0.1"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+
   loki:
     profiles: ["observability"]
     image: grafana/loki:3.3.2

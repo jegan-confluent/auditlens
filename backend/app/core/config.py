@@ -17,6 +17,12 @@ class Settings(BaseSettings):
     slow_query_ms: int = Field(default=250, alias="SLOW_QUERY_MS")
     api_title: str = "AuditLens Backend API"
     api_version: str = "0.1.0"
+    api_auth_enabled: bool = Field(default=True, alias="API_AUTH_ENABLED")
+    confluent_api_base_url: str = Field(default="https://api.confluent.cloud", alias="CONFLUENT_API_BASE_URL")
+    confluent_cloud_api_key: str = Field(default="", alias="CONFLUENT_CLOUD_API_KEY")
+    confluent_cloud_api_secret: str = Field(default="", alias="CONFLUENT_CLOUD_API_SECRET")
+    confluent_api_key: str = Field(default="", alias="CONFLUENT_API_KEY")
+    confluent_api_secret: str = Field(default="", alias="CONFLUENT_API_SECRET")
 
     @property
     def database_mode(self) -> Literal["sqlite", "postgres"]:

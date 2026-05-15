@@ -6,8 +6,8 @@ global:
 alerting:
   alertmanagers:
     - static_configs:
-        - targets: []
-          # - alertmanager:9093
+        - targets:
+            - alertmanager:9093
 
 # Load alerting rules
 rule_files:
@@ -30,6 +30,14 @@ scrape_configs:
     # basic_auth:
     #   username: prometheus
     #   password: 'your-secret-password-here'
+
+  # AuditLens API (FastAPI) metrics — requires prometheus-fastapi-instrumentator
+  - job_name: 'auditlens-api'
+    static_configs:
+      - targets: ['auditlens-api:8080']
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+    scrape_timeout: 10s
 
   # Postgres exporter metrics
   - job_name: 'postgres-exporter'

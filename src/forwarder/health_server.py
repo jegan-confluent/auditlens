@@ -699,6 +699,10 @@ class MetricsHandler(BaseHTTPRequestHandler):
             prometheus_metrics.append("# TYPE audit_forwarder_db_writer_state gauge")
             prometheus_metrics.append(f"audit_forwarder_db_writer_state {db_state_value}")
 
+            prometheus_metrics.append("# HELP audit_forwarder_noise_persist_wait_timeouts_total Noise-persist wait timeout events")
+            prometheus_metrics.append("# TYPE audit_forwarder_noise_persist_wait_timeouts_total counter")
+            prometheus_metrics.append(f"audit_forwarder_noise_persist_wait_timeouts_total {metrics_data.get('noise_persist_wait_timeouts_total', 0)}")
+
             last_db_write = metrics_data.get("db_last_successful_write")
             last_db_write_ts = int(datetime.fromisoformat(last_db_write.replace('Z', '+00:00')).timestamp()) if last_db_write else 0
             prometheus_metrics.append("# HELP audit_forwarder_db_last_successful_write_timestamp_seconds Unix timestamp of last successful DB write")

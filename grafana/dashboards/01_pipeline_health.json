@@ -25,7 +25,7 @@
       "targets": [
         {
           "datasource": {"type": "prometheus", "uid": "auditlens-prometheus"},
-          "expr": "up{job=\"auditlens-forwarder\"}",
+          "expr": "audit_forwarder_processing_rate_per_second",
           "legendFormat": "Processing Rate",
           "refId": "A"
         }
@@ -43,7 +43,7 @@
       "targets": [
         {
           "datasource": {"type": "prometheus", "uid": "auditlens-prometheus"},
-          "expr": "up{job=\"auditlens-forwarder\"}",
+          "expr": "audit_forwarder_consumer_lag_total",
           "legendFormat": "Consumer Lag",
           "refId": "A"
         }
@@ -67,7 +67,7 @@
       "targets": [
         {
           "datasource": {"type": "prometheus", "uid": "auditlens-prometheus"},
-          "expr": "up{job=\"auditlens-forwarder\"}",
+          "expr": "time() - audit_forwarder_db_last_successful_write_timestamp_seconds",
           "legendFormat": "DB Behind Seconds",
           "refId": "A"
         }
@@ -91,7 +91,7 @@
       "targets": [
         {
           "datasource": {"type": "prometheus", "uid": "auditlens-prometheus"},
-          "expr": "up{job=\"auditlens-forwarder\"}",
+          "expr": "audit_forwarder_noise_persist_wait_timeouts_total",
           "legendFormat": "Noise Persist Wait Timeouts",
           "refId": "A"
         }

@@ -13,6 +13,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
 from backend.app.api.routes import actors, admin, events, filters, feedback as feedback_routes, health, patterns, readiness, summary, system
+from backend.app.core.logging import configure_logging
 from backend.app.api.routes import settings as settings_routes
 from backend.app.api.routes import onboarding as onboarding_routes
 from backend.app.api.routes import tableflow as tableflow_routes
@@ -24,6 +25,7 @@ from backend.app.db.database import check_db_health, init_db, SessionLocal
 from backend.app.services.event_service import cleanup_retention
 from src.product.auth import AuthConfig
 
+configure_logging()
 logger = logging.getLogger("auditlens.backend")
 
 _RETENTION_LOOP_STARTUP_DELAY_S = 300   # 5 min after API start
@@ -61,7 +63,7 @@ def _startup_checks() -> None:
         check_db_health()
     except Exception:
         logger.exception("Database startup check failed; API will continue and report not_ready on /ready")
-    if os.getenv("API_AUTH_ENABLED", "true").lower() == "true":
+    if get_settings().api_auth_enabled:
         try:
             AuthConfig.from_env()
         except Exception as exc:
@@ -133,6 +135,12 @@ class _ExemptingMiddleware(SlowAPIMiddleware):
 def create_app() -> FastAPI:
     settings = get_settings()
     app = FastAPI(title=settings.api_title, version=settings.api_version, lifespan=_lifespan)
+
+    try:
+        from prometheus_fastapi_instrumentator import Instrumentator  # type: ignore[import-untyped]
+        Instrumentator().instrument(app).expose(app, endpoint="/metrics")
+    except ImportError:
+        pass
 
     # Wire slowapi: install the limiter on app state, register the 429 handler,
     # and add the middleware that enforces default_limits across non-exempt
