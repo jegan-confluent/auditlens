@@ -79,8 +79,30 @@ def _drop_privileges() -> None:
     os.setuid(APP_UID)
 
 
+def _run_migrations() -> None:
+    """Run alembic upgrade head before starting the API.
+    Runs while still root so /app/src imports succeed, before privilege drop.
+    """
+    import subprocess
+    backend_dir = Path("/app/backend")
+    if not (backend_dir / "alembic.ini").exists():
+        print("[entrypoint] alembic.ini not found — skipping migrations")
+        return
+    print("[entrypoint] Running database migrations...")
+    result = subprocess.run(
+        [sys.executable, "-m", "alembic", "upgrade", "head"],
+        cwd=backend_dir,
+        capture_output=False,
+    )
+    if result.returncode != 0:
+        print(f"[entrypoint] Migration failed with exit code {result.returncode} — aborting startup")
+        sys.exit(result.returncode)
+    print("[entrypoint] Migrations complete.")
+
+
 def main() -> None:
     _prepare_runtime_dir()
+    _run_migrations()
     _drop_privileges()
     command = sys.argv[1:] or DEFAULT_COMMAND
     os.execvp(command[0], command)
