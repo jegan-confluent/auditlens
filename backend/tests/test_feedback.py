@@ -1,6 +1,8 @@
 """Tests for the feedback submission endpoint."""
 
 import tempfile
+import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -139,3 +141,40 @@ def test_feedback_post_requires_auth_when_auth_enabled(client, monkeypatch):
         "description": "This request should be rejected without a valid token.",
     })
     assert r.status_code in (401, 403, 503)
+
+
+def test_feedback_retention_cleans_old_records(client):
+    from backend.app.db.database import get_db
+    from backend.app.db.feedback import Feedback, FeedbackType
+    from backend.app.services.event_service import cleanup_retention
+
+    db = next(client.app.dependency_overrides[get_db]())
+
+    old_row = Feedback(
+        id=uuid.uuid4(),
+        type=FeedbackType.bug,
+        title="Old feedback record",
+        description="This record is older than 365 days and should be purged.",
+        created_at=datetime.now(timezone.utc) - timedelta(days=400),
+    )
+    recent_row = Feedback(
+        id=uuid.uuid4(),
+        type=FeedbackType.feature,
+        title="Recent feedback record",
+        description="This record is only 10 days old and must not be deleted.",
+        created_at=datetime.now(timezone.utc) - timedelta(days=10),
+    )
+    db.add(old_row)
+    db.add(recent_row)
+    db.commit()
+
+    old_id = str(old_row.id)
+    recent_id = str(recent_row.id)
+
+    result = cleanup_retention(db, retention_days=9999, dry_run=False)
+
+    remaining = db.query(Feedback).all()
+    ids_remaining = {str(r.id) for r in remaining}
+    assert old_id not in ids_remaining, "Old feedback should have been deleted"
+    assert recent_id in ids_remaining, "Recent feedback must not be deleted"
+    assert result["feedback_deleted"] == 1

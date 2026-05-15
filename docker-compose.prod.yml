@@ -93,6 +93,7 @@ services:
           memory: 128M
     cpus: "0.25"
     mem_limit: 512m
+    user: "1000:1000"
     security_opt:
       - no-new-privileges:true
     read_only: true

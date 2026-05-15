@@ -14,6 +14,7 @@ from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session, defer, load_only
 
+from backend.app.db.feedback import Feedback
 from backend.app.db.models import AuditEvent, AuditEventTriage
 from backend.app.services.filter_service import event_fingerprint, normalize_event, parse_event_timestamp
 from backend.app.services.pattern_service import _norm, get_suppressed_combos
@@ -806,9 +807,28 @@ def cleanup_retention(
                 logger.warning("noise retention cleanup failed: %s", exc)
                 noise_deleted = 0
 
+    # Step 4 — Delete old feedback rows (hard-coded 365-day retention)
+    feedback_deleted = 0
+    try:
+        feedback_cutoff = datetime.now(timezone.utc) - timedelta(days=365)
+        feedback_count = int(db.scalar(select(func.count(Feedback.id)).where(Feedback.created_at < feedback_cutoff)) or 0)
+        if not dry_run and feedback_count:
+            db.execute(
+                delete(Feedback).where(Feedback.created_at < feedback_cutoff)
+                .execution_options(synchronize_session=False)
+            )
+            db.commit()
+        feedback_deleted = feedback_count
+    except Exception as exc:
+        err = str(exc).lower()
+        if "no such table" in err or "does not exist" in err:
+            feedback_deleted = 0
+        else:
+            logger.warning("feedback retention cleanup failed: %s", exc)
+
     logger.info(
-        "retention cleanup complete dry_run=%s retention_days=%s deleted=%s raw_nulled=%s noise_deleted=%s",
-        dry_run, retention_days, deleted_count, raw_payloads_nulled, noise_deleted,
+        "retention cleanup complete dry_run=%s retention_days=%s deleted=%s raw_nulled=%s noise_deleted=%s feedback_deleted=%s",
+        dry_run, retention_days, deleted_count, raw_payloads_nulled, noise_deleted, feedback_deleted,
     )
     return {
         "dry_run": dry_run,
@@ -817,6 +837,7 @@ def cleanup_retention(
         "deleted_count": deleted_count,
         "raw_payloads_nulled": raw_payloads_nulled,
         "noise_deleted": noise_deleted,
+        "feedback_deleted": feedback_deleted,
     }
 
 
