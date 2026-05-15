@@ -378,3 +378,6 @@ sync: ## Sync files to EC2 without restart
 	  --exclude='node_modules' \
 	  --exclude='.next' \
 	  ./ $(REMOTE)
+
+health-check-full: ## Run full 7-section health check on EC2
+	ssh -i $(PEM) $(EC2_USER)@$(EC2_IP) "bash ~/AuditLens/scripts/health_check_full.sh"
