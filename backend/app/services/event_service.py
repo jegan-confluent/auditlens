@@ -390,7 +390,15 @@ def _event_filter_conditions(
             )
         )
     if plane in ("data_plane", "control_plane"):
+        # Mirror derive_plane_type() resolution order exactly:
+        # 1. resource_family semantic check
+        # 2. action_category == "data"
+        # 3. action prefix / exact-match
         data_plane_cond = or_(
+            func.lower(AuditEvent._resource_family).in_(
+                [f.lower() for f in _DATA_PLANE_RESOURCE_FAMILIES]
+            ),
+            func.lower(AuditEvent.action_category) == "data",
             *[func.lower(AuditEvent.action).like(f"{p}%") for p in _DATA_PLANE_PREFIXES],
             func.lower(AuditEvent.action).in_([e.lower() for e in _DATA_PLANE_EXACT]),
         )
