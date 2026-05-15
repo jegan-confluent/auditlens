@@ -1,8 +1,9 @@
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator
 from src.product.event_normalization import canonical_resource_type
+from backend.app.services.event_service import derive_plane_type
 
 
 class AuditEventListOut(BaseModel):
@@ -70,6 +71,11 @@ class AuditEventListOut(BaseModel):
     @classmethod
     def normalize_resource_type(cls, value: object) -> str:
         return canonical_resource_type(value)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def plane_type(self) -> str:
+        return derive_plane_type(self.action)
 
 
 class AuditEventDetailOut(AuditEventListOut):

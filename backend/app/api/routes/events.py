@@ -103,6 +103,10 @@ def events(
         default=None,
         description="Filter by production_hint value. Use 'production', 'non_production' (matches anything except production), or exact value.",
     ),
+    plane: str | None = Query(
+        default=None,
+        description="Filter by plane type: 'control_plane' or 'data_plane'. Derived from the action method name.",
+    ),
     db: Session = Depends(get_db),
 ):
     if show_noise:
@@ -193,6 +197,7 @@ def events(
             include_suppressed=include_suppressed,
             q=q,
             production_hint=production_hint,
+            plane=plane,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -242,6 +247,7 @@ def events_export(
     change_type: str | None = None,
     q: str | None = Query(default=None, max_length=200),
     production_hint: str | None = None,
+    plane: str | None = None,
     db: Session = Depends(get_db),
 ) -> StreamingResponse:
     effective_signal = signal_type or signal
@@ -265,12 +271,12 @@ def events_export(
             change_type=change_type,
             q=q,
             production_hint=production_hint,
+            plane=plane,
             limit=limit,
             export_limit=EXPORT_MAX_ROWS,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-
     items = result_set.items
     date_str = __import__("datetime").date.today().isoformat()
 

@@ -48,6 +48,7 @@ const URL_STRING_KEYS = [
   "impact_type",
   "q",
   "production_hint",
+  "plane",
 ] as const satisfies ReadonlyArray<Exclude<keyof EventFilters, "mode">>;
 
 function filtersFromSearchParams(params: URLSearchParams, base: EventFilters): EventFilters {

@@ -62,6 +62,8 @@ export type AuditEvent = {
   raw_payload_json?: string;
   rbac_role?: string | null;
   rbac_scope?: string | null;
+  plane_type: string;
+  suppressed?: boolean;
 };
 
 export type EventListResponse = {

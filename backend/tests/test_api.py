@@ -1431,6 +1431,39 @@ def test_export_json_returns_list(client):
     assert isinstance(data, list)
 
 
+def test_derive_plane_type_kafka_is_data_plane():
+    from backend.app.services.event_service import derive_plane_type
+    assert derive_plane_type("kafka.Produce") == "data_plane"
+    assert derive_plane_type("schema-registry.Subjects.list") == "data_plane"
+    assert derive_plane_type("mds.Authorize") == "data_plane"
+    assert derive_plane_type("ScheduledJwksRefresh") == "data_plane"
+
+
+def test_derive_plane_type_signin_is_control_plane():
+    from backend.app.services.event_service import derive_plane_type
+    assert derive_plane_type("SignIn") == "control_plane"
+    assert derive_plane_type("io.confluent.kafka.server.CreateTopic") == "control_plane"
+    assert derive_plane_type(None) == "control_plane"
+    assert derive_plane_type("") == "control_plane"
+
+
+def test_events_filter_by_plane_control(client):
+    response = client.get("/events?plane=control_plane&limit=20")
+    assert response.status_code == 200
+    data = response.json()
+    for item in data["items"]:
+        assert item["plane_type"] == "control_plane"
+
+
+def test_events_response_includes_plane_type(client):
+    response = client.get("/events?limit=5")
+    assert response.status_code == 200
+    items = response.json()["items"]
+    for item in items:
+        assert "plane_type" in item
+        assert item["plane_type"] in ("control_plane", "data_plane")
+
+
 def test_retention_cleanup_archives_before_delete(client, monkeypatch):
     """When cold storage is configured, archive is called before delete runs."""
     import backend.app.api.routes.admin as admin_mod

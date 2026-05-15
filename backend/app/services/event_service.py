@@ -24,6 +24,29 @@ from src.product.event_normalization import canonical_resource_type
 MAX_EVENT_LIMIT = 500
 EXPORT_MAX_ROWS = 10_000
 
+_DATA_PLANE_PREFIXES: tuple[str, ...] = (
+    "kafka.",
+    "schema-registry.",
+    "flink.",
+    "ksql.",
+    "tableflow.",
+    "mds.",
+)
+_DATA_PLANE_EXACT: frozenset[str] = frozenset({"scheduledjwksrefresh"})
+
+
+def derive_plane_type(action: str | None) -> str:
+    """Returns 'data_plane' or 'control_plane' based on Confluent method name."""
+    if not action:
+        return "control_plane"
+    action_lower = action.lower()
+    for prefix in _DATA_PLANE_PREFIXES:
+        if action_lower.startswith(prefix):
+            return "data_plane"
+    if action_lower in _DATA_PLANE_EXACT:
+        return "data_plane"
+    return "control_plane"
+
 # Suppression cache — refreshed at most once per minute
 _suppression_lock = threading.Lock()
 _suppression_cache: tuple[float, set[tuple[str, str, str]]] | None = None
@@ -267,6 +290,7 @@ def _event_filter_conditions(
     is_denied: bool | None = None,
     production_hint: str | None = None,
     q: str | None = None,
+    plane: str | None = None,
 ) -> list[Any]:
     conditions: list[Any] = []
     since = parse_time_window(time_window)
@@ -347,6 +371,15 @@ def _event_filter_conditions(
                 func.lower(AuditEvent._request_id).like(pattern),
             )
         )
+    if plane in ("data_plane", "control_plane"):
+        data_plane_cond = or_(
+            *[func.lower(AuditEvent.action).like(f"{p}%") for p in _DATA_PLANE_PREFIXES],
+            func.lower(AuditEvent.action).in_([e.lower() for e in _DATA_PLANE_EXACT]),
+        )
+        if plane == "data_plane":
+            conditions.append(data_plane_cond)
+        else:
+            conditions.append(~data_plane_cond)
     return conditions
 
 

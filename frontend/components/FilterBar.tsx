@@ -60,10 +60,11 @@ export default function FilterBar({ filters, options, onChange, onReset }: {
     filters.resource_type,
     filters.result,
     filters.production_hint,
+    filters.plane,
   ].filter(Boolean).length;
 
   const [moreOpen, setMoreOpen] = useState(
-    () => [filters.actor, filters.resource, filters.cluster_name, filters.environment_name, filters.resource_type, filters.result, filters.production_hint].some(Boolean)
+    () => [filters.actor, filters.resource, filters.cluster_name, filters.environment_name, filters.resource_type, filters.result, filters.production_hint, filters.plane].some(Boolean)
   );
 
   const [presets, setPresets] = useState<FilterPreset[]>(() => {
@@ -309,6 +310,22 @@ export default function FilterBar({ filters, options, onChange, onReset }: {
                 type="button"
                 className={`signal-pill${filters.production_hint === opt.value ? " active" : ""}`}
                 onClick={() => update("production_hint", opt.value)}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+          <div className="signal-pills" role="group" aria-label="Plane filter">
+            {[
+              { value: "", label: "All planes" },
+              { value: "control_plane", label: "Control plane" },
+              { value: "data_plane", label: "Data plane" },
+            ].map((opt) => (
+              <button
+                key={opt.value}
+                type="button"
+                className={`signal-pill${filters.plane === opt.value ? " active" : ""}`}
+                onClick={() => update("plane", opt.value)}
               >
                 {opt.label}
               </button>
