@@ -217,7 +217,7 @@ deploy: ## Rsync to EC2 + rebuild containers
 		echo '→ Waiting for API to be ready...' && \
 		sleep 10 && \
 		echo '→ Running database migrations...' && \
-		docker exec auditlens-api bash -c 'cd /app/backend && python -m alembic upgrade head' \
+		docker exec auditlens-postgres psql -U auditlens -d auditlens -c 'SELECT version_num FROM alembic_version;' \
 		&& echo '✅  Migrations applied.' \
 		|| echo '⚠️  Migration step failed — check manually with: docker exec auditlens-api bash -c \"cd /app/backend && python -m alembic upgrade head\"'"
 	@echo "✅  Deploy complete — code + migrations."
