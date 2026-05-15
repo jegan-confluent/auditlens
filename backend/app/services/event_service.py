@@ -22,6 +22,7 @@ from backend.app.services.triage_service import attach_triage_snapshots, get_tri
 from src.product.event_normalization import canonical_resource_type
 
 MAX_EVENT_LIMIT = 500
+EXPORT_MAX_ROWS = 10_000
 
 # Suppression cache — refreshed at most once per minute
 _suppression_lock = threading.Lock()
@@ -470,9 +471,11 @@ def list_events_result(
     cursor: str | None = None,
     debug: bool = False,
     include_suppressed: bool = False,
+    export_limit: int | None = None,
     **filters: Any,
 ) -> EventListResult:
-    limit = min(max(limit, 1), MAX_EVENT_LIMIT)
+    effective_cap = export_limit if export_limit is not None else MAX_EVENT_LIMIT
+    limit = min(max(limit, 1), effective_cap)
     offset = max(offset, 0)
     mode = _normalize_mode(mode)
     # Decision-mode count() over the OR-heavy predicate is expensive on the

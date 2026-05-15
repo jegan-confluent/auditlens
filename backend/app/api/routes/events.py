@@ -1,13 +1,17 @@
+import csv
+import io
+import json
 from typing import Any, Union
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from backend.app.db.database import get_db
-from backend.app.schemas.event import AuditEventDetailOut, AuditNoiseListOut
+from backend.app.schemas.event import AuditEventDetailOut, AuditEventListOut, AuditNoiseListOut
 from backend.app.schemas.response import EventListNoiseResponse, EventListResponse
-from backend.app.services.event_service import get_event, list_deletions, list_events_result, list_failures
+from backend.app.services.event_service import EXPORT_MAX_ROWS, get_event, list_deletions, list_events_result, list_failures
 from backend.app.services.noise_service import (
     NOISE_EVENTS_MAX_LIMIT,
     UNSUPPORTED_NOISE_FILTERS,
@@ -203,6 +207,100 @@ def events(
         result_limit_reached=result_set.result_limit_reached,
         next_cursor=result_set.next_cursor,
         debug=result_set.debug,
+    )
+
+
+_EXPORT_COLUMNS = (
+    "timestamp", "actor_display_name", "actor", "action", "resource_name",
+    "resource_type", "result", "signal_type", "risk_level", "source_ip",
+    "client_tool", "environment_id", "cluster_id", "event_title",
+)
+
+
+@router.get("/events/export")
+@limiter.limit("10/minute")
+def events_export(
+    request: Request,
+    _auth: None = Depends(_require_viewer),
+    format: str = Query(default="json", pattern="^(csv|json)$"),
+    limit: int = Query(default=1000, ge=1, le=10000),
+    time_window: str | None = Query(default=None, pattern=r"^[1-9][0-9]*[mh]$"),
+    mode: str = Query(default="decision"),
+    resource_type: str | None = None,
+    resource: str | None = None,
+    cluster_name: str | None = None,
+    environment_name: str | None = None,
+    action_category: str | None = None,
+    actor: str | None = None,
+    action: str | None = None,
+    result: str | None = None,
+    is_denied: bool | None = None,
+    signal_type: str | None = None,
+    signal: str | None = None,
+    hide_noise: bool = False,
+    impact_type: str | None = None,
+    change_type: str | None = None,
+    q: str | None = Query(default=None, max_length=200),
+    production_hint: str | None = None,
+    db: Session = Depends(get_db),
+) -> StreamingResponse:
+    effective_signal = signal_type or signal
+    try:
+        result_set = list_events_result(
+            db,
+            time_window=time_window,
+            mode=mode,
+            resource_type=resource_type,
+            resource=resource,
+            cluster_name=cluster_name,
+            environment_name=environment_name,
+            action_category=action_category,
+            actor=actor,
+            action=action,
+            result=result,
+            is_denied=is_denied,
+            signal_type=effective_signal,
+            hide_noise=hide_noise,
+            impact_type=impact_type,
+            change_type=change_type,
+            q=q,
+            production_hint=production_hint,
+            limit=limit,
+            export_limit=EXPORT_MAX_ROWS,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    items = result_set.items
+    date_str = __import__("datetime").date.today().isoformat()
+
+    if format == "csv":
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(_EXPORT_COLUMNS)
+        for evt in items:
+            row_data = AuditEventListOut.model_validate(evt).model_dump()
+            writer.writerow([
+                "" if row_data.get(col) is None else str(row_data[col])
+                for col in _EXPORT_COLUMNS
+            ])
+        content = buf.getvalue()
+        return StreamingResponse(
+            iter([content]),
+            media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="auditlens-events-{date_str}.csv"'},
+        )
+
+    # JSON
+    rows = []
+    for evt in items:
+        row_data = AuditEventListOut.model_validate(evt).model_dump()
+        rows.append({col: row_data.get(col) for col in _EXPORT_COLUMNS})
+    content = json.dumps(rows, default=str)
+    return StreamingResponse(
+        iter([content]),
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="auditlens-events-{date_str}.json"'},
     )
 
 

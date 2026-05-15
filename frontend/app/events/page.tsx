@@ -12,6 +12,7 @@ import DecisionBanner from "../../components/DecisionBanner";
 import EventDetailDrawer from "../../components/EventDetailDrawer";
 import RecurringPatterns from "../../components/RecurringPatterns";
 import {
+  exportEvents,
   getEvent,
   getEvents,
   getFilters,
@@ -252,6 +253,8 @@ function EventsPageInner() {
   const [system, setSystem] = useState<SystemStatus | null>(null);
 
   const [selectedEvent, setSelectedEvent] = useState<AuditEvent | null>(null);
+  const [downloading, setDownloading] = useState<"csv" | "json" | null>(null);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
 
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const [expandedDetail, setExpandedDetail] = useState<AuditEvent | null>(null);
@@ -407,6 +410,28 @@ function EventsPageInner() {
     updateFilters({ ...filters, actor: actorId });
   };
   const resetFilters = () => updateFilters(defaultFilters);
+
+  const handleDownload = async (format: "csv" | "json") => {
+    setDownloading(format);
+    setDownloadError(null);
+    try {
+      const params = paramsFromFilters(filters, 0);
+      const content = await exportEvents(params, format);
+      const mimeType = format === "csv" ? "text/csv" : "application/json";
+      const blob = new Blob([content], { type: mimeType });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `auditlens-events-${new Date().toISOString().slice(0, 10)}.${format}`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setDownloadError(`Download failed: ${msg}`);
+    } finally {
+      setDownloading(null);
+    }
+  };
   const showAllActivity = () => updateFilters(allActivityFilters);
   const applyDecisionFilters = (patch: Partial<EventFilters>) => {
     updateFilters({ ...filters, ...patch });
@@ -447,6 +472,24 @@ function EventsPageInner() {
         <p className="active-filters">Decision summary unavailable: {summaryError}</p>
       ) : null}
       <RecurringPatterns defaultExpanded={true} filters={filters} />
+      <div className="toolbar" style={{ marginBottom: 8, gap: 8 }}>
+        <span className="muted" style={{ fontSize: "0.82em" }}>Download current filters (up to 10k rows):</span>
+        <button
+          className="btn-suppress"
+          disabled={downloading !== null}
+          onClick={() => handleDownload("csv")}
+        >
+          {downloading === "csv" ? "Downloading…" : "CSV"}
+        </button>
+        <button
+          className="btn-suppress"
+          disabled={downloading !== null}
+          onClick={() => handleDownload("json")}
+        >
+          {downloading === "json" ? "Downloading…" : "JSON"}
+        </button>
+        {downloadError ? <span className="error-text" style={{ fontSize: "0.82em" }}>{downloadError}</span> : null}
+      </div>
       <div ref={tableRef}>
         {!data ? <LoadingState /> : renderedEvents.length ? (
           <AuditEventTable

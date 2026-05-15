@@ -1418,6 +1418,19 @@ def test_summary_flow_groups_subject_display_name(client):
     assert "u-flowdntest" not in dn_group["group_title"]
 
 
+def test_export_csv_returns_csv_content_type(client):
+    response = client.get("/events/export?format=csv&limit=5")
+    assert response.status_code == 200
+    assert "text/csv" in response.headers["content-type"]
+
+
+def test_export_json_returns_list(client):
+    response = client.get("/events/export?format=json&limit=5")
+    assert response.status_code == 200
+    data = response.json()
+    assert isinstance(data, list)
+
+
 def test_retention_cleanup_archives_before_delete(client, monkeypatch):
     """When cold storage is configured, archive is called before delete runs."""
     import backend.app.api.routes.admin as admin_mod

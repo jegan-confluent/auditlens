@@ -115,6 +115,24 @@ export async function markPatternExpected(id: number, reason: string = ""): Prom
   return response.json() as Promise<{ status: string; id: number }>;
 }
 
+export async function exportEvents(
+  params: URLSearchParams,
+  format: "csv" | "json"
+): Promise<string> {
+  const exportParams = new URLSearchParams(params);
+  exportParams.set("format", format);
+  exportParams.set("limit", "10000");
+  // remove pagination params not relevant to export
+  exportParams.delete("offset");
+  const response = await fetch(`${API_BASE}/events/export?${exportParams.toString()}`, {
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(`${response.status} ${response.statusText}`);
+  }
+  return response.text();
+}
+
 export type ReadinessSnapshot = {
   ok: boolean;
   status: number;
