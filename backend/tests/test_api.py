@@ -1036,21 +1036,20 @@ def test_corrupt_raw_payload_logs_decode_error(client, monkeypatch):
 
 
 def test_rate_limit_triggers_on_events_and_exempts_live(client):
-    """/events list is capped at 20/minute per IP; /live must never be limited."""
+    """/events list is capped at 60/minute per IP; /live must never be limited."""
     from backend.app.core.limiter import limiter
 
     limiter.reset()
     limiter.enabled = True
     try:
-        # Burn through the per-IP /events budget.
+        # Burn through the per-IP /events budget (route is @limiter.limit("60/minute")).
         statuses = []
-        for _ in range(25):
+        for _ in range(65):
             statuses.append(client.get("/events", params={"limit": 1}).status_code)
 
-        # Within the first 20 we should see only 200s; after 20 we should get 429s.
         ok = sum(1 for status in statuses if status == 200)
         too_many = sum(1 for status in statuses if status == 429)
-        assert ok <= 20, f"unexpected 200 count {ok} (statuses={statuses})"
+        assert ok <= 60, f"unexpected 200 count {ok} (statuses={statuses})"
         assert too_many >= 1, f"expected at least one 429, got statuses={statuses}"
 
         # /live is exempt — even after exhausting the events bucket it returns 200.
