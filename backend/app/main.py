@@ -17,6 +17,7 @@ from backend.app.api.routes import settings as settings_routes
 from backend.app.api.routes import onboarding as onboarding_routes
 from backend.app.api.routes import tableflow as tableflow_routes
 from backend.app.api.routes import actor_mappings as actor_mappings_routes
+from backend.app.api.routes import resources as resources_routes
 from backend.app.core.config import get_settings
 from backend.app.core.limiter import limiter
 from backend.app.db.database import check_db_health, init_db, SessionLocal
@@ -180,6 +181,7 @@ def create_app() -> FastAPI:
     app.include_router(patterns.router)
     app.include_router(actors.router)
     app.include_router(actor_mappings_routes.router)
+    app.include_router(resources_routes.router)
     app.include_router(settings_routes.router)
     app.include_router(onboarding_routes.router)
     app.include_router(tableflow_routes.router)
