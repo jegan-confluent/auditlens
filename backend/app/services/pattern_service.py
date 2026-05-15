@@ -173,35 +173,35 @@ def _enrich_actor_display_names(
         if db.get_bind().dialect.name == "postgresql":
             db.execute(text("SET LOCAL statement_timeout = 10000"))
 
-        # One LIMIT 1 query per actor — uses idx_audit_events_actor_display_enrichment
-        # on PostgreSQL (~0.6ms per actor), falls back to sequential GROUP BY on SQLite.
-        result: dict[str, tuple[str | None, str | None]] = {}
-        for actor_val in actor_values:
-            row = db.execute(
-                select(AuditEvent.actor, AuditEvent._actor_display_name, AuditEvent._actor_type)
-                .where(
-                    AuditEvent.actor == actor_val,
-                    AuditEvent._actor_display_name.isnot(None),
-                    AuditEvent._actor_display_name != "",
-                    AuditEvent._actor_display_name != AuditEvent.actor,
-                    AuditEvent._actor_display_name.notlike('{%'),
-                    AuditEvent._actor_display_name.notlike('________-____%'),
-                )
-                .order_by(
-                    case(
-                        (
-                            AuditEvent._actor_display_name.notlike('%@%') &
-                            AuditEvent._actor_display_name.notlike('%-%-%-%-%'),
-                            0,
-                        ),
-                        (AuditEvent._actor_display_name.like('%@%'), 1),
-                        else_=2,
+        # Single query for all actors — replaces N per-actor LIMIT 1 queries.
+        # Ordered by actor then display-name priority; Python picks first row per actor.
+        rows = db.execute(
+            select(AuditEvent.actor, AuditEvent._actor_display_name, AuditEvent._actor_type)
+            .where(
+                AuditEvent.actor.in_(actor_values),
+                AuditEvent._actor_display_name.isnot(None),
+                AuditEvent._actor_display_name != "",
+                AuditEvent._actor_display_name != AuditEvent.actor,
+                AuditEvent._actor_display_name.notlike('{%'),
+                AuditEvent._actor_display_name.notlike('________-____%'),
+            )
+            .order_by(
+                AuditEvent.actor,
+                case(
+                    (
+                        AuditEvent._actor_display_name.notlike('%@%') &
+                        AuditEvent._actor_display_name.notlike('%-%-%-%-%'),
+                        0,
                     ),
-                    AuditEvent.id.desc(),
-                )
-                .limit(1)
-            ).first()
-            if row:
+                    (AuditEvent._actor_display_name.like('%@%'), 1),
+                    else_=2,
+                ),
+                AuditEvent.id.desc(),
+            )
+        ).all()
+        result: dict[str, tuple[str | None, str | None]] = {}
+        for row in rows:
+            if row[0] not in result:
                 result[row[0]] = (row[1], row[2])
         return result
     except Exception as exc:

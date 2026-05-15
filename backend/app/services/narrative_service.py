@@ -77,7 +77,8 @@ def get_actor_narrative(db: Session, actor_id: str, time_window: str = "24h") ->
     query = db.query(AuditEvent).filter(AuditEvent.actor == actor_id)
     if since is not None:
         query = query.filter(AuditEvent.timestamp >= since)
-    events: list[AuditEvent] = query.order_by(AuditEvent.timestamp.desc()).all()
+    # Cap prevents full-table scan on high-frequency actors
+    events: list[AuditEvent] = query.order_by(AuditEvent.timestamp.desc()).limit(500).all()
 
     total_events = len(events)
     non_noise = [e for e in events if e._signal_type != "noise" and not e.is_routine_noise]
