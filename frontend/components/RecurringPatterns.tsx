@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { getPatterns, markPatternExpected, suppressPattern } from "../lib/api";
 import { formatResourceName } from "../lib/utils";
+import type { EventFilters } from "../lib/eventFilters";
 import type { EventPattern } from "../lib/types";
 
 function relativeTime(iso: string | null | undefined): string {
@@ -33,7 +34,16 @@ function isServiceAccount(actor_type: string | null | undefined): boolean {
   return actor_type === "service_account";
 }
 
-export default function RecurringPatterns({ defaultExpanded }: { defaultExpanded?: boolean } = {}) {
+// Patterns are populated from high-frequency noise-tier events. When the user
+// has hidden noise or narrowed to action_required-only, pattern actors are
+// irrelevant and would appear to contradict the active filter.
+function isHiddenByFilters(filters: EventFilters | undefined): boolean {
+  if (!filters) return false;
+  return filters.hide_noise === "true" || filters.signal === "action_required";
+}
+
+export default function RecurringPatterns({ defaultExpanded, filters }: { defaultExpanded?: boolean; filters?: EventFilters } = {}) {
+  const hidden = isHiddenByFilters(filters);
   const [patterns, setPatterns] = useState<EventPattern[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -55,8 +65,11 @@ export default function RecurringPatterns({ defaultExpanded }: { defaultExpanded
   }, []);
 
   useEffect(() => {
+    if (hidden) return;
     load();
-  }, [load]);
+  }, [load, hidden]);
+
+  if (hidden) return null;
 
   async function handleSuppress(id: number) {
     setActing(id);

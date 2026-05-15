@@ -446,7 +446,7 @@ function EventsPageInner() {
       {summaryLoading ? null : summaryError ? (
         <p className="active-filters">Decision summary unavailable: {summaryError}</p>
       ) : null}
-      <RecurringPatterns defaultExpanded={true} />
+      <RecurringPatterns defaultExpanded={true} filters={filters} />
       <div ref={tableRef}>
         {!data ? <LoadingState /> : renderedEvents.length ? (
           <AuditEventTable
