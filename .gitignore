@@ -200,3 +200,7 @@ datalayersnew.py
 project-brief.html
 infra/backup/
 .claude/diary/
+deploy/terraform/aws/.terraform/
+deploy/terraform/**/.terraform/
+*.tfstate
+*.tfstate.backup
