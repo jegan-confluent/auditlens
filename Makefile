@@ -213,8 +213,14 @@ deploy: ## Rsync to EC2 + rebuild containers
 	@echo "→ Rebuilding and restarting on EC2..."
 	ssh -i $(PEM) $(EC2_USER)@$(EC2_IP) \
 		"cd ~/AuditLens && \
-		docker compose -f docker-compose.prod.yml up -d --build --force-recreate --remove-orphans 2>&1 | tail -5"
-	@echo "✅  Deploy complete."
+		docker compose -f docker-compose.prod.yml up -d --build --force-recreate --remove-orphans 2>&1 | tail -5 && \
+		echo '→ Waiting for API to be ready...' && \
+		sleep 10 && \
+		echo '→ Running database migrations...' && \
+		docker exec auditlens-api bash -c 'cd /app/backend && python -m alembic upgrade head' \
+		&& echo '✅  Migrations applied.' \
+		|| echo '⚠️  Migration step failed — check manually with: docker exec auditlens-api bash -c \"cd /app/backend && python -m alembic upgrade head\"'"
+	@echo "✅  Deploy complete — code + migrations."
 
 deploy-check: ## Dry-run rsync (shows what would change)
 	rsync -avzn --progress \
