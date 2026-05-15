@@ -212,6 +212,7 @@ export default function FilterBar({ filters, options, hierarchy, onChange, onRes
               key={opt.value}
               type="button"
               className={`signal-pill${filters.signal === opt.value ? " active" : ""}`}
+              data-tier={opt.value || undefined}
               onClick={() => update("signal", opt.value)}
             >
               {opt.label}

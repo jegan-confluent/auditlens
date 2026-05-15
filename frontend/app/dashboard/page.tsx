@@ -155,6 +155,13 @@ export default function DashboardPage() {
         <SignalSummaryPanel
           summary={summary}
           onApplyFlow={navigateToEvents}
+          onTierSelect={(tier) => {
+            if (!tier) return;
+            const patch = tier === "noise"
+              ? { mode: "audit_trail" as const, signal: "noise", hide_noise: "false" }
+              : { mode: "decision" as const, signal: tier, hide_noise: "true" };
+            navigateToEvents(patch);
+          }}
         />
       ) : null}
       {summary ? (

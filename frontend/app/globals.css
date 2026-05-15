@@ -2699,6 +2699,11 @@ pre {
   border-color: var(--accent);
   color: var(--accent);
 }
+/* Tier-coloured active states for signal filter pills */
+.signal-pill.active[data-tier="noise"]           { background: #f0efee; border-color: #888780; color: #555; }
+.signal-pill.active[data-tier="informational"]   { background: #e6f4f0; border-color: #0F6E56; color: #0F6E56; }
+.signal-pill.active[data-tier="attention"]       { background: var(--warn-soft); border-color: #BA7517; color: #BA7517; }
+.signal-pill.active[data-tier="action_required"] { background: var(--danger-soft); border-color: #E24B4A; color: #A32D2D; }
 .more-filters-btn {
   padding: 4px 12px;
   font-size: 13px;
