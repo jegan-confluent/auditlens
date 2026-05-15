@@ -14,6 +14,7 @@ export type EventFilters = {
   q: string;
   production_hint: string;
   plane: string;
+  action: string;
 };
 
 // Default landing state = "Action Required": last 12h, decision-mode, only
@@ -35,6 +36,7 @@ export const defaultFilters: EventFilters = {
   q: "",
   production_hint: "",
   plane: "",
+  action: "",
 };
 
 export const allActivityFilters: EventFilters = {
@@ -53,6 +55,7 @@ export const allActivityFilters: EventFilters = {
   q: "",
   production_hint: "",
   plane: "",
+  action: "",
 };
 
 const RESULT_TO_QUERY: Record<string, { result?: string; is_denied?: string }> = {
@@ -178,6 +181,7 @@ export function activeFilterLabels(filters: EventFilters) {
     if (key === "production_hint" && value === "non_production") return "Non-production only";
     if (key === "plane" && value === "control_plane") return "Control plane";
     if (key === "plane" && value === "data_plane") return "Data plane";
+    if (key === "action") return `Method: ${value.split(".").pop() ?? value}`;
     return `${key.replace("_", " ")}: ${value}`;
   };
   return Object.entries(filters)

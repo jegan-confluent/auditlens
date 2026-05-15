@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import type { FilterOptions } from "../lib/types";
+import type { FilterHierarchy, FilterOptions } from "../lib/types";
 import { activeFilterLabels, applyQuickFilter, type EventFilters } from "../lib/eventFilters";
 export { activeFilterLabels, defaultFilters, type EventFilters } from "../lib/eventFilters";
 
@@ -42,15 +42,27 @@ function isQuickFilterActive(filters: EventFilters, patch: Partial<EventFilters>
   return Object.entries(patch).every(([key, value]) => filters[key as keyof EventFilters] === value);
 }
 
-export default function FilterBar({ filters, options, onChange, onReset }: {
+export default function FilterBar({ filters, options, hierarchy, onChange, onReset }: {
   filters: EventFilters;
   options: FilterOptions | null;
+  hierarchy: FilterHierarchy | null;
   onChange: (filters: EventFilters) => void;
   onReset: () => void;
 }) {
   const update = (key: keyof EventFilters, value: string) => onChange({ ...filters, [key]: value });
   const apply = (patch: Partial<EventFilters>) => onChange(applyQuickFilter(filters, patch));
   const activeLabels = activeFilterLabels(filters);
+
+  // Cascading method selector state — service and category are UI-only;
+  // the actual filter params are action_category and action.
+  const [selectedService, setSelectedService] = useState<string>("");
+  const [selectedCategory, setSelectedCategory] = useState<string>(() => filters.action_category);
+
+  const hierarchyServices = hierarchy?.services ?? [];
+  const activeService = hierarchyServices.find((s) => s.name === selectedService);
+  const categoryOptions = activeService ? activeService.categories : [];
+  const activeCategory = categoryOptions.find((c) => c.name === selectedCategory);
+  const methodOptions = activeCategory ? activeCategory.methods : [];
 
   const secondaryCount = [
     filters.actor,
@@ -61,10 +73,11 @@ export default function FilterBar({ filters, options, onChange, onReset }: {
     filters.result,
     filters.production_hint,
     filters.plane,
+    filters.action,
   ].filter(Boolean).length;
 
   const [moreOpen, setMoreOpen] = useState(
-    () => [filters.actor, filters.resource, filters.cluster_name, filters.environment_name, filters.resource_type, filters.result, filters.production_hint, filters.plane].some(Boolean)
+    () => [filters.actor, filters.resource, filters.cluster_name, filters.environment_name, filters.resource_type, filters.result, filters.production_hint, filters.plane, filters.action].some(Boolean)
   );
 
   const [presets, setPresets] = useState<FilterPreset[]>(() => {
@@ -218,16 +231,62 @@ export default function FilterBar({ filters, options, onChange, onReset }: {
           <option value="7d">Last 7d</option>
           <option value="30d">Last 30d</option>
         </select>
-        <select
-          value={filters.action_category}
-          onChange={(e) => update("action_category", e.target.value)}
-          aria-label="Action category"
-        >
-          <option value="">All actions</option>
-          {(options?.action_categories || []).map((v) => (
-            <option key={v} value={v}>{v}</option>
-          ))}
-        </select>
+        {hierarchyServices.length > 0 ? (
+          <>
+            <select
+              value={selectedService}
+              onChange={(e) => {
+                setSelectedService(e.target.value);
+                setSelectedCategory("");
+                onChange({ ...filters, action_category: "", action: "" });
+              }}
+              aria-label="Service"
+            >
+              <option value="">All services</option>
+              {hierarchyServices.map((s) => (
+                <option key={s.name} value={s.name}>{s.label}</option>
+              ))}
+            </select>
+            <select
+              value={selectedCategory}
+              onChange={(e) => {
+                setSelectedCategory(e.target.value);
+                onChange({ ...filters, action_category: e.target.value, action: "" });
+              }}
+              aria-label="Category"
+              disabled={!selectedService}
+            >
+              <option value="">All categories</option>
+              {categoryOptions.map((c) => (
+                <option key={c.name} value={c.name}>{c.name}</option>
+              ))}
+            </select>
+            <select
+              value={filters.action}
+              onChange={(e) => {
+                update("action", e.target.value);
+              }}
+              aria-label="Method"
+              disabled={!selectedCategory}
+            >
+              <option value="">All methods</option>
+              {methodOptions.map((m) => (
+                <option key={m.action} value={m.action}>{m.label}</option>
+              ))}
+            </select>
+          </>
+        ) : (
+          <select
+            value={filters.action_category}
+            onChange={(e) => update("action_category", e.target.value)}
+            aria-label="Action category"
+          >
+            <option value="">All actions</option>
+            {(options?.action_categories || []).map((v) => (
+              <option key={v} value={v}>{v}</option>
+            ))}
+          </select>
+        )}
         <button
           type="button"
           className={`more-filters-btn${moreOpen ? " active" : ""}`}

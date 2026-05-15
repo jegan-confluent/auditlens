@@ -15,6 +15,7 @@ import {
   exportEvents,
   getEvent,
   getEvents,
+  getFilterHierarchy,
   getFilters,
   getSummary,
   getSystemStatus,
@@ -30,7 +31,7 @@ import {
   summaryParamsFromFilters,
   type EventFilters
 } from "../../lib/eventFilters";
-import type { AuditEvent, EventListResponse, FilterOptions, SummaryResponse, SystemStatus } from "../../lib/types";
+import type { AuditEvent, EventListResponse, FilterHierarchy, FilterOptions, SummaryResponse, SystemStatus } from "../../lib/types";
 
 // String-typed filter keys (everything except `mode`, which is a literal
 // union we narrow separately below).
@@ -49,6 +50,7 @@ const URL_STRING_KEYS = [
   "q",
   "production_hint",
   "plane",
+  "action",
 ] as const satisfies ReadonlyArray<Exclude<keyof EventFilters, "mode">>;
 
 function filtersFromSearchParams(params: URLSearchParams, base: EventFilters): EventFilters {
@@ -156,6 +158,7 @@ function StatusStrip({
 function FilterToolbar({
   filters,
   options,
+  hierarchy,
   filterOpen,
   onToggleFilter,
   onChange,
@@ -165,6 +168,7 @@ function FilterToolbar({
 }: {
   filters: EventFilters;
   options: FilterOptions | null;
+  hierarchy: FilterHierarchy | null;
   filterOpen: boolean;
   onToggleFilter: () => void;
   onChange: (filters: EventFilters) => void;
@@ -206,7 +210,7 @@ function FilterToolbar({
         </label>
       </div>
       {filterOpen ? (
-        <FilterBar filters={filters} options={options} onChange={onChange} onReset={onReset} />
+        <FilterBar filters={filters} options={options} hierarchy={hierarchy} onChange={onChange} onReset={onReset} />
       ) : null}
     </div>
   );
@@ -234,6 +238,7 @@ function EventsPageInner() {
   const [filters, setFilters] = useState<EventFilters>(initialFilters);
   const tableRef = useRef<HTMLDivElement>(null);
   const [options, setOptions] = useState<FilterOptions | null>(null);
+  const [hierarchy, setHierarchy] = useState<FilterHierarchy | null>(null);
   const [data, setData] = useState<EventListResponse | null>(null);
   // Session-only toggle: collapse repeated (actor, action, resource) runs into
   // one row. Default OFF preserves the existing list. Not URL-persisted by
@@ -279,6 +284,9 @@ function EventsPageInner() {
         if (isAbortError(err)) return;
         setError(err.message);
       });
+    getFilterHierarchy(controller.signal)
+      .then(setHierarchy)
+      .catch((err: Error) => { if (!isAbortError(err)) console.warn("hierarchy load failed", err.message); });
     return () => controller.abort();
   }, []);
 
@@ -462,6 +470,7 @@ function EventsPageInner() {
       <FilterToolbar
         filters={filters}
         options={options}
+        hierarchy={hierarchy}
         filterOpen={filterOpen}
         onToggleFilter={() => setFilterOpen(!filterOpen)}
         onChange={updateFilters}

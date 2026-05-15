@@ -66,6 +66,11 @@ export type AuditEvent = {
   suppressed?: boolean;
 };
 
+export type FilterHierarchyMethod = { action: string; label: string };
+export type FilterHierarchyCategory = { name: string; methods: FilterHierarchyMethod[] };
+export type FilterHierarchyService = { name: string; label: string; categories: FilterHierarchyCategory[] };
+export type FilterHierarchy = { services: FilterHierarchyService[] };
+
 export type EventListResponse = {
   items: AuditEvent[];
   limit: number;

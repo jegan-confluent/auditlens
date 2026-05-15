@@ -1489,3 +1489,55 @@ def test_retention_cleanup_archives_before_delete(client, monkeypatch):
     assert len(cleanup_calls) == 1, "cleanup_retention should be called once"
     # Archive called with a cutoff datetime, cleanup called after
     assert hasattr(archive_calls[0], "year"), "archive cutoff must be a datetime"
+
+
+def test_filters_hierarchy_returns_services(client):
+    response = client.get("/filters/hierarchy")
+    assert response.status_code == 200
+    data = response.json()
+    assert "services" in data
+    assert isinstance(data["services"], list)
+    # Each service has name, label, categories
+    for svc in data["services"]:
+        assert "name" in svc
+        assert "label" in svc
+        assert "categories" in svc
+        for cat in svc["categories"]:
+            assert "name" in cat
+            assert "methods" in cat
+            for method in cat["methods"]:
+                assert "action" in method
+                assert "label" in method
+
+
+def test_filters_hierarchy_kafka_is_data_plane_service(client):
+    from backend.app.services.filter_options_service import clear_filter_hierarchy_cache
+    from backend.app.db.models import AuditEvent as AuditEventModel
+
+    db_override = next(iter(client.app.dependency_overrides.values()))
+    session_gen = db_override()
+    db = next(session_gen)
+    try:
+        evt = AuditEventModel(
+            event_fingerprint="fp-hier-kafka",
+            timestamp=datetime.now(timezone.utc),
+            result="Success",
+            actor="sa-hier",
+            action="kafka.Produce",
+            normalized_action="kafka.Produce",
+            action_category="Data Access",
+            resource_type="kafka_cluster",
+            resource_name="lkc-hier",
+            resource_display="lkc-hier",
+            summary="hierarchy test event",
+        )
+        db.add(evt)
+        db.commit()
+    finally:
+        session_gen.close()
+
+    clear_filter_hierarchy_cache()
+    response = client.get("/filters/hierarchy")
+    assert response.status_code == 200
+    service_names = [s["name"] for s in response.json()["services"]]
+    assert "kafka" in service_names

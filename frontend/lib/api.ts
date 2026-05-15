@@ -1,4 +1,4 @@
-import type { ActorIpBaseline, ActorNarrative, AuditEvent, EventListResponse, FilterOptions, ForwarderHealth, PatternListResponse, SummaryResponse, SystemStatus, VacuumResult } from "./types";
+import type { ActorIpBaseline, ActorNarrative, AuditEvent, EventListResponse, FilterHierarchy, FilterOptions, ForwarderHealth, PatternListResponse, SummaryResponse, SystemStatus, VacuumResult } from "./types";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost/api";
 
@@ -50,6 +50,10 @@ export async function updateEventTriage(id: number, triage_status: string, triag
 
 export function getFilters(signal?: AbortSignal) {
   return request<FilterOptions>("/filters/options", signal);
+}
+
+export function getFilterHierarchy(signal?: AbortSignal) {
+  return request<FilterHierarchy>("/filters/hierarchy", signal);
 }
 
 export function getSystemStatus(signal?: AbortSignal) {

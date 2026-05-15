@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections import defaultdict
 from typing import Any
 
 from cachetools import TTLCache
@@ -183,3 +184,102 @@ def _internal_state() -> dict[str, Any]:  # pragma: no cover - debug helper
         "ttl": FILTER_OPTIONS_TTL_SECONDS,
         "now": time.monotonic(),
     }
+
+
+# ---------------------------------------------------------------------------
+# Hierarchy endpoint — Service → Category → Method, 5-minute cache
+# ---------------------------------------------------------------------------
+
+HIERARCHY_TTL_SECONDS = 300
+HIERARCHY_MAX_DISTINCT_ROWS = 5000
+
+_SERVICE_LABELS: dict[str, str] = {
+    "kafka": "Kafka",
+    "schema-registry": "Schema Registry",
+    "flink": "Flink",
+    "ksql": "ksQL",
+    "tableflow": "Tableflow",
+    "mds": "MDS",
+    "io.confluent": "Confluent Cloud",
+    "auth": "Authentication",
+}
+
+_hierarchy_cache: TTLCache[int, dict[str, Any]] = TTLCache(maxsize=8, ttl=HIERARCHY_TTL_SECONDS)
+_hierarchy_cache_lock = threading.Lock()
+
+
+def _derive_service_key(action: str) -> str:
+    """Map an action method name to a top-level service key."""
+    lower = action.lower()
+    # Match known data-plane prefixes first (kafka., schema-registry., etc.)
+    for prefix in ("kafka.", "schema-registry.", "flink.", "ksql.", "tableflow.", "mds."):
+        if lower.startswith(prefix):
+            return prefix.rstrip(".")
+    if lower.startswith("io.confluent."):
+        return "io.confluent"
+    if "." not in action:
+        return "auth"
+    return action.split(".")[0].lower()
+
+
+def _build_filter_hierarchy(db: Session) -> dict[str, Any]:
+    """Build 3-level Service → Category → Method tree from live audit_events."""
+    stmt = (
+        select(AuditEvent.action, AuditEvent.action_category)
+        .where(AuditEvent.action.isnot(None))
+        .where(AuditEvent.action != "")
+        .distinct()
+        .limit(HIERARCHY_MAX_DISTINCT_ROWS)
+    )
+    rows = db.execute(stmt).all()
+
+    tree: dict[str, dict[str, list[str]]] = defaultdict(lambda: defaultdict(list))
+    for action, category in rows:
+        if not action:
+            continue
+        service_key = _derive_service_key(action)
+        cat = (category or "Other").strip() or "Other"
+        tree[service_key][cat].append(action)
+
+    services = []
+    for service_key in sorted(tree.keys()):
+        categories = []
+        for cat_name in sorted(tree[service_key].keys()):
+            methods = sorted(tree[service_key][cat_name])
+            label_prefix = service_key.rstrip(".") + "."
+            categories.append({
+                "name": cat_name,
+                "methods": [
+                    {
+                        "action": m,
+                        "label": m[len(label_prefix):] if m.lower().startswith(label_prefix.lower()) else m,
+                    }
+                    for m in methods
+                ],
+            })
+        services.append({
+            "name": service_key,
+            "label": _SERVICE_LABELS.get(service_key, service_key.replace("-", " ").title()),
+            "categories": categories,
+        })
+
+    return {"services": services}
+
+
+def get_filter_hierarchy(db: Session) -> dict[str, Any]:
+    bind = db.get_bind()
+    cache_key = id(bind)
+    with _hierarchy_cache_lock:
+        cached = _hierarchy_cache.get(cache_key)
+    if cached is not None:
+        return cached
+    result = _build_filter_hierarchy(db)
+    with _hierarchy_cache_lock:
+        _hierarchy_cache[cache_key] = result
+    return result
+
+
+def clear_filter_hierarchy_cache() -> None:
+    """Drop the hierarchy cache. Call from tests after mutating data."""
+    with _hierarchy_cache_lock:
+        _hierarchy_cache.clear()
