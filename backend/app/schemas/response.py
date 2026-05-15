@@ -73,6 +73,9 @@ class SummaryResponse(BaseModel):
     by_action_category: dict[str, int]
     by_resource_type: dict[str, int]
     by_result: dict[str, int]
+    by_environment: dict[str, int] = {}
+    by_cluster: dict[str, int] = {}
+    by_hour: list[int] = []
     # Populated only when ?include_noise=true is set on the request. None
     # when the noise table is unavailable / query failed.
     noise_summary: NoiseSummary | None = None

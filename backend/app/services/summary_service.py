@@ -1,5 +1,5 @@
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import func, select, text
@@ -392,6 +392,41 @@ def get_summary(
 
         noise_summary = get_noise_summary(db, retention_days=noise_retention_days)
 
+    # Environment + cluster breakdowns (separate queries, dialect-agnostic).
+    by_environment = _group_counts(db, AuditEvent.environment_id, conditions)
+    by_cluster = _group_counts(db, AuditEvent.cluster_id, conditions)
+
+    # Hourly activity heatmap — last 7 days, signal events only.
+    by_hour: list[int] = [0] * 24
+    try:
+        seven_days_ago = datetime.now(timezone.utc) - timedelta(days=7)
+        if is_postgres:
+            hour_rows = db.execute(
+                text(
+                    "SELECT EXTRACT(HOUR FROM timestamp AT TIME ZONE 'UTC')::int AS hr, COUNT(*) AS cnt"
+                    " FROM audit_events"
+                    " WHERE timestamp > :cutoff AND signal_type != 'noise'"
+                    " GROUP BY hr ORDER BY hr"
+                ),
+                {"cutoff": seven_days_ago},
+            ).all()
+        else:
+            hour_rows = db.execute(
+                text(
+                    "SELECT CAST(strftime('%H', timestamp) AS INTEGER) AS hr, COUNT(*) AS cnt"
+                    " FROM audit_events"
+                    " WHERE timestamp > :cutoff AND signal_type != 'noise'"
+                    " GROUP BY hr ORDER BY hr"
+                ),
+                {"cutoff": seven_days_ago},
+            ).all()
+        for row in hour_rows:
+            hr = int(row[0])
+            if 0 <= hr <= 23:
+                by_hour[hr] = int(row[1])
+    except Exception:
+        pass  # best-effort; keep by_hour as all-zeros
+
     return {
         "noise_summary": noise_summary,
         "total_events": total,
@@ -427,4 +462,7 @@ def get_summary(
         "by_action_category": out_by_action_category,
         "by_resource_type": out_by_resource_type,
         "by_result": out_by_result,
+        "by_environment": by_environment,
+        "by_cluster": by_cluster,
+        "by_hour": by_hour,
     }

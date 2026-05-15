@@ -130,6 +130,9 @@ export type SummaryResponse = {
   by_action_category: Record<string, number>;
   by_resource_type: Record<string, number>;
   by_result: Record<string, number>;
+  by_environment?: Record<string, number>;
+  by_cluster?: Record<string, number>;
+  by_hour?: number[];
 };
 
 export type FilterOptions = {

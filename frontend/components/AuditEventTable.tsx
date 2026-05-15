@@ -258,6 +258,7 @@ function ExpandedEventRow({ event, detail, loading, error }: {
               <div><span className="muted">Actor source:</span> {data.actor_source || "—"} ({data.actor_confidence || "—"})</div>
               <div><span className="muted">Client ID:</span> {data.client_id || "—"}</div>
               <div><span className="muted">Request ID:</span> {data.request_id || "—"}</div>
+              {data.network_id ? <div><span className="muted">Network ID:</span> {data.network_id}</div> : null}
               <div><span className="muted">Fingerprint:</span> <code>{data.event_fingerprint}</code></div>
             </div>
           </details>
@@ -291,6 +292,11 @@ function EventRow({ event, options }: { event: AuditEvent; options: RowOptions }
         <td className="event-what-cell" style={{ borderLeft: `3px solid ${borderColor}` }}>
           <strong className="event-what-title">{plainEng || event.event_title || event.normalized_action}</strong>
           <div className="event-resource-secondary">{resourceText}</div>
+          {event.signal_type === "action_required" && event.recommended_action ? (
+            <div style={{ fontSize: "0.72em", color: "#EF9F27", marginTop: 2 }}>
+              → {event.recommended_action}
+            </div>
+          ) : null}
         </td>
         <td style={{ width: 90, verticalAlign: "middle" }}>
           <SignalBadge signal={event.signal_type} />

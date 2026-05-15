@@ -66,6 +66,57 @@ function TimeWindowPills({
   );
 }
 
+const HEATMAP_COLORS = ["#F1EFE8", "#FAC775", "#EF9F27", "#E24B4A"] as const;
+
+function heatColor(count: number): string {
+  if (count === 0) return HEATMAP_COLORS[0];
+  if (count <= 10) return HEATMAP_COLORS[1];
+  if (count <= 50) return HEATMAP_COLORS[2];
+  return HEATMAP_COLORS[3];
+}
+
+function EnvironmentBreakdown({ byEnvironment }: { byEnvironment: Record<string, number> }) {
+  const entries = Object.entries(byEnvironment).sort((a, b) => b[1] - a[1]).slice(0, 6);
+  const max = entries[0]?.[1] ?? 1;
+  return (
+    <div className="insight-breakdown" style={{ marginBottom: 8 }}>
+      <span className="muted" style={{ fontSize: 12 }}>By environment</span>
+      {entries.map(([env, count]) => (
+        <div key={env} style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 4 }}>
+          <span className="muted" style={{ fontSize: 11, width: 120, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{env}</span>
+          <div style={{ flex: 1, background: "#F1EFE8", borderRadius: 2, height: 8 }}>
+            <div style={{ width: `${Math.round((count / max) * 100)}%`, background: "#EF9F27", height: 8, borderRadius: 2 }} />
+          </div>
+          <span className="muted" style={{ fontSize: 11, width: 50, textAlign: "right" }}>{count.toLocaleString()}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function HourlyHeatmap({ byHour }: { byHour: number[] }) {
+  const hours = byHour.length === 24 ? byHour : Array(24).fill(0).map((_, i) => byHour[i] ?? 0);
+  return (
+    <div className="insight-breakdown" style={{ marginBottom: 8 }}>
+      <span className="muted" style={{ fontSize: 12 }}>Activity by hour (UTC, last 7d)</span>
+      <div style={{ display: "flex", gap: 2, marginTop: 4 }}>
+        {hours.map((count, hr) => (
+          <div
+            key={hr}
+            title={`${String(hr).padStart(2, "0")}:00 UTC — ${count.toLocaleString()} events`}
+            style={{ flex: 1, height: 20, background: heatColor(count), borderRadius: 2, cursor: "default" }}
+          />
+        ))}
+      </div>
+      <div style={{ display: "flex", justifyContent: "space-between" }}>
+        {["0", "6", "12", "18", "24"].map((label) => (
+          <span key={label} className="muted" style={{ fontSize: 10 }}>{label}</span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export default function DashboardPage() {
   const router = useRouter();
 
@@ -162,6 +213,12 @@ export default function DashboardPage() {
             navigateToEvents(patch);
           }}
         />
+      ) : null}
+      {summary?.by_environment && Object.keys(summary.by_environment).length > 1 ? (
+        <EnvironmentBreakdown byEnvironment={summary.by_environment} />
+      ) : null}
+      {summary?.by_hour && summary.by_hour.some((n) => n > 0) ? (
+        <HourlyHeatmap byHour={summary.by_hour} />
       ) : null}
       <ActionFeed
         timeWindow={timeWindow}
