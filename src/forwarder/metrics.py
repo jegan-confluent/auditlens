@@ -291,6 +291,13 @@ class Metrics:
             self.persistence_write_success_total += 1
             self.persistence_status.update(status)
 
+    def record_persistence_disabled(self) -> None:
+        with self.lock:
+            self.persistence_status["enabled"] = False
+            self.persistence_status["healthy"] = True
+            self.persistence_status["backend"] = "disabled"
+            self.persistence_status["note"] = "SQLite hot cache disabled — using PostgreSQL only"
+
     def record_persistence_failure(self, error: str):
         with self.lock:
             self.persistence_write_failures += 1

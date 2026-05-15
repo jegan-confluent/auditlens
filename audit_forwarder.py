@@ -1254,6 +1254,7 @@ def initialize_product_store_or_exit() -> None:
                 "(ENABLE_SQLITE_HOT_CACHE=%s)",
                 ENABLE_SQLITE_HOT_CACHE,
             )
+        metrics.record_persistence_disabled()
         return
     try:
         # Heal the SQLite hot cache before opening the long-lived

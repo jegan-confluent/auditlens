@@ -148,3 +148,20 @@ def test_postgresql_psycopg_url_also_detects_product_mode(monkeypatch):
     )
     assert mod.PRODUCT_MODE is True
     assert mod._sqlite_hot_cache_enabled() is False
+
+
+def test_persistence_health_disabled_reports_healthy(monkeypatch):
+    """When ENABLE_SQLITE_HOT_CACHE=false, initialize_product_store_or_exit
+    must report enabled=False, healthy=True in persistence_status so the
+    /health persistence component shows 'healthy' instead of 'degraded'."""
+    mod = _reload_with_env(
+        monkeypatch,
+        database_url="postgresql://u:p@host/db",
+        hot_cache="false",
+    )
+    mod.product_store = None
+    mod.initialize_product_store_or_exit()
+    ps = mod.metrics.persistence_status
+    assert ps["enabled"] is False, f"expected enabled=False, got {ps['enabled']}"
+    assert ps["healthy"] is True, f"expected healthy=True, got {ps['healthy']}"
+    assert ps["backend"] == "disabled"
