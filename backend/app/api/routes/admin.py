@@ -1,5 +1,7 @@
+import logging
 import time
 import threading
+from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -11,8 +13,11 @@ from backend.app.services.backfill_service import (
     get_actor_backfill_status,
     start_actor_display_name_backfill,
 )
+from backend.app.services.cold_storage_service import archive_events_before
 from backend.app.services.event_service import cleanup_retention
 from src.product.auth import AuthConfig, Authenticator, Role
+
+logger = logging.getLogger("auditlens.backend.admin")
 
 router = APIRouter(tags=["admin"])
 
@@ -70,6 +75,14 @@ def retention_cleanup(
 ) -> dict:
     settings = get_settings()
     days = retention_days or settings.event_retention_days
+    cutoff = datetime.now(timezone.utc) - timedelta(days=max(days, 1))
+    # Archive to cold storage before deleting — non-fatal if archive fails or is disabled
+    try:
+        archived = archive_events_before(db, cutoff, dry_run=dry_run)
+        if archived.get("enabled"):
+            logger.info("Cold storage archive before retention: %s", archived)
+    except Exception as exc:
+        logger.warning("Cold storage archive failed (non-fatal), proceeding with cleanup: %s", exc)
     return cleanup_retention(
         db,
         days,

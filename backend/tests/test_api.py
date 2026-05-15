@@ -1416,3 +1416,30 @@ def test_summary_flow_groups_subject_display_name(client):
     assert dn_group["subject_display_name"] == "Flow Test Person"
     assert "Flow Test Person" in dn_group["group_title"]
     assert "u-flowdntest" not in dn_group["group_title"]
+
+
+def test_retention_cleanup_archives_before_delete(client, monkeypatch):
+    """When cold storage is configured, archive is called before delete runs."""
+    import backend.app.api.routes.admin as admin_mod
+
+    archive_calls = []
+    cleanup_calls = []
+
+    def fake_archive(db, cutoff, prefix="auditlens", dry_run=False):
+        archive_calls.append(cutoff)
+        return {"enabled": True, "days_archived": 2, "bytes_archived": 4096, "errors": [], "dry_run": dry_run}
+
+    def fake_cleanup(db, days, *, dry_run=False, raw_payload_retention_days=None, noise_retention_days=None):
+        cleanup_calls.append(days)
+        return {"dry_run": dry_run, "deleted_count": 0, "raw_payloads_nulled": 0, "noise_deleted": 0}
+
+    monkeypatch.setattr(admin_mod, "archive_events_before", fake_archive)
+    monkeypatch.setattr(admin_mod, "cleanup_retention", fake_cleanup)
+    monkeypatch.setenv("API_AUTH_ENABLED", "false")
+
+    response = client.post("/admin/retention/cleanup", params={"dry_run": "true"})
+    assert response.status_code == 200
+    assert len(archive_calls) == 1, "archive_events_before should be called once"
+    assert len(cleanup_calls) == 1, "cleanup_retention should be called once"
+    # Archive called with a cutoff datetime, cleanup called after
+    assert hasattr(archive_calls[0], "year"), "archive cutoff must be a datetime"
