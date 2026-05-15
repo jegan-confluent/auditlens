@@ -2,6 +2,13 @@
 
 This repository uses a lightweight repo-local session memory workflow for Codex.
 
+## Git commit rules
+
+- NEVER add Co-Authored-By lines to any commit message
+- NEVER add co-author attribution of any kind
+- NEVER mention Claude, AI, or any tool in commit messages
+- Commit messages must be written as if authored solely by the developer
+
 ## Core Working Rules
 
 - Work in the `AuditLens` repository only.
