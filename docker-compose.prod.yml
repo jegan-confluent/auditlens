@@ -167,7 +167,7 @@ services:
     container_name: auditlens-frontend
     restart: always
     environment:
-      - NEXT_PUBLIC_API_BASE_URL=${NEXT_PUBLIC_API_BASE_URL:-http://localhost:${BACKEND_PORT:-8080}}
+      - NEXT_PUBLIC_API_BASE_URL=${NEXT_PUBLIC_API_BASE_URL:-/api}
     networks:
       - frontend-network
     depends_on:
