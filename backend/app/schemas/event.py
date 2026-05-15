@@ -75,7 +75,7 @@ class AuditEventListOut(BaseModel):
     @computed_field  # type: ignore[prop-decorator]
     @property
     def plane_type(self) -> str:
-        return derive_plane_type(self.action)
+        return derive_plane_type(self.action, getattr(self, "resource_family", None), getattr(self, "action_category", None))
 
 
 class AuditEventDetailOut(AuditEventListOut):

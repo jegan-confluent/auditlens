@@ -33,30 +33,36 @@ _DATA_PLANE_PREFIXES: tuple[str, ...] = (
     "mds.",
 )
 _DATA_PLANE_EXACT: frozenset[str] = frozenset({"scheduledjwksrefresh"})
-_DATA_PLANE_PASCAL: tuple[str, ...] = (
-    "tableflow",
-    "getstatement",
-    "listworkspace",
-    "listcomputepool",
-    "getkafkacluster",
-    "getconnector",
-    "getflinkstatement",
-)
+# Resource families that represent data plane activity.
+# Semantic classification derived at ingest time — not string-matching on action name.
+_DATA_PLANE_RESOURCE_FAMILIES: frozenset[str] = frozenset({
+    "tableflow", "topic", "schema_registry", "flink", "ksql",
+})
 
 
-def derive_plane_type(action: str | None) -> str:
-    """Returns 'data_plane' or 'control_plane' based on Confluent method name."""
-    if not action:
-        return "control_plane"
-    action_lower = action.lower()
-    for prefix in _DATA_PLANE_PREFIXES:
-        if action_lower.startswith(prefix):
-            return "data_plane"
-    for prefix in _DATA_PLANE_PASCAL:
-        if action_lower.startswith(prefix):
-            return "data_plane"
-    if action_lower in _DATA_PLANE_EXACT:
+def derive_plane_type(
+    action: str | None,
+    resource_family: str | None = None,
+    action_category: str | None = None,
+) -> str:
+    """Returns 'data_plane' or 'control_plane'.
+
+    Resolution order:
+    1. resource_family — semantic, derived at ingest time (most reliable)
+    2. action_category == Data — catch-all for data operations
+    3. action prefix — fallback for events without resource_family
+    """
+    if resource_family and resource_family.lower() in _DATA_PLANE_RESOURCE_FAMILIES:
         return "data_plane"
+    if action_category and action_category.lower() == "data":
+        return "data_plane"
+    if action:
+        action_lower = action.lower()
+        for prefix in _DATA_PLANE_PREFIXES:
+            if action_lower.startswith(prefix):
+                return "data_plane"
+        if action_lower in _DATA_PLANE_EXACT:
+            return "data_plane"
     return "control_plane"
 
 # Suppression cache — refreshed at most once per minute
