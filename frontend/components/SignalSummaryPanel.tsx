@@ -1,5 +1,6 @@
 import type { SummaryResponse } from "../lib/types";
 import type { EventFilters } from "../lib/eventFilters";
+import ActionAlertBanner from "./ActionAlertBanner";
 import SignalBreakdown from "./SignalBreakdown";
 
 type SignalCountField = "noise_count" | "informational_count" | "attention_count" | "action_required_count";
@@ -178,6 +179,7 @@ export default function SignalSummaryPanel({ summary, onApplyFlow, currentSignal
         activeTier={currentSignal ?? null}
         onTierSelect={onTierSelect}
       />
+      <ActionAlertBanner summary={summary} />
       <div className="signal-stat-cards">
         {SIGNAL_CARDS.map(({ fieldKey, className, icon, label, contextLabel, alertClass }) => {
           const signalType = signalFromField(fieldKey);

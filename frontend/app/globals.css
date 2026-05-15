@@ -956,6 +956,43 @@ button.narrative-item:hover {
   opacity: 0.8;
 }
 
+/* ── ActionAlertBanner ── */
+.action-alert-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  background: #fcebeb;
+  border: 0.5px solid #f09595;
+  border-radius: var(--border-radius-md, 8px);
+  color: #791f1f;
+  font-size: 13px;
+  margin-bottom: 10px;
+}
+.action-alert-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #e24b4a;
+  flex-shrink: 0;
+}
+.action-alert-text {
+  flex: 1;
+}
+.action-alert-actor {
+  font-weight: 600;
+}
+.action-alert-link {
+  color: #791f1f;
+  text-decoration: underline;
+  white-space: nowrap;
+  font-weight: 600;
+}
+.action-alert-link:hover {
+  color: #5a1515;
+}
+
 /* ── SignalBreakdown — segmented bar + pill legend ── */
 .signal-breakdown {
   margin-bottom: 14px;
