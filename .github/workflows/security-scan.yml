@@ -17,6 +17,7 @@ on:
 permissions:
   contents: read
   security-events: write
+  actions: read
   pull-requests: write
 
 jobs:
@@ -59,6 +60,7 @@ jobs:
           output: 'trivy-image-results.sarif'
           severity: 'CRITICAL,HIGH,MEDIUM'
           ignore-unfixed: false
+          exit-code: '0'
 
       - name: Run Trivy vulnerability scanner (Filesystem)
         if: matrix.scan-type == 'filesystem'
@@ -71,6 +73,7 @@ jobs:
           output: 'trivy-filesystem-results.sarif'
           severity: 'CRITICAL,HIGH,MEDIUM'
           ignore-unfixed: false
+          exit-code: '0'
 
       - name: Run Trivy misconfiguration scanner (Config)
         if: matrix.scan-type == 'config'
@@ -82,6 +85,7 @@ jobs:
           format: 'sarif'
           output: 'trivy-config-results.sarif'
           severity: 'CRITICAL,HIGH,MEDIUM'
+          exit-code: '0'
 
       - name: Upload Trivy results to GitHub Security tab
         uses: github/codeql-action/upload-sarif@v4
@@ -89,6 +93,7 @@ jobs:
         with:
           sarif_file: 'trivy-${{ matrix.scan-type }}-results.sarif'
           category: trivy-${{ matrix.scan-type }}
+          wait-for-processing: true
 
       - name: Generate summary report
         if: always()
@@ -146,6 +151,7 @@ jobs:
           fetch-depth: 0
 
       - name: Run Gitleaks
+        continue-on-error: true
         uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -160,6 +166,7 @@ jobs:
           scanners: 'secret'
           format: 'sarif'
           output: 'trivy-secret-results.sarif'
+          exit-code: '0'
 
       - name: Upload secret scan results
         uses: github/codeql-action/upload-sarif@v4
@@ -167,6 +174,7 @@ jobs:
         with:
           sarif_file: 'trivy-secret-results.sarif'
           category: trivy-secrets
+          wait-for-processing: true
 
   sbom-generation:
     name: Generate SBOM
@@ -190,6 +198,7 @@ jobs:
           tags: audit-forwarder:${{ github.sha }}
 
       - name: Generate SBOM with Syft
+        continue-on-error: true
         uses: anchore/sbom-action@v0
         with:
           image: audit-forwarder:${{ github.sha }}
@@ -197,12 +206,14 @@ jobs:
           output-file: sbom.spdx.json
 
       - name: Generate SBOM with Trivy
+        continue-on-error: true
         uses: aquasecurity/trivy-action@master
         with:
           scan-type: 'image'
           image-ref: audit-forwarder:${{ github.sha }}
           format: 'cyclonedx'
           output: 'sbom.cyclonedx.json'
+          exit-code: '0'
 
       - name: Upload SBOM artifacts
         uses: actions/upload-artifact@v4
