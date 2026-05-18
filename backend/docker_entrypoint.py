@@ -95,8 +95,8 @@ def _run_migrations() -> None:
         capture_output=False,
     )
     if result.returncode != 0:
-        print(f"[entrypoint] Migration failed with exit code {result.returncode} — aborting startup")
-        print("[entrypoint] Migration warning — continuing startup. Run manually if needed.")
+        print(f"[entrypoint] Migration failed with exit code {result.returncode} — continuing startup. Run manually if needed.")
+        return
     print("[entrypoint] Migrations complete.")
 
 
