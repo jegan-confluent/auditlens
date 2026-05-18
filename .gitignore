@@ -207,3 +207,12 @@ deploy/terraform/**/.terraform/
 .claude/
 .playwright-mcp/
 archive/
+jk-skills-complete/
+deploy/cloud/
+flink/
+.dev-docs/
+tools/
+AGENTS.md
+FEATURES.md
+claude-addon.sh
+scripts/deprecated/
