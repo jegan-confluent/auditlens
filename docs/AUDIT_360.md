@@ -2,7 +2,7 @@
 
 Generated: 2026-05-15  
 Stack: Next.js 15.5.15 / React 19.0.0 / FastAPI 0.115.6 / SQLAlchemy 2.0.30 / PostgreSQL 16  
-Auditor: Claude Code (automated grep/AST analysis — read-only, no changes made)
+Auditor: Automated (grep/AST analysis — read-only, no changes made)
 
 ---
 

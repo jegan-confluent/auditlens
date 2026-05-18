@@ -48,12 +48,21 @@ The `./setup` script runs an interactive wizard that collects:
 | Source bootstrap endpoint | e.g. `pkc-xxxxx.us-west-2.aws.confluent.cloud:9092` |
 | Source Kafka API key | Read access to the audit log topic |
 | Source Kafka API secret | Entered hidden |
+| Source audit topic | Default: `confluent-audit-log-events` — confirm with `confluent audit-log describe` |
+| Consumer group | Default: `auditlens-forwarder-v1` — controls Kafka-managed offset tracking |
+| Offset reset policy | `earliest` replays retained history; `latest` starts from now. Default: `earliest` for first install |
 | Destination cluster display name | Label only; default: `AuditLens Internal Kafka` |
 | Destination bootstrap endpoint | Where enriched events are written |
 | Destination Kafka API key | Write access |
 | Destination Kafka API secret | Entered hidden |
+| Destination topics exist? | If no, wizard creates the canonical AuditLens topics automatically |
+| Enable API authentication | Default: yes. The wizard generates a secure admin token |
+| Port selection | Dashboard (8503), metrics (8003), MCP (8080), landing (8088). Accept defaults unless ports conflict |
+| Slack/alerting webhook | Optional. Leave blank to skip |
 
-After collecting credentials, the wizard validates connectivity to both clusters, generates `.env` and `.secrets`, and starts services with `docker compose up -d`.
+After collecting inputs, the wizard validates connectivity to both clusters, generates `.env`, `.secrets`, and (when API auth is enabled) `secrets/auditlens-bootstrap-admin.token`, then starts all services with `docker compose up -d --build`.
+
+**Your admin token** (for Settings and admin API calls) is written to `secrets/auditlens-bootstrap-admin.token` — keep it safe and do not commit it.
 
 ---
 

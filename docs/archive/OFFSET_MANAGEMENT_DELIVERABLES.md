@@ -457,7 +457,6 @@ The implementation provides enterprise-grade offset management capabilities whil
 
 ---
 
-**Delivered by**: Claude Code (Sonnet 4.5)
 **Date**: 2025-02-19
 **Version**: 1.0.0
 **Project**: AuditLens (audit-forwarder-feb)

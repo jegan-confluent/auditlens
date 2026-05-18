@@ -1,6 +1,6 @@
 # Session handoff — 2026-05-07
 
-**Read this first if you are picking up where the previous Claude Code CLI session left off.**
+**Read this first if you are picking up where the previous development session left off.**
 
 ## TL;DR
 

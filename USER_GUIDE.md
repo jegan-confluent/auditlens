@@ -22,6 +22,8 @@ The dashboard is an at-a-glance summary for the current time window (1h / 6h / 2
 
 **When to act:** If ActionFeed shows DeleteKafkaCluster, CreateApiKey for an unfamiliar account, or any `result: Failure` from a privileged principal, open `/events` to investigate.
 
+**First login / no events yet:** Each panel shows a per-category empty message (e.g. "No destructive deletes in the last 24h") until events arrive. If the forwarder was installed with `AUTO_OFFSET_RESET=earliest` (the default), historical events from the Kafka topic replay automatically within seconds to minutes depending on retained volume. If you used `latest`, events only appear as new activity occurs in Confluent Cloud. Check `/system` if the pipeline shows as stalled.
+
 The dashboard auto-refreshes every 60 seconds.
 
 ---
