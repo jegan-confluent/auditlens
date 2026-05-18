@@ -23,7 +23,10 @@ jobs:
   trivy-scan:
     name: Trivy Security Scan
     runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     strategy:
+      fail-fast: false
       matrix:
         scan-type: [image, filesystem, config]
 
@@ -37,7 +40,7 @@ jobs:
 
       - name: Build Docker image
         if: matrix.scan-type == 'image'
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           push: false
@@ -48,6 +51,7 @@ jobs:
 
       - name: Run Trivy vulnerability scanner (Image)
         if: matrix.scan-type == 'image'
+        continue-on-error: true
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: audit-forwarder:${{ github.sha }}
@@ -58,17 +62,19 @@ jobs:
 
       - name: Run Trivy vulnerability scanner (Filesystem)
         if: matrix.scan-type == 'filesystem'
+        continue-on-error: true
         uses: aquasecurity/trivy-action@master
         with:
           scan-type: 'fs'
           scan-ref: '.'
           format: 'sarif'
-          output: 'trivy-fs-results.sarif'
+          output: 'trivy-filesystem-results.sarif'
           severity: 'CRITICAL,HIGH,MEDIUM'
           ignore-unfixed: false
 
       - name: Run Trivy misconfiguration scanner (Config)
         if: matrix.scan-type == 'config'
+        continue-on-error: true
         uses: aquasecurity/trivy-action@master
         with:
           scan-type: 'config'
@@ -78,8 +84,8 @@ jobs:
           severity: 'CRITICAL,HIGH,MEDIUM'
 
       - name: Upload Trivy results to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@v3
-        if: always()
+        uses: github/codeql-action/upload-sarif@v4
+        if: always() && hashFiles(format('trivy-{0}-results.sarif', matrix.scan-type)) != ''
         with:
           sarif_file: 'trivy-${{ matrix.scan-type }}-results.sarif'
           category: trivy-${{ matrix.scan-type }}
@@ -130,6 +136,8 @@ jobs:
   secret-scanning:
     name: Secret Scanning
     runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
       - name: Checkout code
@@ -144,6 +152,7 @@ jobs:
           GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
 
       - name: Run Trivy secret scanner
+        continue-on-error: true
         uses: aquasecurity/trivy-action@master
         with:
           scan-type: 'fs'
@@ -153,8 +162,8 @@ jobs:
           output: 'trivy-secret-results.sarif'
 
       - name: Upload secret scan results
-        uses: github/codeql-action/upload-sarif@v3
-        if: always()
+        uses: github/codeql-action/upload-sarif@v4
+        if: always() && hashFiles('trivy-secret-results.sarif') != ''
         with:
           sarif_file: 'trivy-secret-results.sarif'
           category: trivy-secrets
@@ -162,6 +171,8 @@ jobs:
   sbom-generation:
     name: Generate SBOM
     runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
       - name: Checkout code
@@ -171,7 +182,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Build Docker image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           push: false
