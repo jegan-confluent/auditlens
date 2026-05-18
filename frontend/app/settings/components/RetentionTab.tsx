@@ -1,7 +1,13 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { apiPut, SaveStatus, useSetting } from "./shared";
+import { apiGet, apiPut, SaveStatus, useSetting } from "./shared";
+
+type EffectiveRetention = {
+  event_retention_days: number;
+  raw_payload_retention_days: number;
+  noise_retention_days: number;
+} | null;
 
 export function RetentionTab() {
   const { data, loading, error, reload } = useSetting("retention");
@@ -9,6 +15,7 @@ export function RetentionTab() {
   const [rawDays, setRawDays] = useState("7");
   const [noiseDays, setNoiseDays] = useState("3");
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "ok" | "error">("idle");
+  const [runtime, setRuntime] = useState<EffectiveRetention>(null);
 
   useEffect(() => {
     if (!data) return;
@@ -16,6 +23,15 @@ export function RetentionTab() {
     if (data.raw_payload_retention_days?.masked) setRawDays(data.raw_payload_retention_days.masked);
     if (data.noise_retention_days?.masked) setNoiseDays(data.noise_retention_days.masked);
   }, [data]);
+
+  useEffect(() => {
+    apiGet("/system/status")
+      .then((d) => {
+        const r = (d as Record<string, unknown>).effective_retention;
+        if (r && typeof r === "object") setRuntime(r as EffectiveRetention);
+      })
+      .catch(() => {});
+  }, []);
 
   async function onSave() {
     setSaveStatus("saving");
@@ -42,6 +58,7 @@ export function RetentionTab() {
           <input type="number" min={1} max={3650} value={eventDays} onChange={(e) => setEventDays(e.target.value)} className="settings-number-input" />
           <span className="muted">days</span>
         </div>
+        {runtime && <p className="settings-hint">Current runtime value: {runtime.event_retention_days} days</p>}
       </div>
       <div className="settings-field">
         <label className="settings-label">Raw payload retention</label>
@@ -49,6 +66,7 @@ export function RetentionTab() {
           <input type="number" min={1} max={3650} value={rawDays} onChange={(e) => setRawDays(e.target.value)} className="settings-number-input" />
           <span className="muted">days</span>
         </div>
+        {runtime && <p className="settings-hint">Current runtime value: {runtime.raw_payload_retention_days} days</p>}
       </div>
       <div className="settings-field">
         <label className="settings-label">Noise retention</label>
@@ -56,6 +74,7 @@ export function RetentionTab() {
           <input type="number" min={1} max={3650} value={noiseDays} onChange={(e) => setNoiseDays(e.target.value)} className="settings-number-input" />
           <span className="muted">days</span>
         </div>
+        {runtime && <p className="settings-hint">Current runtime value: {runtime.noise_retention_days} days</p>}
       </div>
       <p className="settings-info">
         Raw payload retention removes original Confluent event JSON. Enriched fields are always kept for the full event retention period.

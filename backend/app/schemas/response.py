@@ -155,3 +155,4 @@ class SystemStatusResponse(BaseModel):
     storage_health: dict[str, Any] | None = None
     auth_enabled: bool = False
     confluent_configured: bool = False
+    effective_retention: dict[str, int] | None = None

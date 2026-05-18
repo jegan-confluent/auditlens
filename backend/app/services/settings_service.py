@@ -106,3 +106,26 @@ def get_category(db: Session, category: str) -> dict[str, Any]:
         }
         for row in rows
     }
+
+
+def get_effective_retention(db: Session) -> dict[str, int]:
+    """Return effective retention days, preferring DB-stored values over env defaults.
+
+    DB value (set via Settings UI) wins; falls back to env/config defaults.
+    Wrapped in try/except so mock DB sessions in tests don't raise.
+    """
+    from backend.app.core.config import get_settings
+    cfg = get_settings()
+    defaults = {
+        "event_retention_days": cfg.event_retention_days,
+        "raw_payload_retention_days": cfg.raw_payload_retention_days,
+        "noise_retention_days": cfg.noise_retention_days,
+    }
+    result: dict[str, int] = {}
+    for key, default in defaults.items():
+        try:
+            raw = get(db, "retention", key)
+            result[key] = int(raw) if raw is not None else default
+        except Exception:
+            result[key] = default
+    return result

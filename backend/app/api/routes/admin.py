@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from backend.app.core.config import get_settings
 from backend.app.db.database import get_db
+from backend.app.services.settings_service import get_effective_retention
 from backend.app.services.backfill_service import (
     backfill_normalize_actor_prefixes,
     get_actor_backfill_status,
@@ -73,8 +74,8 @@ def retention_cleanup(
     _: None = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> dict:
-    settings = get_settings()
-    days = retention_days or settings.event_retention_days
+    retention = get_effective_retention(db)
+    days = retention_days or retention["event_retention_days"]
     cutoff = datetime.now(timezone.utc) - timedelta(days=max(days, 1))
     # Archive to cold storage before deleting — non-fatal if archive fails or is disabled
     try:
@@ -87,8 +88,8 @@ def retention_cleanup(
         db,
         days,
         dry_run=dry_run,
-        raw_payload_retention_days=settings.raw_payload_retention_days,
-        noise_retention_days=settings.noise_retention_days,
+        raw_payload_retention_days=retention["raw_payload_retention_days"],
+        noise_retention_days=retention["noise_retention_days"],
     )
 
 

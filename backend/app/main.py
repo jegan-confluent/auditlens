@@ -23,6 +23,7 @@ from backend.app.core.config import get_settings
 from backend.app.core.limiter import limiter
 from backend.app.db.database import check_db_health, init_db, SessionLocal
 from backend.app.services.event_service import cleanup_retention
+from backend.app.services.settings_service import get_effective_retention
 from src.product.auth import AuthConfig
 
 configure_logging()
@@ -37,20 +38,22 @@ async def _retention_loop() -> None:
     await asyncio.sleep(_RETENTION_LOOP_STARTUP_DELAY_S)
     while True:
         try:
-            settings = get_settings()
-            if settings.event_retention_days > 0:
-                def _run_cleanup():
-                    db = SessionLocal()
-                    try:
-                        return cleanup_retention(
-                            db,
-                            settings.event_retention_days,
-                            raw_payload_retention_days=settings.raw_payload_retention_days,
-                            noise_retention_days=settings.noise_retention_days,
-                        )
-                    finally:
-                        db.close()
-                result = await asyncio.to_thread(_run_cleanup)
+            def _run_cleanup():
+                db = SessionLocal()
+                try:
+                    retention = get_effective_retention(db)
+                    if retention["event_retention_days"] <= 0:
+                        return None
+                    return cleanup_retention(
+                        db,
+                        retention["event_retention_days"],
+                        raw_payload_retention_days=retention["raw_payload_retention_days"],
+                        noise_retention_days=retention["noise_retention_days"],
+                    )
+                finally:
+                    db.close()
+            result = await asyncio.to_thread(_run_cleanup)
+            if result is not None:
                 logger.info("Auto-retention: %s", result)
         except Exception as exc:
             logger.warning("Auto-retention failed (non-fatal): %s", exc)

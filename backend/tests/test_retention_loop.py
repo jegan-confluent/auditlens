@@ -39,14 +39,9 @@ def test_retention_loop_calls_cleanup_service(monkeypatch):
 def test_retention_loop_skips_when_retention_days_zero(monkeypatch):
     """_retention_loop does not call cleanup when event_retention_days == 0."""
     import backend.app.main as main_mod
-    from backend.app.core.config import Settings
 
     cleanup_calls = []
-    settings_zero = Settings(
-        EVENT_RETENTION_DAYS=0,
-        RAW_PAYLOAD_RETENTION_DAYS=7,
-        NOISE_RETENTION_DAYS=3,
-    )
+    zero_retention = {"event_retention_days": 0, "raw_payload_retention_days": 7, "noise_retention_days": 3}
 
     sleep_count = 0
 
@@ -56,11 +51,16 @@ def test_retention_loop_skips_when_retention_days_zero(monkeypatch):
         if sleep_count >= 2:
             raise asyncio.CancelledError
 
+    async def fake_to_thread(fn):
+        return fn()
+
     async def run():
         with (
             patch.object(main_mod.asyncio, "sleep", side_effect=fake_sleep),
-            patch("backend.app.main.get_settings", return_value=settings_zero),
+            patch.object(main_mod, "SessionLocal", return_value=MagicMock()),
+            patch("backend.app.main.get_effective_retention", return_value=zero_retention),
             patch.object(main_mod, "cleanup_retention", side_effect=lambda *a, **kw: cleanup_calls.append(True)),
+            patch.object(main_mod.asyncio, "to_thread", side_effect=fake_to_thread),
         ):
             try:
                 await main_mod._retention_loop()
@@ -69,6 +69,54 @@ def test_retention_loop_skips_when_retention_days_zero(monkeypatch):
 
     asyncio.run(run())
     assert cleanup_calls == [], "cleanup_retention should not be called when event_retention_days=0"
+
+
+def test_get_effective_retention_uses_db_value():
+    """get_effective_retention returns DB value when present."""
+    from unittest.mock import MagicMock
+    from backend.app.services import settings_service
+
+    db = MagicMock()
+
+    def fake_get(db_, category, key):
+        return {"event_retention_days": "14", "raw_payload_retention_days": "10", "noise_retention_days": "5"}.get(key)
+
+    with patch.object(settings_service, "get", side_effect=fake_get):
+        result = settings_service.get_effective_retention(db)
+
+    assert result["event_retention_days"] == 14
+    assert result["raw_payload_retention_days"] == 10
+    assert result["noise_retention_days"] == 5
+
+
+def test_get_effective_retention_falls_back_to_env():
+    """get_effective_retention falls back to env/config defaults when DB row absent."""
+    from unittest.mock import MagicMock
+    from backend.app.services import settings_service
+
+    db = MagicMock()
+
+    with patch.object(settings_service, "get", return_value=None):
+        result = settings_service.get_effective_retention(db)
+
+    assert result["event_retention_days"] > 0
+    assert result["raw_payload_retention_days"] > 0
+    assert result["noise_retention_days"] > 0
+
+
+def test_get_effective_retention_non_integer_falls_back():
+    """get_effective_retention falls back when DB value is non-integer."""
+    from unittest.mock import MagicMock
+    from backend.app.services import settings_service
+
+    db = MagicMock()
+
+    with patch.object(settings_service, "get", return_value="not-a-number"):
+        result = settings_service.get_effective_retention(db)
+
+    # All three must be positive ints from config defaults
+    assert isinstance(result["event_retention_days"], int)
+    assert result["event_retention_days"] > 0
 
 
 def test_retention_loop_non_fatal_on_exception(monkeypatch):
