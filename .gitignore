@@ -204,3 +204,6 @@ deploy/terraform/aws/.terraform/
 deploy/terraform/**/.terraform/
 *.tfstate
 *.tfstate.backup
+.claude/
+.playwright-mcp/
+archive/
