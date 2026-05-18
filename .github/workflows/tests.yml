@@ -27,8 +27,11 @@ jobs:
       - name: Create virtual environment
         run: python -m venv .venv
 
+      - name: Upgrade pip
+        run: .venv/bin/pip install --upgrade pip
+
       - name: Install Python dependencies
-        run: .venv/bin/pip install -r requirements.txt -r backend/requirements.txt
+        run: .venv/bin/pip install -r backend/requirements.txt
 
       - name: Compile Python sources
         run: .venv/bin/python3 -m compileall backend/app src/product scripts
