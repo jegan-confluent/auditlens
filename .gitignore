@@ -216,3 +216,5 @@ AGENTS.md
 FEATURES.md
 claude-addon.sh
 scripts/deprecated/
+frontend/.next/
+frontend/node_modules/
