@@ -262,6 +262,20 @@ export async function getResourceCatalogPage(params?: { resource_type?: string; 
   return request<ResourceCatalogResponse>(`/resources/catalog${qs ? `?${qs}` : ""}`, signal);
 }
 
+export async function testNotification(destinationName?: string): Promise<{ success: boolean; message: string }> {
+  const response = await fetch(`${API_BASE}/settings/notifications/test`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    cache: "no-store",
+    body: JSON.stringify({ destination_name: destinationName ?? "" }),
+  });
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(body || `${response.status} ${response.statusText}`);
+  }
+  return response.json() as Promise<{ success: boolean; message: string }>;
+}
+
 export type ReadinessSnapshot = {
   ok: boolean;
   status: number;
