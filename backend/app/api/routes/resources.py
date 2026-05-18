@@ -36,24 +36,22 @@ class ResourceCatalogItem(BaseModel):
     event_count: int
 
 
-@router.get("/resources", response_model=list[ResourceCatalogItem])
-def list_resources(
-    resource_type: str | None = Query(default=None),
-    search: str | None = Query(default=None, max_length=200),
-    limit: int = Query(default=100, ge=1, le=500),
-    db: Session = Depends(get_db),
-    _auth: None = Depends(_require_viewer),
-) -> list[ResourceCatalogItem]:
-    if db.get_bind().dialect.name == "postgresql":
-        db.execute(text(f"SET LOCAL statement_timeout = {_RESOURCE_CATALOG_TIMEOUT_MS}"))
+class CatalogResponse(BaseModel):
+    items: list[ResourceCatalogItem]
+    total: int
 
+
+def _build_catalog_stmt(
+    resource_type: str | None,
+    q: str | None,
+    limit: int,
+) -> Any:
     event_count_subq = (
         select(func.count(AuditEvent.id))
         .where(AuditEvent.resource_name == ResourceCatalog.resource_name)
         .correlate(ResourceCatalog)
         .scalar_subquery()
     )
-
     stmt = select(
         ResourceCatalog.resource_id,
         ResourceCatalog.resource_type,
@@ -70,15 +68,17 @@ def list_resources(
     if resource_type:
         stmt = stmt.where(func.lower(ResourceCatalog.resource_type) == resource_type.lower())
 
-    if search and search.strip():
-        pattern = f"%{search.strip().lower()}%"
+    if q and q.strip():
+        pattern = f"%{q.strip().lower()}%"
         stmt = stmt.where(
             func.lower(ResourceCatalog.resource_id).like(pattern)
             | func.lower(ResourceCatalog.resource_name).like(pattern)
             | func.lower(ResourceCatalog.display_name).like(pattern)
         )
+    return stmt
 
-    rows = db.execute(stmt).all()
+
+def _rows_to_items(rows: list[Any]) -> list[ResourceCatalogItem]:
     return [
         ResourceCatalogItem(
             resource_id=row.resource_id,
@@ -94,3 +94,32 @@ def list_resources(
         )
         for row in rows
     ]
+
+
+@router.get("/resources/catalog", response_model=CatalogResponse)
+def get_resource_catalog(
+    resource_type: str | None = Query(default=None),
+    q: str | None = Query(default=None, max_length=200),
+    limit: int = Query(default=500, ge=1, le=1000),
+    db: Session = Depends(get_db),
+    _auth: None = Depends(_require_viewer),
+) -> CatalogResponse:
+    if db.get_bind().dialect.name == "postgresql":
+        db.execute(text(f"SET LOCAL statement_timeout = {_RESOURCE_CATALOG_TIMEOUT_MS}"))
+    rows = db.execute(_build_catalog_stmt(resource_type, q, limit)).all()
+    items = _rows_to_items(rows)
+    return CatalogResponse(items=items, total=len(items))
+
+
+@router.get("/resources", response_model=list[ResourceCatalogItem])
+def list_resources(
+    resource_type: str | None = Query(default=None),
+    search: str | None = Query(default=None, max_length=200),
+    limit: int = Query(default=100, ge=1, le=500),
+    db: Session = Depends(get_db),
+    _auth: None = Depends(_require_viewer),
+) -> list[ResourceCatalogItem]:
+    if db.get_bind().dialect.name == "postgresql":
+        db.execute(text(f"SET LOCAL statement_timeout = {_RESOURCE_CATALOG_TIMEOUT_MS}"))
+    rows = db.execute(_build_catalog_stmt(resource_type, search, limit)).all()
+    return _rows_to_items(rows)
