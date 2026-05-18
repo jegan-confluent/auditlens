@@ -1,418 +1,216 @@
 # AuditLens
 
-Kafka-native audit intelligence for Confluent Cloud. See who did what, when, and what matters — in real time.
+Self-hosted audit intelligence for Confluent Cloud. AuditLens consumes your organisation's audit log topic, classifies every event by signal priority (action required / attention / informational / noise), enriches actors with real display names, and surfaces what matters through a real-time dashboard built for security and operations teams.
 
-Runtime path:
+No data leaves your deployment. No telemetry. No phone-home.
 
-```text
-Kafka -> audit_forwarder -> DB -> FastAPI -> Next.js UI
-```
+---
 
-**Current UI:** Next.js frontend at `frontend/` (port 3000) — this is the product path.
+## Features
 
-> **Legacy:** The Streamlit dashboard at `dashboard/` (profile `streamlit`) has been archived to `archive/dashboard/` (May 2026). It is no longer on the product path. Start it only with `docker compose --profile streamlit up -d dashboard` for historical reference.
+### A. Ingestion & Forwarding
 
-## Modes
+- Kafka consumer reads the Confluent Cloud audit log topic using native consumer group offset tracking
+- Bulk-noise short circuit bypasses full pipeline for high-volume routine methods (mds.Authorize, kafka.Fetch, schema-registry.Authentication, etc.) — saves ~83% of processor work
+- Two-table storage split routes noise to a lean `audit_events_noise` table and signal events to `audit_events`
+- Multi-topic Kafka routing writes classified events to `audit.raw.v1`, `audit.enriched.v1`, `audit.signals.*`, `audit.dlq.v1`
+- Event fingerprinting prevents duplicate writes on consumer replay
+- Priority queue lanes (critical / normal / bulk / catalog) with configurable sizes
+- Resource snapshot extracted at ingest time — type, name, cluster, environment, blast radius hint
 
-- SQLite demo mode: API + frontend with local SQLite and sample seed data.
-- Postgres product mode: Kafka forwarder + Postgres + FastAPI + frontend.
-- Observability mode: optional Prometheus, Grafana, Loki, and Promtail profile.
+### B. Signal Classification
 
-Default Docker Compose does not start Prometheus, Grafana, Loki, or Promtail.
+- Four-tier classification: every event is `action_required`, `attention`, `informational`, or `noise`
+- Signal reason codes: `denied_access`, `destructive_change`, `failure_detected`, `security_sensitive_change`, `access_changed`, `config_changed`, `auth_noise`, and more
+- Internal Confluent topic suppression — `error-lcc-*`, `_confluent*`, `__consumer_*`, `_schemas` classified as noise
+- Confluent platform automation detected and classified separately from customer activity
+- Schema registry compatibility failures reclassified as `attention` instead of `action_required`
+- Plain-English event title and summary derived from method and resource
+- Data / control / management plane tagging
 
-## Prerequisites
+### C. Actor & Identity Enrichment
 
-**System:**
-- macOS, Linux, or Windows (Docker Desktop with WSL2)
-- Python 3.11 or higher
-- Docker Desktop with at least 6 GB RAM allocated
-- 20 GB free disk space (PostgreSQL data + Docker images)
+- Manual actor mapping overrides via `actor_mappings.yml` (opt-in) — highest priority in resolution chain
+- IAM display name resolution via Confluent Cloud API — resolves principal IDs to names and email (opt-in)
+- Actor type detection: human user, service account, or Confluent platform automation
+- IP baseline tracking — records source IPs per actor, detects new or unexpected IPs
+- Actor activity narrative — per-actor timeline grouped by action category with anomaly detection (off-hours activity, deletion spikes, multi-tool usage)
+- Display name backfill — admin endpoint repairs legacy rows retroactively
+- Actor Mappings CRUD in Settings UI — view, add, edit, and delete name overrides in-product
 
-**From Confluent Cloud (for real ingestion):**
-- Audit log topic name — usually `confluent-audit-log-events` (confirm with `confluent audit-log describe`)
-- Kafka API Key + Secret with **read** access to the audit log topic on the audit-log cluster
-- Destination Kafka API Key + Secret with **write** access (for enriched event routing)
-- Cloud API Key + Secret — optional, but enables actor display name enrichment via IAM lookup
+### D. Dashboard & UI
 
-For SQLite demo mode (no Kafka required), skip to [SQLite Demo Quickstart](#sqlite-demo-quickstart).
+- Dashboard with decision banner, signal breakdown, top actors, and hourly event volume chart
+- Dashboard cards and actor entries are clickable — navigate to a pre-filtered event list
+- Events page with 15+ filter dimensions: time window, signal type, actor, action, resource, result, plane, free-text search
+- Event detail drawer — full metadata, auth and authz context, resource snapshot, source IP, raw payload
+- Triage controls in every event drawer — mark reviewed, resolved, or escalated with a free-text note
+- CSV and JSON event export (up to 10,000 rows per request)
+- Hierarchical method filter — three-level Service → Category → Method picker
+- Resource Catalog page — searchable inventory of all resources seen in audit events, grouped by type
+- System page — consumer lag, DB writer state, pipeline lag, queue depths, storage usage, effective retention
+- Settings page — tabs for retention, cold storage, notifications, schema registry, tableflow, actor mappings
+- Action alert banner when `action_required` events are present in the current window
+- Pipeline lag banner when forwarder → DB write lag is detected
+- Recurring patterns panel — surfaces high-frequency (actor, action, resource) combinations automatically
 
-## Security
+### E. Alerting & Notifications
 
-**Before exposing AuditLens to any network, set `API_AUTH_ENABLED=true`.**  
-All API endpoints are publicly accessible by default. See [SECURITY.md](SECURITY.md) for the
-full hardening guide including token setup, role permissions, and reverse-proxy configuration.
+- Slack, Teams, and custom webhook notifications (opt-in) — configured via `notifications.yml`
+- Per-signal-type and per-action-category filter rules
+- Alert deduplication and retry on transient failures
+- Test notification button in Settings UI
+- AlertManager in production compose for metric-based alerting rules
 
-**Data privacy:** AuditLens is self-hosted. Audit events never leave your deployment. There is
-no telemetry, no phone-home mechanism, and no third-party analytics. The only outbound
-connections are to your Confluent Cloud Kafka endpoint (always) and to `api.confluent.cloud`
-(only when `IAM_ENRICHMENT_ENABLED=true`).
+### F. Storage & Retention
 
-**Mac / local evaluation:** Running locally with Docker Desktop on `127.0.0.1` is safe for
-evaluation. Ports are bound to localhost only, so no traffic reaches external networks.
+- Configurable retention per tier: signal events (default 7d), raw payloads (default 7d), noise events (default 3d)
+- Retention values set in Settings UI take effect at runtime — no container restart required
+- Automatic daily cleanup loop in the API process
+- Cold storage archival to AWS S3 or Google Cloud Storage before deletion (opt-in)
+- Archive-before-delete enforced — no silent data loss when cold storage is configured
+- Postgres auto-tuning at container start — sets `shared_buffers`, `work_mem`, etc. based on available RAM
+
+### G. Observability
+
+- Forwarder `/health` endpoint reports consumer state, queue depths per lane, write stats, enrichment cache size
+- Prometheus metrics on API `/metrics` endpoint
+- Grafana pre-provisioned dashboards — processing rate, consumer lag, queue depths, write latency, error rates (started by default)
+- Loki + Promtail log aggregation (opt-in, `observability` compose profile)
+- Pipeline lag and consumer lag visible on the System page without external tooling
+
+### H. Security
+
+- Bearer token auth with three roles: `viewer`, `responder`, `admin` (opt-in, recommended for any non-local use)
+- AES-256-GCM encryption for all secrets stored in the database; never returned in plaintext from any endpoint
+- HMAC constant-time token comparison prevents timing attacks
+- Content-Security-Policy, X-Frame-Options, Referrer-Policy headers on every response
+- Per-IP rate limiting on all endpoints
+- All container ports bound to `127.0.0.1` by default — not externally reachable without explicit configuration
+- Forwarder container runs with `read_only: true` and `cap_drop: ALL`
+- TLS via Caddy automatic certificate management in production compose
+- No telemetry — only outbound connections are your Kafka endpoint and optionally `api.confluent.cloud`
+
+### I. Setup & Configuration
+
+- Interactive `./setup` wizard — collects credentials, validates Kafka connectivity, generates `.env` and `.secrets`, starts services
+- `make start / stop / restart / status / deploy / migrate / test / help`
+- SQLite demo mode with seeded sample events — no Kafka credentials required (opt-in)
+- Profile-based Docker Compose — `postgres`, `observability`, `dev` profiles for optional services
+- EC2 / VM deployment via `make deploy` (rsync + rebuild)
+- All service ports overridable via environment variables
+
+### J. Integrations
+
+- Schema Registry — endpoint and credentials configurable in Settings with live status check (opt-in)
+- Tableflow — enable/disable integration and enrich Tableflow audit events (opt-in)
+- Confluent Cloud Admin API for IAM lookups (opt-in, requires `CONFLUENT_CLOUD_API_KEY`)
+
+---
+
+## Architecture
+
+The forwarder (`auditlens-forwarder`) consumes the Confluent Cloud audit log topic, runs each event through signal classification and actor enrichment, then writes to PostgreSQL. The FastAPI backend (`auditlens-api`, port 8080) serves `/events`, `/summary`, `/filters`, `/system`, `/settings`, and admin endpoints from that database. The Next.js frontend (`auditlens-frontend`, port 3000) renders the dashboard, events, and settings pages.
+
+Signal classification assigns every event a `signal_type` (`noise` → `informational` → `attention` → `action_required`) and a `signal_reason` code. The dashboard and events page filter and surface events by these signals; `noise` events are stored separately and hidden by default.
 
 ---
 
 ## Quick Start
 
-Requires Python 3.11+, Docker Desktop, and your Confluent Cloud credentials (see [Prerequisites](#prerequisites) above). Takes 2–5 minutes.
+**Prerequisites:**
+- Python 3.11 or higher
+- Docker Desktop with at least 6 GB RAM allocated
+- A Confluent Cloud account with access to the audit log topic
+- Kafka API Key + Secret with read access to the audit log topic
+
+**Step 1 — Clone:**
 
 ```bash
 git clone <repo-url>
 cd AuditLens
+```
+
+**Step 2 — Run the setup wizard:**
+
+```bash
 ./setup
 ```
 
-The wizard asks for your Kafka bootstrap endpoint, API key, and API secret; validates connectivity to both source and destination clusters; generates `.env` and `.secrets`; then starts all services. See [INSTALL.md](INSTALL.md) for every configuration variable, [USER_GUIDE.md](USER_GUIDE.md) for how to navigate the dashboard, and [CONTRIBUTING.md](CONTRIBUTING.md) to contribute or run tests.
+The wizard prompts for your Kafka bootstrap endpoint, API key, and secret; validates connectivity; generates `.env` and `.secrets`; then starts all services.
 
-When complete:
+**Step 3 — Open the dashboard:**
 
-```text
-✅  AuditLens is ready.
-    Open http://localhost:3000
+```
+http://localhost:3000  (local dev only)
 ```
 
-You will land on the Dashboard page showing a live summary of recent audit activity — signal counts (Critical / Review / Info / Noise), a volume chart, and the top active principals. On a fresh install the tables are empty until the forwarder has consumed a few events from your audit topic.
+You will see the Dashboard page with signal counts, top actors, and the event volume chart. Tables are empty until the forwarder has consumed events from your audit topic.
 
-**Common commands** (after setup):
-
-```bash
-make start        # Start all services
-make stop         # Stop all services
-make status       # Check local service health
-make health       # Check EC2 forwarder + API health
-make deploy       # Rsync to EC2 + rebuild containers
-make deploy-check # Dry-run rsync (shows what would change)
-make logs         # Tail EC2 prod logs
-make test         # Run the Python test suite
-make help         # Show all available commands
-```
-
-Never commit `.env`, `.secrets`, API keys, tokens, or local database files.
-
-## SQLite Demo Quickstart
-
-SQLite demo mode does not require Kafka credentials. It starts the API and frontend, then seeds sample audit events.
+**No Kafka? SQLite demo mode:**
 
 ```bash
 scripts/run_sqlite_demo.sh
+# Open http://127.0.0.1:3000  (local dev only)
 ```
 
-Open:
+See [INSTALL.md](INSTALL.md) for every configuration variable, manual setup steps, and EC2 deployment instructions.
 
-- UI: `http://127.0.0.1:3000/events`
-- API: `http://127.0.0.1:8080`
+---
 
-Useful checks:
+## Configuration
 
-```bash
-scripts/health_check.sh
-scripts/db_status.sh
-curl -s 'http://127.0.0.1:8080/events?resource_type=Topic&action_category=Create'
-```
+The most important variables in `.env` (generated by `./setup`). Full reference in [INSTALL.md](INSTALL.md) and `.env.example`.
 
-Expected demo data includes:
+| Variable | Default | What it controls |
+|----------|---------|-----------------|
+| `AUDIT_BOOTSTRAP` | — | Confluent Cloud audit-log Kafka bootstrap server (required) |
+| `AUDIT_API_KEY` | — | Kafka API key with read access to the audit log topic (required) |
+| `AUDIT_API_SECRET` | — | Kafka API secret (required, stored in `.secrets`) |
+| `AUDIT_TOPIC` | `confluent-audit-log-events` | Audit log topic name |
+| `GROUP_ID` | `auditlens-forwarder-v1` | Kafka consumer group ID |
+| `AUTO_OFFSET_RESET` | `earliest` | `earliest` to replay retained history; `latest` to start from now |
+| `DEST_BOOTSTRAP` | — | Destination Kafka cluster for enriched event topics |
+| `DEST_API_KEY` | — | API key with write access to destination topics |
+| `DATABASE_URL` | SQLite (demo) | Connection string; set to `postgresql+psycopg://...` for product mode |
+| `POSTGRES_PASSWORD` | — | PostgreSQL password (required when using `postgres` profile) |
+| `NEXT_PUBLIC_API_BASE_URL` | `http://127.0.0.1:8080` | URL the browser uses to reach the API |
+| `API_AUTH_ENABLED` | `true` | Enable bearer token authentication on all API endpoints |
+| `EVENT_RETENTION_DAYS` | `7` | Days of signal events to keep in the database |
+| `NOISE_RETENTION_DAYS` | `3` | Days of noise events to keep |
+| `IAM_ENRICHMENT_ENABLED` | `false` | Enable actor name resolution via Confluent Cloud IAM API |
+| `CONFLUENT_CLOUD_API_KEY` | — | Cloud API key for IAM lookups (required when `IAM_ENRICHMENT_ENABLED=true`) |
+| `NOTIFICATIONS_CONFIG` | `notifications.yml` | Path to webhook notification destinations file |
+| `ENABLE_NOISE_SHORT_CIRCUIT` | `true` | Bypass full pipeline for bulk-noise events (recommended: keep true) |
+| `GRAFANA_ADMIN_PASSWORD` | `changeme` | Grafana admin password — change before any network exposure |
 
-```text
-u-75rw9o created topic 'jegan-testing'
-```
+---
 
-## Postgres Product Quickstart
+## Deployment
 
-1. Copy the template:
+For production deployment, use `docker-compose.prod.yml` which adds Caddy as an HTTPS reverse proxy with automatic certificate management and removes the localhost port bindings. See [docs/Deployment_Guide.md](docs/Deployment_Guide.md) for a complete step-by-step guide including EC2 setup and the `make deploy` workflow.
 
-```bash
-cp .env.example .env
-```
+Terraform configurations for AWS, GCP, and Kubernetes are in `deploy/`. These are provided as starting points and have not been tested in production by the maintainers.
 
-2. Fill Kafka values in `.env`:
+---
 
-```text
-KAFKA_BOOTSTRAP_SERVERS=
-KAFKA_API_KEY=
-KAFKA_API_SECRET=
-KAFKA_AUDIT_TOPIC=confluent-audit-log-events
-```
+## Security
 
-If your destination Kafka cluster differs from the audit source, also set:
+- All container ports are bound to `127.0.0.1` by default — no traffic is reachable from other machines without explicit configuration.
+- API authentication (`API_AUTH_ENABLED=true`) is required before any external exposure. The setup wizard enables it by default and generates an admin token. See [SECURITY.md](SECURITY.md) for role definitions and token setup.
+- `.env` and `.secrets` are gitignored and never committed. Credentials stay on the host where AuditLens is deployed.
+- AuditLens has no telemetry and no phone-home. The only outbound connections are to your Confluent Kafka endpoint and to `api.confluent.cloud` when `IAM_ENRICHMENT_ENABLED=true`.
 
-```text
-DEST_BOOTSTRAP=
-DEST_API_KEY=
-DEST_API_SECRET=
-```
+See [SECURITY.md](SECURITY.md) for the full hardening guide, including reverse-proxy configuration, network firewall rules, secrets management, and container hardening notes.
 
-3. Start product mode:
+---
 
-```bash
-scripts/run_postgres_product.sh
-```
+## Contributing
 
-After product mode is running, a safe source-field backfill dry run is:
+Bug reports, feature requests, and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the development environment setup, test commands, and commit conventions.
 
-```bash
-PYTHONPATH=. ./.venv/bin/python scripts/backfill_event_fields.py --source-fields --dry-run
-```
+---
 
-## Backfill Source Fields Safely
+## License
 
-Use historical source-field backfill only when upgrading from an older version that did not persist `source_ip` or source context fields. New customers do not need a historical backfill.
-
-Start with a dry run:
-
-```bash
-DATABASE_URL="postgresql+psycopg://auditlens:auditlens@127.0.0.1:5432/auditlens" \
-PYTHONPATH=. ./.venv/bin/python scripts/backfill_event_fields.py --source-fields --dry-run --hours 4 --limit 10000
-```
-
-For a recent production window, prefer the safe wrapper:
-
-```bash
-DATABASE_URL="postgresql+psycopg://auditlens:auditlens@127.0.0.1:5432/auditlens" ./scripts/backfill_recent_source_fields.sh
-```
-
-For progressive batches, keep the window tight and let the runner advance in smaller chunks:
-
-```bash
-DATABASE_URL="postgresql+psycopg://auditlens:auditlens@127.0.0.1:5432/auditlens" \
-BACKFILL_HOURS=4 BACKFILL_LIMIT=10000 BACKFILL_SLEEP_MS=250 ./scripts/backfill_recent_source_fields.sh
-```
-
-To backfill a specific older window:
-
-```bash
-PYTHONPATH=. ./.venv/bin/python scripts/backfill_event_fields.py --source-fields --since 2026-05-05T00:00:00Z --until 2026-05-05T04:00:00Z --limit 10000
-```
-
-Run a cron job every 5 minutes only if you need a slow catch-up for historical rows:
-
-```cron
-*/5 * * * * cd /Users/jegan/playground/AuditLens && DATABASE_URL="postgresql+psycopg://auditlens:auditlens@127.0.0.1:5432/auditlens" BACKFILL_HOURS=4 BACKFILL_LIMIT=10000 ./scripts/backfill_recent_source_fields.sh >> logs/backfill_recent_source_fields.cron.log 2>&1
-```
-
-Stop cron by removing that entry from your crontab:
-
-```bash
-crontab -e
-```
-
-Monitor progress with:
-
-```bash
-scripts/db_status.sh
-```
-
-Do not run millions of rows in one shot. Keep the time window short and advance in batches until the coverage stabilizes.
-
-## Backfill Resource Intelligence Safely
-
-Use historical resource backfill when older rows were written before the resource snapshot and catalog fields were available. New installs do not need a historical resource backfill.
-
-Start with a dry run:
-
-```bash
-PYTHONPATH=. ./.venv/bin/python scripts/backfill_resource_intelligence.py --dry-run --hours 24 --limit 10000
-```
-
-For a limited batch against a recent window:
-
-```bash
-PYTHONPATH=. ./.venv/bin/python scripts/backfill_resource_intelligence.py --hours 24 --batch-size 250 --limit 1000
-```
-
-For a force recompute when you intentionally want to refresh existing non-placeholder resource fields:
-
-```bash
-PYTHONPATH=. ./.venv/bin/python scripts/backfill_resource_intelligence.py --force --since 2026-05-05T00:00:00Z --until 2026-05-06T00:00:00Z --limit 5000
-```
-
-The script updates missing resource snapshot columns and reconciles `resource_catalog` in the same pass. It commits per batch, skips malformed rows, and logs counts only. Keep the time window short and use `--limit`/`--batch-size` to avoid large one-shot updates.
-
-Open:
-
-- UI: `http://127.0.0.1:3000/events`
-- API: `http://127.0.0.1:8080`
-- Forwarder health: `http://127.0.0.1:8003/health`
-
-## Observability Mode
-
-Observability is optional and not started by default.
-
-```bash
-docker compose --profile observability up -d prometheus grafana loki promtail
-```
-
-Grafana requires a non-default admin password via `.secrets`:
-
-```text
-GF_SECURITY_ADMIN_PASSWORD=<set-a-local-password>
-```
-
-## Health Checks
-
-```bash
-scripts/health_check.sh
-```
-
-The script checks:
-
-- `docker compose ps`
-- API `/ready`
-- API `/system/status`
-- API `/events?limit=1`
-- UI `/events`
-
-## Stop Everything
-
-Preserve volumes:
-
-```bash
-scripts/stop_all.sh
-```
-
-Remove volumes too:
-
-```bash
-scripts/stop_all.sh --volumes
-```
-
-## Security Check
-
-Run before pushing or packaging:
-
-```bash
-scripts/security_scan.sh
-```
-
-## Local Security Posture
-
-AuditLens defaults to a local, single-customer deployment. Docker ports are bound
-to `127.0.0.1` where the local compose file exposes them. Do not expose the API,
-frontend, metrics, or observability ports publicly without network controls and
-API authentication.
-
-For shared environments, set `API_AUTH_ENABLED=true` and provide
-`API_AUTH_TOKENS_JSON` or `API_AUTH_TOKEN_FILE`. Raw audit payloads are available
-only from the event detail endpoint, not from the event list endpoint.
-
-## IAM and Metrics Enrichment
-
-AuditLens enriches principals in a strict source order:
-
-1. Manual mapping from `IAM_MAPPING_FILE` or `ACTOR_IDENTITY_MAP_JSON`
-2. Confluent IAM/Admin lookup when `IAM_ENRICHMENT_ENABLED=true` and credentials are present
-3. Audit-event-derived identity from the payload itself
-4. Metrics correlation when `METRICS_ENRICHMENT_ENABLED=true`
-5. Raw fallback using the principal ID already present in the event
-
-Trust model:
-
-- Manual mapping is authoritative.
-- Confluent IAM/Admin lookup is authoritative when enabled and successful.
-- Audit-event-derived identity is medium confidence.
-- Metrics correlation is advisory only and stays low/medium confidence unless the source labels explicitly prove identity.
-- Raw fallback preserves the principal ID instead of hiding it behind a generic unknown label.
-
-UI behavior:
-
-- The events table prefers enriched display name and email, then falls back to the raw principal ID.
-- The drawer shows actor source and confidence.
-- `Unknown principal` is only used when there is no usable ID to display.
-
-Limits:
-
-- Metrics correlation is not identity truth.
-- IAM lookup depends on tenant credentials and API availability.
-- Resource intelligence is deterministic and persisted, but cluster/environment display names are only populated when they are resolvable from the payload or catalog.
-- This pass did not add a sync daemon.
-
-## Resource Intelligence
-
-AuditLens persists a resource snapshot alongside each event and maintains a lightweight resource catalog for investigation context.
-
-Resource context includes:
-
-- `resource_type`
-- `resource_name`
-- `resource_display_name`
-- `resource_scope`
-- `parent_resource`
-- `cluster_id` and `cluster_name` when resolvable
-- `environment_id` and `environment_name` when resolvable
-- `resource_criticality`
-- `blast_radius_hint`
-- `production_hint`
-
-The resource catalog is best-effort and event-derived. It is upserted during ingestion when resource parsing succeeds, and it stores durable resource identity, display name, hierarchy context, and raw metadata used to derive the snapshot. Hot list queries stay column-only and do not join the catalog. AuditLens does not run a sync daemon or claim an authoritative resource inventory.
-
-The scan ignores `.git`, `node_modules`, `.next`, `data`, backup directories, and `.env.example` placeholders.
-
-## Troubleshooting
-
-Docker not running:
-
-```bash
-docker compose ps
-```
-
-Port already in use:
-
-Set alternate ports in `.env`:
-
-```text
-BACKEND_PORT=18080
-FRONTEND_PORT=13000
-METRICS_PORT=18003
-POSTGRES_PORT=15432
-```
-
-Kafka credentials missing:
-
-```bash
-scripts/run_postgres_product.sh
-```
-
-The script prints the missing variables. Fill `KAFKA_*` or the `AUDIT_*` and `DEST_*` aliases in `.env`.
-
-DB not ready:
-
-```bash
-curl -s http://127.0.0.1:8080/ready
-docker compose logs api
-docker compose logs postgres
-```
-
-UI cannot reach API:
-
-Confirm `.env` has:
-
-```text
-NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:8080
-```
-
-Then rebuild the frontend:
-
-```bash
-docker compose up --build -d frontend
-```
-
-No events visible:
-
-- SQLite demo: rerun `docker compose exec -T api python -m backend.scripts.seed_data`.
-- Postgres product: check `http://127.0.0.1:8003/health` and Kafka credentials.
-
-Estimated event counts:
-
-For unfiltered Postgres event lists, AuditLens uses a lightweight planner estimate for the total count so `/events` stays fast on larger tables. Filtered totals remain exact.
-
-## Validation Commands
-
-```bash
-python3 -m compileall audit_forwarder.py src/product/db_writer.py backend/app
-API_AUTH_ENABLED=false pytest -q tests/test_productization.py backend/tests/test_api.py tests/test_foundation_contract.py
-npm --prefix frontend test
-npm --prefix frontend run build
-docker compose config --services
-docker compose --profile postgres config --services
-docker compose --profile observability config --services
-scripts/security_scan.sh
-```
+No license file is present in this repository. All rights reserved until a license is added.
