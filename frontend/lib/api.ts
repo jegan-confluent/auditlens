@@ -237,6 +237,11 @@ export type ResourceCatalogItem = {
   event_count: number;
 };
 
+export type ResourceCatalogResponse = {
+  items: ResourceCatalogItem[];
+  total: number;
+};
+
 export async function getResourceCatalog(params?: { resource_type?: string; search?: string; limit?: number }): Promise<ResourceCatalogItem[]> {
   const q = new URLSearchParams();
   if (params?.resource_type) q.set("resource_type", params.resource_type);
@@ -246,6 +251,15 @@ export async function getResourceCatalog(params?: { resource_type?: string; sear
   const r = await fetch(`${API_BASE}/resources${qs ? `?${qs}` : ""}`, { cache: "no-store" });
   if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
   return r.json() as Promise<ResourceCatalogItem[]>;
+}
+
+export async function getResourceCatalogPage(params?: { resource_type?: string; q?: string; limit?: number }, signal?: AbortSignal): Promise<ResourceCatalogResponse> {
+  const query = new URLSearchParams();
+  if (params?.resource_type) query.set("resource_type", params.resource_type);
+  if (params?.q) query.set("q", params.q);
+  if (params?.limit) query.set("limit", String(params.limit));
+  const qs = query.toString();
+  return request<ResourceCatalogResponse>(`/resources/catalog${qs ? `?${qs}` : ""}`, signal);
 }
 
 export type ReadinessSnapshot = {
