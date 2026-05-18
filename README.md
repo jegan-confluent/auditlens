@@ -22,10 +22,19 @@ Default Docker Compose does not start Prometheus, Grafana, Loki, or Promtail.
 
 ## Prerequisites
 
-- Docker Desktop
-- Docker Compose v2
-- Kafka/Confluent audit topic credentials for real ingestion
-- Node.js and Python only if running pieces outside Docker
+**System:**
+- macOS, Linux, or Windows (Docker Desktop with WSL2)
+- Python 3.11 or higher
+- Docker Desktop with at least 6 GB RAM allocated
+- 20 GB free disk space (PostgreSQL data + Docker images)
+
+**From Confluent Cloud (for real ingestion):**
+- Audit log topic name — usually `confluent-audit-log-events` (confirm with `confluent audit-log describe`)
+- Kafka API Key + Secret with **read** access to the audit log topic on the audit-log cluster
+- Destination Kafka API Key + Secret with **write** access (for enriched event routing)
+- Cloud API Key + Secret — optional, but enables actor display name enrichment via IAM lookup
+
+For SQLite demo mode (no Kafka required), skip to [SQLite Demo Quickstart](#sqlite-demo-quickstart).
 
 ## Security
 
@@ -45,7 +54,7 @@ evaluation. Ports are bound to localhost only, so no traffic reaches external ne
 
 ## Quick Start
 
-**Prerequisites:** Python 3.11+, Docker Desktop
+Requires Python 3.11+, Docker Desktop, and your Confluent Cloud credentials (see [Prerequisites](#prerequisites) above). Takes 2–5 minutes.
 
 ```bash
 git clone <repo-url>
@@ -53,7 +62,7 @@ cd AuditLens
 ./setup
 ```
 
-The setup wizard handles everything: validates your Confluent Cloud credentials, generates `.env` and `.secrets`, and starts all services. See [INSTALL.md](INSTALL.md) for full configuration options and [USER_GUIDE.md](USER_GUIDE.md) for how to use the dashboard.
+The wizard asks for your Kafka bootstrap endpoint, API key, and API secret; validates connectivity to both source and destination clusters; generates `.env` and `.secrets`; then starts all services. See [INSTALL.md](INSTALL.md) for every configuration variable and [USER_GUIDE.md](USER_GUIDE.md) for how to navigate the dashboard.
 
 When complete:
 
@@ -61,6 +70,8 @@ When complete:
 ✅  AuditLens is ready.
     Open http://localhost:3000
 ```
+
+You will land on the Dashboard page showing a live summary of recent audit activity — signal counts (Critical / Review / Info / Noise), a volume chart, and the top active principals. On a fresh install the tables are empty until the forwarder has consumed a few events from your audit topic.
 
 **Common commands** (after setup):
 
