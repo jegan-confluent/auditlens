@@ -1,0 +1,1492 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AuditLens — Feature Sheet</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:        #f8f9fb;
+      --card:      #ffffff;
+      --border:    #e2e8f0;
+      --text:      #1a202c;
+      --muted:     #64748b;
+      --blue:      #2563eb;
+      --blue-lt:   #eff6ff;
+      --green:     #16a34a;
+      --green-lt:  #f0fdf4;
+      --amber:     #d97706;
+      --amber-lt:  #fffbeb;
+      --red:       #dc2626;
+      --red-lt:    #fef2f2;
+      --grey-lt:   #f1f5f9;
+      --radius:    8px;
+      --shadow:    0 1px 3px rgba(0,0,0,0.08);
+    }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      font-family: 'Inter', system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      font-size: 15px;
+      line-height: 1.6;
+    }
+
+    /* ── NAV ─────────────────────────────────────────────── */
+    nav {
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      background: rgba(255,255,255,0.95);
+      backdrop-filter: blur(8px);
+      border-bottom: 1px solid var(--border);
+      padding: 0 24px;
+    }
+    nav ul {
+      display: flex;
+      gap: 4px;
+      list-style: none;
+      max-width: 1100px;
+      margin: 0 auto;
+      overflow-x: auto;
+      scrollbar-width: none;
+    }
+    nav ul::-webkit-scrollbar { display: none; }
+    nav a {
+      display: block;
+      padding: 14px 12px;
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--muted);
+      text-decoration: none;
+      white-space: nowrap;
+      border-bottom: 2px solid transparent;
+      transition: color 0.15s, border-color 0.15s;
+    }
+    nav a:hover { color: var(--blue); border-bottom-color: var(--blue); }
+
+    /* ── LAYOUT ──────────────────────────────────────────── */
+    .wrap {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 0 24px;
+    }
+
+    section { padding: 56px 0; }
+    section + section { border-top: 1px solid var(--border); }
+
+    h2 {
+      font-size: 22px;
+      font-weight: 700;
+      color: var(--text);
+      margin-bottom: 8px;
+    }
+    .section-sub {
+      color: var(--muted);
+      font-size: 14px;
+      margin-bottom: 32px;
+    }
+
+    /* ── HEADER ──────────────────────────────────────────── */
+    header {
+      background: var(--card);
+      border-bottom: 1px solid var(--border);
+      padding: 48px 24px 40px;
+    }
+    .header-inner {
+      max-width: 1100px;
+      margin: 0 auto;
+    }
+    .logo {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 32px;
+      font-weight: 500;
+      color: var(--blue);
+      letter-spacing: -0.5px;
+    }
+    .tagline {
+      margin-top: 10px;
+      font-size: 16px;
+      color: var(--muted);
+      max-width: 680px;
+      line-height: 1.5;
+    }
+    .header-meta {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-top: 20px;
+      flex-wrap: wrap;
+    }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 12px;
+      border-radius: 20px;
+      font-size: 13px;
+      font-weight: 600;
+      font-family: 'JetBrains Mono', monospace;
+    }
+    .pill-blue  { background: var(--blue-lt);  color: var(--blue);  border: 1px solid #bfdbfe; }
+    .pill-green { background: var(--green-lt); color: var(--green); border: 1px solid #bbf7d0; }
+    .gen-date   { font-size: 12px; color: var(--muted); margin-left: auto; }
+
+    /* ── PROSE ───────────────────────────────────────────── */
+    .prose p { color: var(--text); margin-bottom: 16px; max-width: 780px; }
+    .prose p:last-child { margin-bottom: 0; }
+
+    /* ── ARCHITECTURE ────────────────────────────────────── */
+    .arch-flow {
+      display: flex;
+      align-items: flex-start;
+      gap: 0;
+      overflow-x: auto;
+      padding: 8px 0 16px;
+    }
+    .arch-node {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-width: 150px;
+    }
+    .arch-box {
+      background: var(--card);
+      border: 1.5px solid var(--border);
+      border-radius: var(--radius);
+      padding: 12px 16px;
+      text-align: center;
+      width: 140px;
+      transition: border-color 0.15s;
+      cursor: default;
+    }
+    .arch-box:hover { border-color: var(--blue); }
+    .arch-box-title {
+      font-size: 12px;
+      font-weight: 600;
+      font-family: 'JetBrains Mono', monospace;
+      color: var(--blue);
+    }
+    .arch-box-sub {
+      font-size: 11px;
+      color: var(--muted);
+      margin-top: 4px;
+      line-height: 1.4;
+    }
+    .arch-arrow {
+      display: flex;
+      align-items: center;
+      padding: 0 4px;
+      padding-top: 16px;
+      color: var(--blue);
+      font-size: 18px;
+      font-weight: 700;
+      min-width: 32px;
+      justify-content: center;
+    }
+    .arch-note {
+      margin-top: 20px;
+      font-size: 14px;
+      color: var(--muted);
+      max-width: 780px;
+      line-height: 1.6;
+    }
+
+    /* ── FEATURE CARDS ───────────────────────────────────── */
+    .card-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 20px;
+    }
+    .feature-card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 24px;
+      box-shadow: var(--shadow);
+    }
+    .card-header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 18px;
+    }
+    .cat-badge {
+      width: 28px;
+      height: 28px;
+      border-radius: 6px;
+      background: var(--blue-lt);
+      color: var(--blue);
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 13px;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+    .card-title {
+      font-size: 15px;
+      font-weight: 700;
+      color: var(--text);
+      flex: 1;
+    }
+    .count-pill {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--muted);
+      background: var(--grey-lt);
+      border-radius: 12px;
+      padding: 2px 8px;
+      white-space: nowrap;
+    }
+
+    .feature-row {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      padding: 10px 0;
+      border-top: 1px solid var(--border);
+    }
+    .feature-row:first-of-type { border-top: none; }
+    .feature-name-row {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .feature-name {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text);
+      line-height: 1.4;
+    }
+    .badge {
+      font-size: 10px;
+      font-weight: 600;
+      font-family: 'JetBrains Mono', monospace;
+      padding: 2px 6px;
+      border-radius: 4px;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+    .badge-on  { background: var(--green-lt); color: var(--green); }
+    .badge-opt { background: var(--amber-lt); color: var(--amber); }
+    .feature-desc {
+      font-size: 12.5px;
+      color: var(--muted);
+      line-height: 1.5;
+    }
+
+    /* ── SIGNAL CARDS ────────────────────────────────────── */
+    .signal-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 20px;
+    }
+    .signal-card {
+      border-radius: var(--radius);
+      padding: 24px;
+      box-shadow: var(--shadow);
+      border: 1px solid transparent;
+    }
+    .signal-noise  { background: var(--grey-lt);  border-color: #cbd5e1; }
+    .signal-info   { background: var(--blue-lt);  border-color: #bfdbfe; }
+    .signal-attn   { background: var(--amber-lt); border-color: #fde68a; }
+    .signal-action { background: var(--red-lt);   border-color: #fecaca; }
+
+    .signal-type {
+      font-size: 15px;
+      font-weight: 800;
+      font-family: 'JetBrains Mono', monospace;
+      letter-spacing: 0.5px;
+      margin-bottom: 10px;
+    }
+    .signal-noise  .signal-type { color: #475569; }
+    .signal-info   .signal-type { color: var(--blue); }
+    .signal-attn   .signal-type { color: var(--amber); }
+    .signal-action .signal-type { color: var(--red); }
+
+    .signal-volume {
+      font-size: 11px;
+      font-weight: 600;
+      font-family: 'JetBrains Mono', monospace;
+      opacity: 0.7;
+      margin-bottom: 12px;
+    }
+    .signal-triggers {
+      font-size: 12.5px;
+      color: var(--text);
+      margin-bottom: 12px;
+      opacity: 0.9;
+    }
+    .signal-triggers strong { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; opacity: 0.6; margin-bottom: 4px; }
+    .signal-triggers ul { padding-left: 16px; }
+    .signal-triggers li { margin-bottom: 2px; }
+    .signal-action-row {
+      font-size: 12px;
+      font-weight: 600;
+      padding: 6px 10px;
+      border-radius: 5px;
+      background: rgba(255,255,255,0.6);
+      display: inline-block;
+    }
+
+    /* ── QUICK START ─────────────────────────────────────── */
+    .steps { display: flex; flex-direction: column; gap: 16px; }
+    .step {
+      display: flex;
+      gap: 20px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px 24px;
+      box-shadow: var(--shadow);
+    }
+    .step-num {
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      background: var(--blue);
+      color: #fff;
+      font-size: 14px;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      margin-top: 2px;
+    }
+    .step-body { flex: 1; }
+    .step-title { font-weight: 700; font-size: 15px; margin-bottom: 8px; }
+    .step-desc { font-size: 13.5px; color: var(--muted); margin-bottom: 10px; }
+    pre, code {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12.5px;
+    }
+    pre {
+      background: var(--grey-lt);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 12px 14px;
+      overflow-x: auto;
+      line-height: 1.6;
+      color: var(--text);
+      margin-top: 6px;
+    }
+    code {
+      background: var(--grey-lt);
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      padding: 1px 5px;
+      font-size: 12px;
+    }
+
+    /* ── CONFIG TABLE ────────────────────────────────────── */
+    .config-table-wrap {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+      box-shadow: var(--shadow);
+    }
+    table { width: 100%; border-collapse: collapse; }
+    thead { background: var(--grey-lt); }
+    th {
+      padding: 10px 16px;
+      text-align: left;
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+      color: var(--muted);
+      border-bottom: 1px solid var(--border);
+    }
+    td { padding: 10px 16px; font-size: 13px; border-bottom: 1px solid var(--border); vertical-align: top; }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: var(--bg); }
+    td code { font-size: 11.5px; }
+    .td-var { font-family: 'JetBrains Mono', monospace; font-size: 12px; font-weight: 500; color: var(--blue); }
+    .td-default { font-family: 'JetBrains Mono', monospace; font-size: 11.5px; color: var(--muted); }
+    .td-req { color: var(--red); font-size: 11px; font-weight: 600; font-family: 'JetBrains Mono', monospace; }
+
+    /* ── FOOTER ──────────────────────────────────────────── */
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 24px;
+      text-align: center;
+      font-size: 12.5px;
+      color: var(--muted);
+      background: var(--card);
+    }
+    footer a { color: var(--blue); text-decoration: none; }
+    footer a:hover { text-decoration: underline; }
+
+    /* ── RESPONSIVE ──────────────────────────────────────── */
+    @media (max-width: 768px) {
+      .card-grid, .signal-grid { grid-template-columns: 1fr; }
+      .arch-flow { gap: 0; }
+      .arch-node { min-width: 110px; }
+      .arch-box { width: 110px; }
+      .logo { font-size: 24px; }
+      header { padding: 32px 16px 28px; }
+      .wrap { padding: 0 16px; }
+      section { padding: 40px 0; }
+      .step { flex-direction: column; gap: 12px; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- ── HEADER ─────────────────────────────────────────────────── -->
+<header>
+  <div class="header-inner">
+    <div class="logo">AuditLens</div>
+    <p class="tagline">
+      Self-hosted audit intelligence for Confluent Cloud. Consumes your organisation's audit log topic,
+      classifies every event by signal priority, enriches actors with real display names,
+      and surfaces what matters through a real-time dashboard built for security and operations teams.
+    </p>
+    <div class="header-meta">
+      <span class="pill pill-blue">76 Features</span>
+      <span class="pill pill-green">701 Tests Passing</span>
+      <span class="gen-date">Generated 2026-05-18</span>
+    </div>
+  </div>
+</header>
+
+<!-- ── NAV ────────────────────────────────────────────────────── -->
+<nav>
+  <ul>
+    <li><a href="#problem">The Problem</a></li>
+    <li><a href="#architecture">Architecture</a></li>
+    <li><a href="#features">Features</a></li>
+    <li><a href="#signals">Signal Types</a></li>
+    <li><a href="#quickstart">Quick Start</a></li>
+    <li><a href="#config">Configuration</a></li>
+  </ul>
+</nav>
+
+<!-- ── SECTION 1: THE PROBLEM ─────────────────────────────────── -->
+<section id="problem">
+  <div class="wrap">
+    <h2>The Problem It Solves</h2>
+    <p class="section-sub">Why raw Confluent Cloud audit logs are not enough</p>
+    <div class="prose">
+      <p>
+        A moderately active Confluent Cloud organisation produces millions of audit events every day.
+        The vast majority — easily 5.8M of a typical 5.87M daily total — are Kafka produce and fetch
+        calls, mds.Authorize checks, and schema-registry authentication handshakes: background noise
+        generated by every client connection, every message produced, every schema lookup. The real
+        signal — the 73K events that include topic deletions, ACL changes, failed authentications,
+        API key creation, and access denials — is buried underneath. A security or operations engineer
+        reading raw audit logs must either scan millions of lines manually or build their own
+        classification and filtering layer from scratch.
+      </p>
+      <p>
+        AuditLens is that classification and filtering layer. It reads the audit log topic in real time,
+        classifies every event into one of four signal tiers (<code>action_required</code>,
+        <code>attention</code>, <code>informational</code>, <code>noise</code>), enriches the actor
+        field from a raw principal ID like <code>sa-8nwyn7</code> to a human-readable name, and
+        persists everything in a queryable database with a dashboard on top. Engineers stop reading
+        logs and start triaging decisions.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- ── SECTION 2: ARCHITECTURE ────────────────────────────────── -->
+<section id="architecture">
+  <div class="wrap">
+    <h2>How It Works</h2>
+    <p class="section-sub">Five components, one pipeline</p>
+
+    <div class="arch-flow">
+      <div class="arch-node">
+        <div class="arch-box">
+          <div class="arch-box-title">Confluent Cloud</div>
+          <div class="arch-box-sub">confluent-audit-log-events topic</div>
+        </div>
+      </div>
+      <div class="arch-arrow">→</div>
+      <div class="arch-node">
+        <div class="arch-box">
+          <div class="arch-box-title">Forwarder</div>
+          <div class="arch-box-sub">Classifies, enriches, deduplicates, writes to DB + Kafka topics</div>
+        </div>
+      </div>
+      <div class="arch-arrow">→</div>
+      <div class="arch-node">
+        <div class="arch-box">
+          <div class="arch-box-title">PostgreSQL</div>
+          <div class="arch-box-sub">Two-table split: audit_events + audit_events_noise</div>
+        </div>
+      </div>
+      <div class="arch-arrow">→</div>
+      <div class="arch-node">
+        <div class="arch-box">
+          <div class="arch-box-title">FastAPI</div>
+          <div class="arch-box-sub">REST API — events, summary, filters, system, admin</div>
+        </div>
+      </div>
+      <div class="arch-arrow">→</div>
+      <div class="arch-node">
+        <div class="arch-box">
+          <div class="arch-box-title">Next.js</div>
+          <div class="arch-box-sub">Dashboard, Events, Resources, System, Settings pages</div>
+        </div>
+      </div>
+    </div>
+
+    <p class="arch-note">
+      The forwarder assigns every event a <code>signal_type</code> using a deterministic rule cascade:
+      events from internal platform topics or routine auth methods are <strong>noise</strong>;
+      read-only lookups are <strong>informational</strong>; access and config changes are
+      <strong>attention</strong>; failures, denials, destructive changes, and security-sensitive
+      operations are <strong>action_required</strong>.
+      Noise events are short-circuited at the consumer thread — they bypass the full enrichment
+      pipeline and are written directly to <code>audit_events_noise</code>, saving roughly 83% of
+      processor work. Signal events go through the complete enrichment chain before landing in
+      <code>audit_events</code>.
+    </p>
+  </div>
+</section>
+
+<!-- ── SECTION 3: FEATURES ────────────────────────────────────── -->
+<section id="features">
+  <div class="wrap">
+    <h2>Features</h2>
+    <p class="section-sub">76 shipped features across 10 categories. Green = always-on. Amber = opt-in.</p>
+
+    <div class="card-grid">
+
+      <!-- A: Ingestion & Forwarding -->
+      <div class="feature-card">
+        <div class="card-header">
+          <div class="cat-badge">A</div>
+          <div class="card-title">Ingestion &amp; Forwarding</div>
+          <span class="count-pill">8 features</span>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Kafka consumer with consumer group offsets</span>
+            <span class="badge badge-on">always-on</span>
+          </div>
+          <div class="feature-desc">Tracks exactly where it left off in the audit topic — restart the forwarder and it picks up from the last committed offset, with no events lost or replayed unnecessarily.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Bulk-noise short circuit</span>
+            <span class="badge badge-on">always-on</span>
+          </div>
+          <div class="feature-desc">Routes ~83% of events (mds.Authorize, kafka.Fetch, kafka.Produce, etc.) directly to the noise writer, bypassing enrichment entirely — keeps the signal pipeline fast under full Confluent Cloud load.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Two-table storage split</span>
+            <span class="badge badge-on">always-on</span>
+          </div>
+          <div class="feature-desc">Noise events land in a lean 9-column table (<code>audit_events_noise</code>); signal events land in the full-featured <code>audit_events</code> table — so signal queries never scan noise rows.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Multi-topic Kafka routing</span>
+            <span class="badge badge-on">always-on</span>
+          </div>
+          <div class="feature-desc">Publishes classified events to dedicated topics (<code>audit.raw.v1</code>, <code>audit.enriched.v1</code>, <code>audit.signals.*</code>, <code>audit.dlq.v1</code>) so downstream consumers can subscribe to only what they need.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Event fingerprinting &amp; dedup</span>
+            <span class="badge badge-on">always-on</span>
+          </div>
+          <div class="feature-desc">SHA-based fingerprint per event prevents duplicate rows on consumer replay — safe to restart the forwarder at any time without creating duplicate entries in the DB.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Priority queue lanes</span>
+            <span class="badge badge-on">always-on</span>
+          </div>
+          <div class="feature-desc">Separate write queues for critical signals, normal events, bulk noise, and catalog updates — critical events reach the DB first even when the bulk queue is backed up.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Resource snapshot at ingest</span>
+            <span class="badge badge-on">always-on</span>
+          </div>
+          <div class="feature-desc">Extracts resource type, name, cluster, environment, blast radius hint, and production hint from every event payload at write time — no re-parsing needed for the dashboard or export.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Auto-migration on container start</span>
+            <span class="badge badge-on">always-on</span>
+          </div>
+          <div class="feature-desc">Alembic migrations run automatically when the API container starts — upgrade the stack with <code>docker compose up -d</code> and schema changes apply without manual intervention.</div>
+        </div>
+      </div>
+
+      <!-- B: Signal Classification -->
+      <div class="feature-card">
+        <div class="card-header">
+          <div class="cat-badge">B</div>
+          <div class="card-title">Signal Classification</div>
+          <span class="count-pill">8 features</span>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Four-tier signal classification</span>
+            <span class="badge badge-on">always-on</span>
+          </div>
+          <div class="feature-desc">Every event is automatically sorted into action_required, attention, informational, or noise — operators see a triage queue, not a log stream.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Signal reason codes</span>
+            <span class="badge badge-on">always-on</span>
+          </div>
+          <div class="feature-desc">Each signal explains exactly why it was flagged — <code>denied_access</code>, <code>destructive_change</code>, <code>failure_detected</code>, <code>config_changed</code>, etc. — so operators don't need to reverse-engineer the classification decision.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Internal Confluent topic suppression</span>
+            <span class="badge badge-on">always-on</span>
+          </div>
+          <div class="feature-desc">Auto-created DLQ topics (<code>error-lcc-*</code>), internal metrics topics (<code>_confluent*</code>), and consumer group offset topics (<code>__consumer_*</code>) are classified as noise before any other rule — they never inflate action_required counts.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Confluent platform automation detection</span>
+            <span class="badge badge-on">always-on</span>
+          </div>
+          <div class="feature-desc">Identifies Confluent's own service accounts and classifies their routine activity as informational — so platform health-checks don't pollute the operator's signal feed.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Schema Registry failure reclassification</span>
+            <span class="badge badge-on">always-on</span>
+          </div>
+          <div class="feature-desc">Schema incompatibility failures (RegisterSchema errors) are downgraded from action_required to attention — recognising that schema evolution failures need a developer fix, not a security response.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Recommended action per event</span>
+            <span class="badge badge-on">always-on</span>
+          </div>
+          <div class="feature-desc">Every classified event carries a machine-readable recommendation ("Investigate immediately", "Confirm this was approved", "Verify owner and change window") — feeds notification payloads and the event detail drawer.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Plain-English event title &amp; summary</span>
+            <span class="badge badge-on">always-on</span>
+          </div>
+          <div class="feature-desc">Generates a human-readable title and one-sentence summary for every event from method name and resource context — the dashboard shows what happened without requiring operators to know Confluent API method names.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Data / control / management plane tagging</span>
+            <span class="badge badge-on">always-on</span>
+          </div>
+          <div class="feature-desc">Tags every event as data_plane (produce/consume), control_plane (cluster/topic management), or management_plane (IAM/RBAC) — enables plane-level filtering in the Events page.</div>
+        </div>
+      </div>
+
+      <!-- C: Actor & Identity Enrichment -->
+      <div class="feature-card">
+        <div class="card-header">
+          <div class="cat-badge">C</div>
+          <div class="card-title">Actor &amp; Identity Enrichment</div>
+          <span class="count-pill">8 features</span>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Manual actor name overrides</span>
+            <span class="badge badge-opt">opt-in</span>
+          </div>
+          <div class="feature-desc">A YAML file maps principal IDs to display names — useful for retired service accounts, shared credentials, or CIs whose IAM names don't match their team names. Highest priority in the resolution chain.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">IAM display name resolution</span>
+            <span class="badge badge-opt">opt-in</span>
+          </div>
+          <div class="feature-desc">Calls the Confluent Cloud Admin API to resolve <code>sa-abc123</code> → "ResMed Data Pipeline" and <code>u-xyz789</code> → "Alice Chen (alice@company.com)" — so every event shows who actually did the action.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Actor type detection</span>
+            <span class="badge badge-on">always-on</span>
+          </div>
+          <div class="feature-desc">Classifies every actor as a human user, service account, or Confluent platform automation — the badge in the event table makes it immediately clear whether a human or a machine took an action.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">IP baseline tracking</span>
+            <span class="badge badge-on">always-on</span>
+          </div>
+          <div class="feature-desc">Builds a per-actor history of source IPs as events are ingested — when an actor shows up from a new IP, it's surfaced in the actor activity panel as an anomaly worth reviewing.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Actor activity narrative</span>
+            <span class="badge badge-on">always-on</span>
+          </div>
+          <div class="feature-desc">Generates a plain-English activity summary per actor — chapters grouped by action category, anomaly detection for off-hours activity, deletion spikes, and multi-tool usage. Click any actor to read it.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Actor activity side panel</span>
+            <span class="badge badge-on">always-on</span>
+          </div>
+          <div class="feature-desc">Clicking any actor in the dashboard or events table opens a side drawer with their full timeline, IP history, event counts by category, and anomaly flags — no separate investigation tool needed.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Display name backfill</span>
+            <span class="badge badge-on">always-on</span>
+          </div>
+          <div class="feature-desc">A one-shot admin endpoint re-resolves every historical event that landed before IAM enrichment was enabled — so enabling enrichment retroactively cleans up old rows too.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Actor Mappings CRUD in Settings</span>
+            <span class="badge badge-on">always-on</span>
+          </div>
+          <div class="feature-desc">Add, edit, and delete principal-ID → display-name overrides directly in the Settings UI — no YAML file editing or container restart needed.</div>
+        </div>
+      </div>
+
+      <!-- D: Dashboard & UI -->
+      <div class="feature-card">
+        <div class="card-header">
+          <div class="cat-badge">D</div>
+          <div class="card-title">Dashboard &amp; UI</div>
+          <span class="count-pill">13 features</span>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Dashboard summary page</span>
+            <span class="badge badge-on">always-on</span>
+          </div>
+          <div class="feature-desc">Opens to a decision banner, signal breakdown counts, top active actors, and an hourly event volume chart — a 10-second read that tells you whether the last 24 hours were routine or need investigation.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Clickable dashboard navigation</span>
+            <span class="badge badge-on">always-on</span>
+          </div>
+          <div class="feature-desc">Every signal count card, actor name, and chart bar navigates directly to a pre-filtered Events view — no manual filter-setting needed to drill into what the dashboard is showing.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Events page with 15+ filters</span>
+            <span class="badge badge-on">always-on</span>
+          </div>
+          <div class="feature-desc">Filter by time window, signal type, actor, action, resource, result, plane, action category, free text, and more — combined as AND conditions so operators can narrow to exactly the events they're investigating.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Event detail drawer</span>
+            <span class="badge badge-on">always-on</span>
+          </div>
+          <div class="feature-desc">Click any event to see full auth context, resource snapshot, source IP, recommended action, triage status, and the raw Confluent event payload — everything for an investigation in one panel.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Triage controls</span>
+            <span class="badge badge-on">always-on</span>
+          </div>
+          <div class="feature-desc">Mark any event as Reviewed, Resolved, or Escalated with a free-text note directly from the event drawer — triage history is recorded with actor and timestamp and persists across sessions.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">CSV and JSON export</span>
+            <span class="badge badge-on">always-on</span>
+          </div>
+          <div class="feature-desc">Download the current filtered event view as CSV or JSON (up to 10,000 rows) — useful for compliance reports, incident timelines, or piping into other tools.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Hierarchical method filter</span>
+            <span class="badge badge-on">always-on</span>
+          </div>
+          <div class="feature-desc">Three-level Service → Category → Method picker for the action filter — drill from "Kafka" to "Topic Management" to "kafka.CreateTopics" without knowing the exact method name upfront.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Resource Catalog page</span>
+            <span class="badge badge-on">always-on</span>
+          </div>
+          <div class="feature-desc">Searchable inventory of all resources that have appeared in audit events — grouped by type (topic, service account, environment, connector) so operators can quickly answer "what topics exist in this environment?"</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">System page</span>
+            <span class="badge badge-on">always-on</span>
+          </div>
+          <div class="feature-desc">Shows consumer lag, DB writer state, pipeline lag between forwarder and DB, queue depths per lane, storage usage, and effective retention values — one page to check when something looks wrong.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Settings page (multi-tab)</span>
+            <span class="badge badge-on">always-on</span>
+          </div>
+          <div class="feature-desc">In-product tabs for Retention, Cold Storage, Notifications, Schema Registry, Tableflow, and Actor Mappings — configure the stack from the UI without editing files or restarting containers.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Action alert banner</span>
+            <span class="badge badge-on">always-on</span>
+          </div>
+          <div class="feature-desc">A top-of-page warning appears automatically when action_required events are present in the current time window — makes it impossible to miss a critical signal while browsing other views.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Pipeline lag banner</span>
+            <span class="badge badge-on">always-on</span>
+          </div>
+          <div class="feature-desc">Warns on the System page when the forwarder → DB write lag exceeds the healthy threshold — early warning that the pipeline is stalling before events stop appearing in the dashboard.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Recurring patterns panel</span>
+            <span class="badge badge-on">always-on</span>
+          </div>
+          <div class="feature-desc">Automatically surfaces (actor, action, resource) combinations that repeat more than 10 times in 10 minutes — catches runaway automation, misconfigured clients, and credential abuse before they fill the event table.</div>
+        </div>
+      </div>
+
+      <!-- E: Alerting & Notifications -->
+      <div class="feature-card">
+        <div class="card-header">
+          <div class="cat-badge">E</div>
+          <div class="card-title">Alerting &amp; Notifications</div>
+          <span class="count-pill">5 features</span>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Slack, Teams, and custom webhook alerts</span>
+            <span class="badge badge-opt">opt-in</span>
+          </div>
+          <div class="feature-desc">Sends real-time alert messages to Slack or Teams channels (or any webhook endpoint) when high-signal events arrive — configured in <code>notifications.yml</code> without code changes.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Per-signal and per-category filter rules</span>
+            <span class="badge badge-opt">opt-in</span>
+          </div>
+          <div class="feature-desc">Each notification destination has its own signal type and action category rules — send action_required events to a #security-alerts channel while sending attention events to a broader #ops channel.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Alert deduplication and retry</span>
+            <span class="badge badge-opt">opt-in</span>
+          </div>
+          <div class="feature-desc">Prevents the same event from generating duplicate alerts, and retries on transient webhook failures with exponential backoff — alert delivery is reliable without hammering channels on outages.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Test notification button</span>
+            <span class="badge badge-opt">opt-in</span>
+          </div>
+          <div class="feature-desc">Send a test payload to configured webhook destinations directly from the Settings UI — verify the integration is wired correctly without waiting for a real event to arrive.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">AlertManager (production)</span>
+            <span class="badge badge-opt">opt-in</span>
+          </div>
+          <div class="feature-desc">Prometheus AlertManager is included in the production compose — wire metric-based alerting rules (consumer lag thresholds, error rate spikes) for platform-level monitoring separate from event-level notifications.</div>
+        </div>
+      </div>
+
+      <!-- F: Storage & Retention -->
+      <div class="feature-card">
+        <div class="card-header">
+          <div class="cat-badge">F</div>
+          <div class="card-title">Storage &amp; Retention</div>
+          <span class="count-pill">6 features</span>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Configurable per-tier retention</span>
+            <span class="badge badge-on">always-on</span>
+          </div>
+          <div class="feature-desc">Set separate retention windows for signal events (default 7d), raw payloads (default 7d), and noise events (default 3d) — keep the security trail longer while discarding the noise faster to control disk usage.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Retention settings UI takes effect without restart</span>
+            <span class="badge badge-on">always-on</span>
+          </div>
+          <div class="feature-desc">Changing retention values in the Settings UI writes to the database — the daily cleanup loop reads DB values at runtime, so the new policy takes effect at the next cleanup without restarting any container.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Automatic daily retention cleanup</span>
+            <span class="badge badge-on">always-on</span>
+          </div>
+          <div class="feature-desc">A background loop in the API process runs cleanup every 24 hours — no cron job, no external scheduler, no manual maintenance needed to keep database size under control.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Cold storage archival (S3 / GCS)</span>
+            <span class="badge badge-opt">opt-in</span>
+          </div>
+          <div class="feature-desc">Archive events to AWS S3 or Google Cloud Storage before they are deleted by retention — meets compliance requirements for long-term audit trail retention without keeping everything in Postgres.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Archive-before-delete enforcement</span>
+            <span class="badge badge-opt">opt-in</span>
+          </div>
+          <div class="feature-desc">When cold storage is configured, the retention cleanup always archives first and deletes second — no events are silently lost even if the archive operation is slow or retried.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Postgres auto-tuning</span>
+            <span class="badge badge-on">always-on</span>
+          </div>
+          <div class="feature-desc">A startup script reads available RAM and sets <code>shared_buffers</code>, <code>work_mem</code>, <code>effective_cache_size</code>, and <code>wal_buffers</code> automatically — no manual Postgres tuning required on any supported instance size.</div>
+        </div>
+      </div>
+
+      <!-- G: Observability -->
+      <div class="feature-card">
+        <div class="card-header">
+          <div class="cat-badge">G</div>
+          <div class="card-title">Observability</div>
+          <span class="count-pill">7 features</span>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Forwarder health endpoint</span>
+            <span class="badge badge-on">always-on</span>
+          </div>
+          <div class="feature-desc">The forwarder's <code>/health</code> endpoint reports consumer state, queue depths per lane, total write counts, enrichment cache size, and last write timestamp — a single HTTP call to verify the pipeline is alive.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Prometheus metrics</span>
+            <span class="badge badge-on">always-on</span>
+          </div>
+          <div class="feature-desc">The API exposes Prometheus-format metrics at <code>/metrics</code> — request rates, latencies, and error counts are scraped automatically by the bundled Prometheus instance.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Grafana pre-provisioned dashboards</span>
+            <span class="badge badge-on">always-on</span>
+          </div>
+          <div class="feature-desc">Grafana starts with dashboards already provisioned for processing rate, consumer lag, queue depths, DB write latency, and error rates — no setup after <code>docker compose up</code>.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">postgres-exporter</span>
+            <span class="badge badge-on">always-on</span>
+          </div>
+          <div class="feature-desc">Postgres metrics (table sizes, query counts, connection pool) are exported to Prometheus automatically — database health is visible in Grafana alongside forwarder metrics.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Loki + Promtail log aggregation</span>
+            <span class="badge badge-opt">opt-in</span>
+          </div>
+          <div class="feature-desc">Container logs from all services are shipped to Loki and queryable in Grafana via the <code>observability</code> profile — centralised log search without an external logging service.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Pipeline lag display in System page</span>
+            <span class="badge badge-on">always-on</span>
+          </div>
+          <div class="feature-desc">The System page shows the gap between the forwarder's last write and the database's most recent event timestamp — operators can tell in seconds whether events are flowing or stalled without checking logs.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Consumer lag display</span>
+            <span class="badge badge-on">always-on</span>
+          </div>
+          <div class="feature-desc">Total Kafka consumer lag is shown on the System page — growing lag means the forwarder is falling behind the audit topic and events will appear with a delay until it catches up.</div>
+        </div>
+      </div>
+
+      <!-- H: Security -->
+      <div class="feature-card">
+        <div class="card-header">
+          <div class="cat-badge">H</div>
+          <div class="card-title">Security</div>
+          <span class="count-pill">9 features</span>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Bearer token auth with three roles</span>
+            <span class="badge badge-opt">opt-in</span>
+          </div>
+          <div class="feature-desc"><code>viewer</code> can read events; <code>responder</code> can triage; <code>admin</code> can access cleanup and backfill endpoints — provide minimum-privilege tokens to each team member or service.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">AES-256-GCM secret encryption</span>
+            <span class="badge badge-on">always-on</span>
+          </div>
+          <div class="feature-desc">All secrets stored in the database (webhook URLs, SR credentials, cold storage keys) are encrypted at rest and never returned in plaintext from any API endpoint — even admin endpoints return masked values.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">HMAC constant-time token comparison</span>
+            <span class="badge badge-on">always-on</span>
+          </div>
+          <div class="feature-desc">Token validation uses <code>hmac.compare_digest</code> — prevents timing side-channel attacks where an attacker could guess token bytes by measuring response time differences.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">CSP and security headers</span>
+            <span class="badge badge-on">always-on</span>
+          </div>
+          <div class="feature-desc">Content-Security-Policy, X-Frame-Options, Referrer-Policy, and X-Content-Type-Options are set on every API response — baseline hardening against clickjacking, MIME sniffing, and script injection.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Per-IP rate limiting</span>
+            <span class="badge badge-on">always-on</span>
+          </div>
+          <div class="feature-desc">All endpoints are rate-limited per client IP via slowapi — prevents a single misconfigured client from drowning the API under a flood of requests.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Ports bound to 127.0.0.1 by default</span>
+            <span class="badge badge-on">always-on</span>
+          </div>
+          <div class="feature-desc">All container ports (API, frontend, metrics, Postgres, Grafana) are bound to localhost only in the default compose — traffic cannot reach them from any other machine without an explicit port rebinding.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Forwarder runs read-only with dropped capabilities</span>
+            <span class="badge badge-on">always-on</span>
+          </div>
+          <div class="feature-desc">The forwarder container runs with <code>read_only: true</code> and <code>cap_drop: ALL</code> — a compromised forwarder process cannot write to the filesystem or call privileged kernel operations.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">TLS via Caddy (production)</span>
+            <span class="badge badge-opt">opt-in</span>
+          </div>
+          <div class="feature-desc">The production compose includes Caddy as a reverse proxy that handles ACME certificate issuance and renewal automatically — set <code>AUDITLENS_DOMAIN</code> and HTTPS just works.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">No telemetry or phone-home</span>
+            <span class="badge badge-on">always-on</span>
+          </div>
+          <div class="feature-desc">The only outbound connections AuditLens makes are to your Confluent Kafka endpoint (always) and to <code>api.confluent.cloud</code> (only when <code>IAM_ENRICHMENT_ENABLED=true</code>) — your audit data stays in your infrastructure.</div>
+        </div>
+      </div>
+
+      <!-- I: Setup & Configuration -->
+      <div class="feature-card">
+        <div class="card-header">
+          <div class="cat-badge">I</div>
+          <div class="card-title">Setup &amp; Configuration</div>
+          <span class="count-pill">6 features</span>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Interactive setup wizard</span>
+            <span class="badge badge-on">always-on</span>
+          </div>
+          <div class="feature-desc">Run <code>./setup</code> and the wizard collects Kafka credentials, validates connectivity to both source and destination clusters, generates <code>.env</code> and <code>.secrets</code>, and starts all services — zero manual YAML editing for a first install.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Makefile targets for daily operations</span>
+            <span class="badge badge-on">always-on</span>
+          </div>
+          <div class="feature-desc"><code>make start / stop / restart / status / deploy / migrate / test / help</code> — every common operation has a single command so operators don't need to remember docker compose flags or file paths.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">SQLite demo mode</span>
+            <span class="badge badge-opt">opt-in</span>
+          </div>
+          <div class="feature-desc">Starts the API and frontend with seeded sample events and no Kafka credentials — useful for demoing the UI to stakeholders or testing the deployment on a new machine before connecting to a real cluster.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Profile-based Docker Compose</span>
+            <span class="badge badge-on">always-on</span>
+          </div>
+          <div class="feature-desc">Optional services (Postgres, Loki, Promtail) are gated behind named profiles — run exactly what you need without stopping and starting unrelated containers.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">EC2 / VM deployment via <code>make deploy</code></span>
+            <span class="badge badge-opt">opt-in</span>
+          </div>
+          <div class="feature-desc">Rsyncs source to the remote host and rebuilds containers in one command — deploy a code update to a production EC2 instance without manually SSH-ing in and running docker commands.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Configurable ports via env vars</span>
+            <span class="badge badge-on">always-on</span>
+          </div>
+          <div class="feature-desc">Every service port (API, frontend, metrics, Postgres) can be overridden in <code>.env</code> — run multiple AuditLens instances on the same host, or resolve conflicts with other services, without touching compose files.</div>
+        </div>
+      </div>
+
+      <!-- J: Integrations -->
+      <div class="feature-card">
+        <div class="card-header">
+          <div class="cat-badge">J</div>
+          <div class="card-title">Integrations</div>
+          <span class="count-pill">5 features</span>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Schema Registry integration</span>
+            <span class="badge badge-opt">opt-in</span>
+          </div>
+          <div class="feature-desc">Configure SR endpoint and credentials in Settings; AuditLens shows a live connection status and uses SR context to enrich schema-registry audit events with schema names and subject information.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Tableflow integration</span>
+            <span class="badge badge-opt">opt-in</span>
+          </div>
+          <div class="feature-desc">Enable or disable Tableflow from the Settings UI; Tableflow audit events (table creates, schema changes) are enriched with Tableflow context and classified alongside other cluster events.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Confluent Cloud Admin API</span>
+            <span class="badge badge-opt">opt-in</span>
+          </div>
+          <div class="feature-desc">When a Confluent Cloud API key is configured, AuditLens calls <code>api.confluent.cloud</code> to resolve principal IDs to display names — no additional tooling or LDAP integration required.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Resource Catalog (event-derived inventory)</span>
+            <span class="badge badge-on">always-on</span>
+          </div>
+          <div class="feature-desc">Every resource that appears in an audit event is upserted into a catalog with type, name, cluster, environment, and blast radius hint — provides a lightweight resource inventory built entirely from your own audit trail.</div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature-name-row">
+            <span class="feature-name">Cluster &amp; topic discovery during setup</span>
+            <span class="badge badge-on">always-on</span>
+          </div>
+          <div class="feature-desc">The setup wizard validates Kafka credentials and discovers topics interactively — identifies the correct audit log topic name for your org so there's no manual topic-name lookup step.</div>
+        </div>
+      </div>
+
+    </div><!-- /card-grid -->
+  </div>
+</section>
+
+<!-- ── SECTION 4: SIGNAL TYPES ────────────────────────────────── -->
+<section id="signals">
+  <div class="wrap">
+    <h2>Signal Types Explained</h2>
+    <p class="section-sub">Every event is assigned exactly one signal_type. Here is what each means and what the operator should do.</p>
+
+    <div class="signal-grid">
+
+      <div class="signal-card signal-noise">
+        <div class="signal-type">noise</div>
+        <div class="signal-volume">~83% of all events</div>
+        <div class="signal-triggers">
+          <strong>What triggers it</strong>
+          <ul>
+            <li><code>mds.Authorize</code> — every RBAC permission check</li>
+            <li><code>kafka.Fetch</code>, <code>kafka.Produce</code> — client I/O</li>
+            <li><code>schema-registry.Authentication</code> — handshakes</li>
+            <li>Any event on internal platform topics (<code>_confluent*</code>, <code>error-lcc-*</code>)</li>
+            <li>Confluent platform automation service accounts (routine activity)</li>
+          </ul>
+        </div>
+        <span class="signal-action-row">What to do: nothing — stored separately, hidden by default</span>
+      </div>
+
+      <div class="signal-card signal-info">
+        <div class="signal-type">informational</div>
+        <div class="signal-volume">~15% of all events</div>
+        <div class="signal-triggers">
+          <strong>What triggers it</strong>
+          <ul>
+            <li>Any <code>Get*</code> or <code>List*</code> method — read-only lookups</li>
+            <li>Successful authentications that aren't flagged denials</li>
+            <li>Operational events (constructive or operational impact types)</li>
+            <li>Tableflow <code>GetTable</code> / <code>ListTables</code> helpers</li>
+          </ul>
+        </div>
+        <span class="signal-action-row">What to do: monitor — part of the audit trail, no immediate action</span>
+      </div>
+
+      <div class="signal-card signal-attn">
+        <div class="signal-type">attention</div>
+        <div class="signal-volume">~1.5% of all events</div>
+        <div class="signal-triggers">
+          <strong>What triggers it</strong>
+          <ul>
+            <li>ACL / RBAC changes — <code>grant</code>, <code>revoke</code>, <code>rolebinding</code></li>
+            <li>API key creation or deletion</li>
+            <li>Configuration changes — <code>alterconfigs</code>, <code>updateconfig</code></li>
+            <li>Topic, schema, cluster, or connector creates/updates</li>
+            <li>Schema Registry RegisterSchema failures (schema evolution)</li>
+          </ul>
+        </div>
+        <span class="signal-action-row">What to do: review — verify the owner and change window</span>
+      </div>
+
+      <div class="signal-card signal-action">
+        <div class="signal-type">action_required</div>
+        <div class="signal-volume">&lt;0.5% of all events</div>
+        <div class="signal-triggers">
+          <strong>What triggers it</strong>
+          <ul>
+            <li>Any denied access attempt</li>
+            <li>Delete, destroy, drop, terminate operations</li>
+            <li>Failed authentication (kafka.authentication, ksql.authenticate)</li>
+            <li>Any API failure on a destructive or security-sensitive operation</li>
+            <li>Access-transparency events with security-sensitive impact</li>
+          </ul>
+        </div>
+        <span class="signal-action-row" style="background:rgba(220,38,38,0.1);color:#dc2626;">What to do: act now — investigate immediately</span>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<!-- ── SECTION 5: QUICK START ──────────────────────────────────── -->
+<section id="quickstart">
+  <div class="wrap">
+    <h2>Quick Start</h2>
+    <p class="section-sub">From clone to running dashboard in under 5 minutes</p>
+
+    <div class="steps">
+      <div class="step">
+        <div class="step-num">1</div>
+        <div class="step-body">
+          <div class="step-title">Prerequisites</div>
+          <div class="step-desc">You need Docker Desktop (≥6 GB RAM allocated), Python 3.11+, and access to your Confluent Cloud audit log topic.</div>
+          <pre>
+# Confluent Cloud credentials you will need:
+#   - Audit log Kafka bootstrap endpoint
+#     (e.g. pkc-abc123.us-east-1.aws.confluent.cloud:9092)
+#   - Kafka API Key + Secret with READ access to confluent-audit-log-events
+#   - Destination Kafka bootstrap + API Key + Secret (for enriched topics)
+#
+# Optional (enables actor display names):
+#   - CONFLUENT_CLOUD_API_KEY + CONFLUENT_CLOUD_API_SECRET</pre>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-num">2</div>
+        <div class="step-body">
+          <div class="step-title">Clone and run the setup wizard</div>
+          <div class="step-desc">The wizard collects credentials, validates Kafka connectivity, generates <code>.env</code> and <code>.secrets</code>, and starts all services.</div>
+          <pre>
+git clone &lt;repo-url&gt;
+cd AuditLens
+./setup</pre>
+          <div class="step-desc" style="margin-top:10px;">When complete you will see:</div>
+          <pre>
+✅  AuditLens is ready.
+    Open http://localhost:3000  (local dev only)</pre>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-num">3</div>
+        <div class="step-body">
+          <div class="step-title">Open the dashboard</div>
+          <div class="step-desc">The Dashboard page shows signal counts, top active actors, and the event volume chart. The tables will populate as the forwarder consumes events from your audit topic — usually within a few seconds on a live cluster.</div>
+          <pre>
+# Dashboard:            http://localhost:3000        (local dev only)
+# API:                  http://127.0.0.1:8080        (local dev only)
+# Forwarder health:     http://127.0.0.1:8003/health (local dev only)
+# Grafana:              http://127.0.0.1:3001        (local dev only)
+
+# Common commands after setup:
+make status     # Container health + API check
+make logs       # Tail forwarder logs
+make stop       # Stop all services
+make test       # Run the test suite (701 tests)</pre>
+          <div class="step-desc" style="margin-top:10px;"><strong>No Kafka? SQLite demo mode</strong> — seeds sample data, no credentials needed:</div>
+          <pre>scripts/run_sqlite_demo.sh
+# Open http://127.0.0.1:3000  (local dev only)</pre>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── SECTION 6: CONFIGURATION ───────────────────────────────── -->
+<section id="config">
+  <div class="wrap">
+    <h2>Configuration Highlights</h2>
+    <p class="section-sub">The 12 most important variables. Full reference in <code>.env.example</code> and <code>INSTALL.md</code>.</p>
+
+    <div class="config-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Variable</th>
+            <th>Default</th>
+            <th>What it controls</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="td-var">AUDIT_BOOTSTRAP</td>
+            <td class="td-req">required</td>
+            <td>Confluent Cloud audit-log Kafka bootstrap server — the cluster that holds <code>confluent-audit-log-events</code></td>
+          </tr>
+          <tr>
+            <td class="td-var">AUDIT_API_KEY / AUDIT_API_SECRET</td>
+            <td class="td-req">required</td>
+            <td>Kafka credentials with read access to the audit log topic; secret goes in <code>.secrets</code></td>
+          </tr>
+          <tr>
+            <td class="td-var">AUDIT_TOPIC</td>
+            <td class="td-default">confluent-audit-log-events</td>
+            <td>Audit log topic name; confirm with <code>confluent audit-log describe</code></td>
+          </tr>
+          <tr>
+            <td class="td-var">AUTO_OFFSET_RESET</td>
+            <td class="td-default">earliest</td>
+            <td>Use <code>earliest</code> on first install to replay retained history; change to <code>latest</code> afterwards</td>
+          </tr>
+          <tr>
+            <td class="td-var">DATABASE_URL</td>
+            <td class="td-default">sqlite:///./data/auditlens.db</td>
+            <td>Database connection string; set to <code>postgresql+psycopg://user:pass@host/db</code> for product mode</td>
+          </tr>
+          <tr>
+            <td class="td-var">POSTGRES_PASSWORD</td>
+            <td class="td-req">required (postgres profile)</td>
+            <td>PostgreSQL password; must be set before starting the <code>postgres</code> compose service</td>
+          </tr>
+          <tr>
+            <td class="td-var">API_AUTH_ENABLED</td>
+            <td class="td-default">true</td>
+            <td>Enable bearer token auth; set <code>false</code> only for local evaluation — never in a shared environment</td>
+          </tr>
+          <tr>
+            <td class="td-var">NEXT_PUBLIC_API_BASE_URL</td>
+            <td class="td-default">http://127.0.0.1:8080</td>
+            <td>URL the browser uses to reach the API; must be your domain or public IP in production</td>
+          </tr>
+          <tr>
+            <td class="td-var">EVENT_RETENTION_DAYS</td>
+            <td class="td-default">7</td>
+            <td>Days to keep signal events; also configurable in the Settings UI at runtime</td>
+          </tr>
+          <tr>
+            <td class="td-var">NOISE_RETENTION_DAYS</td>
+            <td class="td-default">3</td>
+            <td>Days to keep noise events; set shorter than event retention to control disk usage</td>
+          </tr>
+          <tr>
+            <td class="td-var">IAM_ENRICHMENT_ENABLED</td>
+            <td class="td-default">false</td>
+            <td>Enable actor display name resolution via Confluent Cloud IAM API; requires <code>CONFLUENT_CLOUD_API_KEY</code></td>
+          </tr>
+          <tr>
+            <td class="td-var">ENABLE_NOISE_SHORT_CIRCUIT</td>
+            <td class="td-default">true</td>
+            <td>Bypass full enrichment pipeline for bulk-noise methods; keep true in production — saves ~83% of processor work</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- ── FOOTER ─────────────────────────────────────────────────── -->
+<footer>
+  Generated from codebase &middot; 2026-05-18 &middot; AuditLens &middot;
+  <a href="https://github.com/jegan-confluent/auditlens" target="_blank" rel="noopener">github.com/jegan-confluent/auditlens</a>
+</footer>
+
+</body>
+</html>
