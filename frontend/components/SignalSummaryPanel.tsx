@@ -23,43 +23,6 @@ const SIGNAL_CARDS: ReadonlyArray<{
   { fieldKey: "action_required_count", className: "action", icon: "🔴", label: "Action", contextLabel: (c) => c > 0 ? "needs review" : "all clear", alertClass: (c) => c > 0 ? "red" : "" },
 ];
 
-type ActorFlow = {
-  subject: string;
-  subject_display_name: string | null | undefined;
-  signal_type: string;
-  count: number;
-  last_seen: string;
-};
-
-function groupFlowsByActor(groups: SummaryResponse["flow_groups"]): ActorFlow[] {
-  const map = new Map<string, ActorFlow>();
-  for (const g of groups) {
-    const key = `${g.subject}|${g.signal_type}`;
-    const existing = map.get(key);
-    if (!existing) {
-      map.set(key, {
-        subject: g.subject,
-        subject_display_name: g.subject_display_name,
-        signal_type: g.signal_type,
-        count: g.event_count,
-        last_seen: g.last_seen,
-      });
-    } else {
-      existing.count += g.event_count;
-      if (g.last_seen > existing.last_seen) existing.last_seen = g.last_seen;
-    }
-  }
-  return [...map.values()].sort((a, b) => b.count - a.count);
-}
-
-function actorSignalPatch(subject: string, signalType: string): Partial<EventFilters> {
-  return {
-    mode: signalType === "noise" ? "audit_trail" : "decision",
-    actor: subject || "",
-    signal: signalType || "",
-    hide_noise: signalType === "noise" ? "false" : "true",
-  };
-}
 
 function signalEventLabel(signalType: string): string {
   if (signalType === "action_required") return "action-needed";
@@ -168,7 +131,6 @@ export default function SignalSummaryPanel({ summary, onApplyFlow, currentSignal
   currentSignal?: string;
   onTierSelect?: (tier: string | null) => void;
 }) {
-  const actorFlows = groupFlowsByActor(summary.flow_groups);
   return (
     <section className={`signal-panel ${summary.overall_status}`}>
       <SignalBreakdown
@@ -208,36 +170,44 @@ export default function SignalSummaryPanel({ summary, onApplyFlow, currentSignal
           );
         })}
       </div>
-      {actorFlows.length ? (
+      {summary.flow_groups.length > 0 ? (
         <div className="flow-list">
           <div className="eyebrow">Top activity flows</div>
-          {actorFlows.slice(0, 5).map((flow) => {
-            const patch = actorSignalPatch(flow.subject, flow.signal_type);
-            const display = formatSubject(flow.subject, flow.subject_display_name);
-            const evtLabel = signalEventLabel(flow.signal_type);
-            const clickable = Boolean(onApplyFlow && (patch.actor || patch.signal));
-            const signalClass = flow.signal_type === "action_required" ? "action_required"
-              : flow.signal_type === "attention" ? "attention"
-              : "informational";
-            const ButtonOrDiv = clickable ? "button" : "div";
-            return (
-              <ButtonOrDiv
-                key={`${flow.subject}|${flow.signal_type}`}
-                type={clickable ? "button" : undefined}
-                className={`flow-row ${signalClass}`}
-                onClick={clickable ? () => onApplyFlow?.(patch) : undefined}
-              >
-                <span className="flow-icon" aria-hidden>{iconForSignal(flow.signal_type)}</span>
-                <span className="flow-body">
-                  <span className="flow-title">
-                    {display} — {flow.count.toLocaleString()} {evtLabel} event{flow.count === 1 ? "" : "s"}
+          {[...summary.flow_groups]
+            .sort((a, b) => b.event_count - a.event_count)
+            .slice(0, 5)
+            .map((group) => {
+              const patch = flowPatch(group);
+              const display = formatSubject(group.subject, group.subject_display_name);
+              const evtLabel = signalEventLabel(group.signal_type);
+              const resource = group.resource_display_short && group.resource_display_short !== "Unknown"
+                ? group.resource_display_short
+                : null;
+              const clickable = Boolean(onApplyFlow && (patch.actor || patch.signal));
+              const signalClass = group.signal_type === "action_required" ? "action_required"
+                : group.signal_type === "attention" ? "attention"
+                : "informational";
+              const ButtonOrDiv = clickable ? "button" : "div";
+              return (
+                <ButtonOrDiv
+                  key={`${group.subject}|${group.signal_type}|${group.resource_display_short}`}
+                  type={clickable ? "button" : undefined}
+                  className={`flow-row ${signalClass}`}
+                  onClick={clickable ? () => onApplyFlow?.(patch) : undefined}
+                >
+                  <span className="flow-icon" aria-hidden>{iconForSignal(group.signal_type)}</span>
+                  <span className="flow-body">
+                    <span className="flow-title">
+                      {display} — {group.event_count.toLocaleString()} {evtLabel} event{group.event_count === 1 ? "" : "s"}
+                    </span>
+                    <span className="flow-meta">
+                      {resource ? `${resource} · ` : ""}{formatAge(group.last_seen)}
+                    </span>
                   </span>
-                  <span className="flow-meta">{formatAge(flow.last_seen)}</span>
-                </span>
-                <span className="flow-arrow" aria-hidden>{clickable ? "→" : ""}</span>
-              </ButtonOrDiv>
-            );
-          })}
+                  <span className="flow-arrow" aria-hidden>{clickable ? "→" : ""}</span>
+                </ButtonOrDiv>
+              );
+            })}
         </div>
       ) : null}
     </section>
