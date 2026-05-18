@@ -14,6 +14,8 @@ jobs:
   tests:
     name: tests
     runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
       - uses: actions/checkout@v4
@@ -22,14 +24,22 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Create virtual environment
+        run: python -m venv .venv
+
       - name: Install Python dependencies
-        run: pip install -r requirements.txt -r backend/requirements.txt
+        run: .venv/bin/pip install -r requirements.txt -r backend/requirements.txt
 
       - name: Compile Python sources
-        run: python3 -m compileall backend/app src/product scripts
+        run: .venv/bin/python3 -m compileall backend/app src/product scripts
 
       - name: Run pytest
-        run: pytest -q --tb=short
+        env:
+          CONFLUENT_CLOUD_API_KEY: ""
+          CONFLUENT_CLOUD_API_SECRET: ""
+          CONFLUENT_API_KEY: ""
+          CONFLUENT_API_SECRET: ""
+        run: .venv/bin/pytest -q --tb=short
 
       - uses: actions/setup-node@v4
         with:
