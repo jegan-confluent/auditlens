@@ -1,6 +1,6 @@
 # AuditLens
 
-AuditLens is real-time audit intelligence for Confluent/Kafka audit events.
+Kafka-native audit intelligence for Confluent Cloud. See who did what, when, and what matters — in real time.
 
 Runtime path:
 
@@ -62,7 +62,7 @@ cd AuditLens
 ./setup
 ```
 
-The wizard asks for your Kafka bootstrap endpoint, API key, and API secret; validates connectivity to both source and destination clusters; generates `.env` and `.secrets`; then starts all services. See [INSTALL.md](INSTALL.md) for every configuration variable and [USER_GUIDE.md](USER_GUIDE.md) for how to navigate the dashboard.
+The wizard asks for your Kafka bootstrap endpoint, API key, and API secret; validates connectivity to both source and destination clusters; generates `.env` and `.secrets`; then starts all services. See [INSTALL.md](INSTALL.md) for every configuration variable, [USER_GUIDE.md](USER_GUIDE.md) for how to navigate the dashboard, and [CONTRIBUTING.md](CONTRIBUTING.md) to contribute or run tests.
 
 When complete:
 

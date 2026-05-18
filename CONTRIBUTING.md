@@ -65,6 +65,20 @@ The test pass count grows over time. Never submit a PR that reduces the passing 
 
 ---
 
+## Running the Frontend TypeScript Check
+
+```bash
+npm --prefix frontend run build
+```
+
+This compiles the Next.js app and reports TypeScript errors. Zero errors required before opening a PR. You can also run the type-checker alone without producing build output:
+
+```bash
+cd frontend && npx tsc --noEmit
+```
+
+---
+
 ## Running the Forwarder in Dev Mode
 
 With a `.env` and `.secrets` file present:
@@ -158,6 +172,47 @@ To promote a specific method to `action_required` regardless of other signals, a
 ### Test your rule
 
 Add a test case in `tests/test_classification.py` (or `tests/test_signal_classification.py` if it exists) that asserts the expected `criticality` and `signal_type` for a synthetic event. Run the full suite before opening a PR.
+
+---
+
+## Architecture Overview
+
+```
+Confluent Cloud audit topic
+        │
+        ▼
+audit_forwarder.py  — Main consumer loop. Reads the audit log topic,
+│                     classifies events by criticality and signal type,
+│                     enriches actor identities, writes to PostgreSQL.
+│                     Also dispatches notifications (Slack/Teams/webhook).
+│
+├── src/classification/   — Criticality rules (CRITICAL/HIGH/MEDIUM/LOW)
+├── src/product/          — Signal classification, actor enrichment,
+│                           resource intelligence, DB writer, normalization
+└── src/notifications/    — AuditLensNotifier: webhook destinations,
+                            dedup, retry (reads notifications.yml)
+
+backend/app/
+├── main.py               — FastAPI app bootstrap, lifespan, middleware
+├── api/routes/           — One file per route group: events, summary,
+│                           filters, system, settings, admin, actors, etc.
+└── services/             — Business logic behind routes (event_service,
+                            backfill_service, system_service, etc.)
+
+frontend/
+├── app/                  — Next.js App Router pages:
+│   ├── dashboard/        — At-a-glance signal summary and action feed
+│   ├── events/           — Triage inbox, signal badges, detail drawer
+│   ├── system/           — Pipeline health, VACUUM, container status
+│   └── settings/         — Retention, cold storage, notifications,
+│                           actor mappings, resource catalog, schema registry
+└── components/           — Shared UI: SignalBadge, EventDetailDrawer,
+                            AuditEventTable, NarrativeStrip, TopActors, etc.
+
+docker-compose.yml — Local dev: auditlens-forwarder (8003), api (8080),
+                     frontend (3000), postgres (5432), prometheus (9090),
+                     grafana (3001). Ports bound to 127.0.0.1 only.
+```
 
 ---
 

@@ -15,15 +15,14 @@ The dashboard is an at-a-glance summary for the current time window (1h / 6h / 2
 | Section | What it shows |
 |---------|---------------|
 | **NarrativeStrip** | A one-sentence summary of the current security posture: how many action-required events, time window, and whether the pipeline is healthy |
-| **SignalSummaryPanel** | Event counts broken down by signal type (Critical / Review / Info / Noise) for the selected time window |
-| **EventVolumeChart** | A stacked bar chart showing the signal mix at a glance — useful for spotting spikes in destructive or access-change activity |
+| **SignalSummaryPanel** | Event counts and an interactive segmented bar broken down by signal type (Critical / Review / Info / Noise) for the selected time window. Click a segment to jump to `/events` filtered by that signal. |
 | **ActionFeed** | The most recent `action_required` events — the things that need immediate attention |
 | **TopActors** | The principals with the most activity in the window — helps identify unexpected accounts or runaway automation |
 | **SystemStatusPanel** | Pipeline health: whether the forwarder is consuming, DB write lag, consumer lag |
 
 **When to act:** If ActionFeed shows DeleteKafkaCluster, CreateApiKey for an unfamiliar account, or any `result: Failure` from a privileged principal, open `/events` to investigate.
 
-The dashboard auto-refreshes every 60 seconds. Clicking a bar in EventVolumeChart navigates to `/events` filtered to that time window.
+The dashboard auto-refreshes every 60 seconds.
 
 ---
 
@@ -76,11 +75,13 @@ The filter panel is above the event table. Filters persist in the URL — copy a
 
 1. Click any row in the events table — a detail drawer opens on the right side of the screen.
 2. The drawer shows: actor display name and ID, action, resource, timestamp, source IP (when available), result (Success / Failure / Denied), signal badge, and current triage status.
-3. Scroll down in the drawer to the triage actions section. Three options:
+3. Scroll down in the drawer to the triage actions section. Five options:
 
 | Button | Status set | When to use |
 |--------|-----------|-------------|
 | **Acknowledge** | `acknowledged` | You have seen it and it is being handled |
+| **Mark Approved** | `approved` | The action was authorised and expected |
+| **Investigate** | `investigating` | You are actively looking into this event |
 | **Resolve** | `resolved` | Investigation is complete — no further action needed |
 | **Mark False Positive** | `false_positive` | This signal classification is wrong for this event |
 
@@ -155,7 +156,7 @@ curl -s http://localhost:8080/health | python3 -m json.tool
 
 ### Settings (`/settings`)
 
-The Settings page requires an admin API token when `API_AUTH_ENABLED=true`. It has four tabs.
+The Settings page requires an admin API token when `API_AUTH_ENABLED=true`. It has seven tabs: Retention, Cold Storage, Notifications, Actor Mappings, Resource Catalog, Schema Registry, and Data Export.
 
 #### Retention tab
 
@@ -181,7 +182,9 @@ Supported per-destination options: signal filter (action_required / attention on
 
 #### Actor Mappings tab
 
-Actor display name overrides are configured in `actor_mappings.yml` at the repo root. Copy `actor_mappings.example.yml` to `actor_mappings.yml` and add entries mapping principal IDs to human-readable names. The forwarder hot-reloads `actor_mappings.yml` within 60 seconds of a file change.
+Map principal IDs to human-readable names directly in the UI. Click **+ Add mapping** to create a new row, or click **Edit** on an existing row to modify it. Each mapping has four fields: raw ID (e.g. `sa-8nwyn7`), display name, team (optional), and notes (optional).
+
+Changes are saved to the database immediately and take effect in the UI on the next event load. The forwarder also re-enriches events using the updated mappings within one enrichment cycle.
 
 Mapped names take priority over IAM API resolution and audit-event-derived names.
 

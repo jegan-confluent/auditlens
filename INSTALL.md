@@ -61,22 +61,24 @@ After collecting credentials, the wizard validates connectivity to both clusters
 
 ### Default services (always started)
 
-| Container | What it does | Local port |
-|-----------|-------------|------------|
+| Service (compose name) | What it does | Local port |
+|------------------------|-------------|------------|
 | `auditlens-forwarder` | Consumes the Confluent audit log topic, classifies and enriches events, writes to PostgreSQL | 8003 (health) |
-| `auditlens-api` | FastAPI backend — serves `/events`, `/summary`, `/filters`, `/system`, `/settings` | 8080 |
-| `auditlens-frontend` | Next.js dashboard (Dashboard, Events, System, Settings pages) | 3000 |
-| `audit-prometheus` | Prometheus metrics collection | 9090 |
-| `audit-grafana` | Grafana dashboards for forwarder metrics | 3001 |
+| `api` | FastAPI backend — serves `/events`, `/summary`, `/filters`, `/system`, `/settings` | 8080 |
+| `frontend` | Next.js dashboard (Dashboard, Events, System, Settings pages) | 3000 |
+| `prometheus` | Prometheus metrics collection | 9090 |
+| `grafana` | Grafana dashboards for forwarder metrics | 3001 |
 
 *(All local ports are bound to `127.0.0.1` — they are not accessible from other machines.)*
 
+Use the service name for `docker compose` commands: `docker compose logs api`, `docker compose restart frontend`.
+
 ### Profile-based services
 
-| Container | Profile | What it does | Local port |
-|-----------|---------|-------------|------------|
-| `auditlens-postgres` | `postgres`, `dev` | PostgreSQL 16 (product mode) | 5432 |
-| `auditlens-postgres-exporter` | `postgres`, `dev` | Exports Postgres metrics to Prometheus | 9187 |
+| Service (compose name) | Profile | What it does | Local port |
+|------------------------|---------|-------------|------------|
+| `postgres` | `postgres`, `dev` | PostgreSQL 16 (product mode) | 5432 |
+| `postgres-exporter` | `postgres`, `dev` | Exports Postgres metrics to Prometheus | 9187 |
 | `loki` | `observability` | Log aggregation | 3100 |
 | `promtail` | `observability` | Log shipper from `./logs/` to Loki | — |
 
