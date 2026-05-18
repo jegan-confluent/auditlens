@@ -130,7 +130,7 @@ install Docker Desktop with WSL2 backend, then follow Section 1 inside WSL2.
 Makefile defaults (override on command line or in shell):
 
 ```makefile
-EC2_IP   = 98.95.144.160   # change this
+EC2_IP   = YOUR_EC2_IP   # change this
 EC2_USER = ec2-user
 PEM      = ~/.ssh/auditlens.pem
 ```
