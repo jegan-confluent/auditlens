@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session, defer, load_only
 
 from backend.app.db.feedback import Feedback
 from backend.app.db.models import AuditEvent, AuditEventTriage
+from backend.app.services.cold_storage_service import archive_events_before
 from backend.app.services.filter_service import event_fingerprint, normalize_event, parse_event_timestamp
 from backend.app.services.pattern_service import _norm, get_suppressed_combos
 from backend.app.services.resource_service import upsert_resource_catalog
@@ -713,6 +714,51 @@ def cleanup_retention(
     raw_payloads_nulled = 0
     noise_deleted = 0
 
+    # Step 0 — Archive to cold storage BEFORE any row deletes (data loss prevention).
+    # Rule: if cold storage is enabled and the archive fails, skip all deletes and
+    # return early. The caller must fix cold storage and retry. If cold storage is
+    # disabled, this is a no-op and deletes proceed normally.
+    _archive_error = False
+    if not dry_run:
+        try:
+            archive_result = archive_events_before(db, cutoff)
+            if archive_result.get("enabled"):
+                if archive_result.get("errors"):
+                    logger.error(
+                        "Cold storage archive failed before retention delete — "
+                        "skipping delete to prevent data loss. errors=%s",
+                        archive_result["errors"],
+                    )
+                    _archive_error = True
+                else:
+                    logger.info(
+                        "Archived %d events across %d days (%d bytes) to cold storage before deletion.",
+                        archive_result.get("events_archived", 0),
+                        archive_result.get("days_archived", 0),
+                        archive_result.get("bytes_archived", 0),
+                    )
+            else:
+                logger.debug("Cold storage disabled — proceeding with retention delete only.")
+        except Exception as exc:
+            logger.error(
+                "Cold storage archive raised unexpectedly — "
+                "skipping delete to prevent data loss. error=%s",
+                exc,
+            )
+            _archive_error = True
+
+    if _archive_error:
+        return {
+            "dry_run": dry_run,
+            "retention_days": retention_days,
+            "cutoff": cutoff.isoformat(),
+            "deleted_count": 0,
+            "raw_payloads_nulled": 0,
+            "noise_deleted": 0,
+            "feedback_deleted": 0,
+            "archive_error": True,
+        }
+
     # Step 1 — Null raw payloads older than raw_payload_retention_days
     if raw_payload_retention_days is not None and raw_payload_retention_days > 0:
         raw_cutoff = datetime.now(timezone.utc) - timedelta(days=raw_payload_retention_days)
@@ -785,12 +831,24 @@ def cleanup_retention(
             )
             db.commit()
             _offset += _TRIAGE_BATCH
-        db.execute(
-            delete(AuditEvent)
-            .where(AuditEvent.timestamp < cutoff)
-            .execution_options(synchronize_session=False)
-        )
-        db.commit()
+        # Batch-delete to avoid loading all eligible IDs into memory at once.
+        _EVENT_DELETE_BATCH = 1000
+        while True:
+            ids = list(db.scalars(
+                select(AuditEvent.id)
+                .where(AuditEvent.timestamp < cutoff)
+                .limit(_EVENT_DELETE_BATCH)
+            ).all())
+            if not ids:
+                break
+            db.execute(
+                delete(AuditEvent)
+                .where(AuditEvent.id.in_(ids))
+                .execution_options(synchronize_session=False)
+            )
+            db.commit()
+            if len(ids) < _EVENT_DELETE_BATCH:
+                break
 
     # Step 3 — Delete old noise rows
     if noise_retention_days is not None and noise_retention_days > 0:
