@@ -7,6 +7,7 @@ import argparse
 import getpass
 import json
 import shlex
+import stat
 import subprocess
 import sys
 import textwrap
@@ -117,6 +118,72 @@ def info_line(message: str) -> None:
 
 def skip_line(message: str) -> None:
     print(yellow(f"  ⏭   {message}"))
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Checkpoint state. After each phase passes we persist a small JSON file
+# under $HOME so a failed install (Phase 3 timeout etc.) can resume on the
+# next run instead of forcing the operator to re-enter source + dest creds.
+# The file is chmod 600 because it stores raw API keys / secrets gathered
+# during the wizard.
+# ─────────────────────────────────────────────────────────────────────────
+CHECKPOINT_PATH = Path.home() / ".auditlens_setup_checkpoint.json"
+_CP_VERSION = "1"
+
+
+def save_checkpoint(completed_phases: list, inputs) -> None:
+    """Write progress after each phase passes. chmod 600."""
+    d = {}
+    if hasattr(inputs, "_asdict"):
+        d = dict(inputs._asdict())
+    elif hasattr(inputs, "__dict__"):
+        d = vars(inputs).copy()
+    data = {
+        "version": _CP_VERSION,
+        "completed_phases": sorted(set(completed_phases)),
+        "inputs": d,
+    }
+    CHECKPOINT_PATH.write_text(json.dumps(data, indent=2))
+    CHECKPOINT_PATH.chmod(stat.S_IRUSR | stat.S_IWUSR)  # 600
+
+
+def load_checkpoint() -> dict | None:
+    try:
+        if not CHECKPOINT_PATH.exists():
+            return None
+        data = json.loads(CHECKPOINT_PATH.read_text())
+        return data if data.get("version") == _CP_VERSION else None
+    except Exception:
+        return None
+
+
+def delete_checkpoint() -> None:
+    try:
+        CHECKPOINT_PATH.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+_PHASE_LABELS = {
+    0: "Local prerequisites",
+    1: "Source cluster",
+    2: "Destination cluster",
+    3: "Schema Registry",
+    4: "Product / API settings",
+    5: "Persistence",
+}
+
+
+def _restore_inputs(inputs, saved: dict) -> None:
+    """Copy saved field values back onto a fresh BootstrapInputs so skipped
+    phases still have working credentials for later validation / config
+    rendering. Unknown keys are ignored — the dataclass shape is the source
+    of truth, not the checkpoint."""
+    if not saved:
+        return
+    for key, value in saved.items():
+        if hasattr(inputs, key):
+            setattr(inputs, key, value)
 
 
 # Phase headers map an internal phase number to a step counter so the
@@ -411,244 +478,315 @@ def _prompt_for_missing_from_config(inputs: BootstrapInputs, load_result: Config
     return inputs, token_json
 
 
-def collect_interactive_inputs() -> tuple[BootstrapInputs, str | None]:
+def _reconstruct_token_json_on_resume(inputs: BootstrapInputs) -> str | None:
+    """When phase 4 was already completed and the operator is resuming, the
+    in-memory token_json has been lost (it was never persisted). Rebuild it
+    from inputs so write_local_config still writes
+    secrets/auditlens-api-tokens.json. Only "generate" mode is fully
+    reconstructable from the checkpoint alone; "existing" mode returns None
+    and falls back to the file that should already be on disk."""
+    if not inputs.api_auth_enabled or not inputs.generated_admin_token:
+        return None
+    if inputs.api_token_mode != "generate":
+        return None
+    entries = [{
+        "token": inputs.generated_admin_token,
+        "actor_id": "auditlens-bootstrap-admin",
+        "role": "admin",
+        "organizations": ["*"],
+        "environments": ["*"],
+        "clusters": ["*"],
+    }]
+    return render_token_json(entries)
+
+
+def collect_interactive_inputs(
+    completed: list[int] | None = None,
+    saved: dict | None = None,
+) -> tuple[BootstrapInputs, str | None]:
     inputs = BootstrapInputs()
+    _restore_inputs(inputs, saved or {})
+    if completed is None:
+        completed = []
+    token_json: str | None = None
 
-    print_phase_header(0, "Local prerequisites")
-    check_local_prerequisites(REPO_ROOT)
-    ok_line("Local prerequisites validated.")
-    print()
+    # ── Phase 0 ─────────────────────────────────────────────────────────
+    if 0 in completed:
+        skip_line(f"Phase 0 ({_PHASE_LABELS[0]}) already done — skipping.")
+    else:
+        print_phase_header(0, "Local prerequisites")
+        check_local_prerequisites(REPO_ROOT)
+        ok_line("Local prerequisites validated.")
+        print()
 
-    inputs.deployment_mode = prompt_choice(
-        "Deployment mode",
-        ["docker", "kubernetes"],
-        "docker",
-        help_text="Choose Docker for local first-time installation. Use Kubernetes only if you already have kubectl access and image delivery handled.",
-    )
-
-    print_phase_header(1, "Source cluster walkthrough")
-    if prompt_bool(
-        "Need help finding your source audit-log cluster details",
-        default=False,
-        help_text="Shows the Confluent CLI commands that identify the audit-log topic, cluster, service account, and API key path.",
-    ):
-        print_source_cluster_help()
-
-    inputs.source_display_name = prompt_text(
-        "Source cluster display name",
-        default="Confluent Cloud Audit Logs",
-        help_text="Display-only label used in installer summaries. This is not a Confluent technical ID and is safe to leave as the default.",
-    )
-    inputs.audit_bootstrap = prompt_text(
-        "Source bootstrap endpoint",
-        help_text="Example: pkc-xxxxx.us-west-2.aws.confluent.cloud:9092. Get it from the Kafka cluster settings for the audit-log cluster. It does not come from `confluent audit-log describe`.",
-        url_hint=URL_HINT_BOOTSTRAP,
-    )
-    inputs.audit_api_key = prompt_text(
-        "Source Kafka API key",
-        secret=True,
-        help_text="Use a Kafka API key scoped to the audit-log cluster. `confluent api-key list --resource <CLUSTER_ID>` or create one for the audit-log service account.",
-        url_hint=URL_HINT_KAFKA_API_KEY,
-    )
-    inputs.audit_api_secret = prompt_text(
-        "Source Kafka API secret",
-        secret=True,
-        help_text="Required secret for the source Kafka API key. It is kept masked and never echoed back.",
-    )
-    inputs.audit_topic = prompt_text(
-        "Source audit topic",
-        default=SOURCE_AUDIT_TOPIC,
-        help_text="Required technical value. Use the topic name from `confluent audit-log describe`. Confluent Cloud audit logs usually use confluent-audit-log-events.",
-    )
-    inputs.group_id = prompt_text(
-        "Consumer group",
-        default="auditlens-forwarder-v1",
-        help_text="Required. This controls Kafka-managed offsets for the forwarder.",
-    )
-    inputs.auto_offset_reset = prompt_choice(
-        "Offset reset policy",
-        ["earliest", "latest"],
-        "earliest",
-        help_text="Use earliest for first-time installs if you want to inspect retained audit history. Use latest if you only want new events.",
-    )
-    source_result = validate_source_access(inputs)
-    ok_line(
-        f"Source validated — topic={source_result.topic}, partitions={source_result.partitions}, "
-        f"retained_events={'yes' if source_result.retained_messages_present else 'no'}"
-    )
-
-    print_phase_header(2, "Destination cluster walkthrough")
-    inputs.destination_display_name = prompt_text(
-        "Destination cluster display name",
-        default="AuditLens Internal Kafka",
-        help_text="A friendly label for the Kafka cluster where AuditLens writes raw, enriched, signal, alert, and DLQ topics.",
-    )
-    inputs.dest_bootstrap = prompt_text(
-        "Destination bootstrap endpoint",
-        help_text="Example: pkc-yyyyy.ap-south-1.aws.confluent.cloud:9092.",
-        url_hint=URL_HINT_BOOTSTRAP,
-    )
-    inputs.dest_api_key = prompt_text(
-        "Destination Kafka API key",
-        secret=True,
-        help_text="Must allow metadata access and preferably topic creation for the canonical AuditLens topics.",
-        url_hint=URL_HINT_KAFKA_API_KEY,
-    )
-    inputs.dest_api_secret = prompt_text(
-        "Destination Kafka API secret",
-        secret=True,
-        help_text="Required. Kept masked and never echoed back.",
-    )
-    inputs.topics_exist = prompt_bool(
-        "Do the canonical destination topics already exist",
-        default=False,
-        help_text="If you answer no, the installer will try to create the canonical topics: "
-                  + ", ".join(CANONICAL_TOPICS),
-    )
-    dest_result = validate_destination_and_topics(inputs, create_missing_topics=not inputs.topics_exist)
-    ok_line(f"Destination validated — {len(dest_result.verified_topics)} canonical topics ready.")
-
-    print_phase_header(3, "Schema Registry walkthrough")
-    inputs.schema_registry_enabled = prompt_bool(
-        "Use Schema Registry",
-        default=False,
-        help_text="Enable this only if your deployment uses Schema Registry and you want the installer to validate it up front.",
-    )
-    if inputs.schema_registry_enabled:
-        inputs.schema_registry_url = prompt_text(
-            "Schema Registry URL",
-            help_text="Example: https://psrc-xxxxx.us-west-2.aws.confluent.cloud",
-            url_hint=URL_HINT_SCHEMA_REGISTRY,
+        inputs.deployment_mode = prompt_choice(
+            "Deployment mode",
+            ["docker", "kubernetes"],
+            "docker",
+            help_text="Choose Docker for local first-time installation. Use Kubernetes only if you already have kubectl access and image delivery handled.",
         )
-        inputs.schema_registry_api_key = prompt_text(
-            "Schema Registry API key",
+        completed.append(0)
+        save_checkpoint(completed, inputs)
+        ok_line("Progress saved.")
+
+    # ── Phase 1 ─────────────────────────────────────────────────────────
+    if 1 in completed:
+        skip_line(f"Phase 1 ({_PHASE_LABELS[1]}) already done — skipping.")
+    else:
+        print_phase_header(1, "Source cluster walkthrough")
+        if prompt_bool(
+            "Need help finding your source audit-log cluster details",
+            default=False,
+            help_text="Shows the Confluent CLI commands that identify the audit-log topic, cluster, service account, and API key path.",
+        ):
+            print_source_cluster_help()
+
+        inputs.source_display_name = prompt_text(
+            "Source cluster display name",
+            default="Confluent Cloud Audit Logs",
+            help_text="Display-only label used in installer summaries. This is not a Confluent technical ID and is safe to leave as the default.",
+        )
+        inputs.audit_bootstrap = prompt_text(
+            "Source bootstrap endpoint",
+            help_text="Example: pkc-xxxxx.us-west-2.aws.confluent.cloud:9092. Get it from the Kafka cluster settings for the audit-log cluster. It does not come from `confluent audit-log describe`.",
+            url_hint=URL_HINT_BOOTSTRAP,
+        )
+        inputs.audit_api_key = prompt_text(
+            "Source Kafka API key",
             secret=True,
-            help_text="Required only when Schema Registry is enabled.",
+            help_text="Use a Kafka API key scoped to the audit-log cluster. `confluent api-key list --resource <CLUSTER_ID>` or create one for the audit-log service account.",
+            url_hint=URL_HINT_KAFKA_API_KEY,
         )
-        inputs.schema_registry_api_secret = prompt_text(
-            "Schema Registry API secret",
+        inputs.audit_api_secret = prompt_text(
+            "Source Kafka API secret",
             secret=True,
-            help_text="Required only when Schema Registry is enabled.",
+            help_text="Required secret for the source Kafka API key. It is kept masked and never echoed back.",
         )
-        sr_result = validate_schema_registry_access(inputs)
+        inputs.audit_topic = prompt_text(
+            "Source audit topic",
+            default=SOURCE_AUDIT_TOPIC,
+            help_text="Required technical value. Use the topic name from `confluent audit-log describe`. Confluent Cloud audit logs usually use confluent-audit-log-events.",
+        )
+        inputs.group_id = prompt_text(
+            "Consumer group",
+            default="auditlens-forwarder-v1",
+            help_text="Required. This controls Kafka-managed offsets for the forwarder.",
+        )
+        inputs.auto_offset_reset = prompt_choice(
+            "Offset reset policy",
+            ["earliest", "latest"],
+            "earliest",
+            help_text="Use earliest for first-time installs if you want to inspect retained audit history. Use latest if you only want new events.",
+        )
+        source_result = validate_source_access(inputs)
         ok_line(
-            f"Schema Registry validated — subjects_checked="
-            f"{'yes' if sr_result.subjects_checked else 'no'}, subject_count={sr_result.subject_count}"
+            f"Source validated — topic={source_result.topic}, partitions={source_result.partitions}, "
+            f"retained_events={'yes' if source_result.retained_messages_present else 'no'}"
         )
-    else:
-        skip_line("Schema Registry skipped.")
+        completed.append(1)
+        save_checkpoint(completed, inputs)
+        ok_line("Progress saved.")
 
-    print_phase_header(4, "Product / API settings")
-    inputs.api_auth_enabled = prompt_bool(
-        "Enable API authentication",
-        default=True,
-        help_text="Recommended. The installer can generate a secure local admin token file for first-time use.",
-    )
-    token_json = None
-    if inputs.api_auth_enabled:
-        inputs.api_token_mode = prompt_choice(
-            "API auth token mode",
-            ["generate", "existing"],
-            "generate",
-            help_text="Choose generate for a local first-use token, or existing to point at a prepared token JSON file.",
+    # ── Phase 2 ─────────────────────────────────────────────────────────
+    if 2 in completed:
+        skip_line(f"Phase 2 ({_PHASE_LABELS[2]}) already done — skipping.")
+    else:
+        print_phase_header(2, "Destination cluster walkthrough")
+        inputs.destination_display_name = prompt_text(
+            "Destination cluster display name",
+            default="AuditLens Internal Kafka",
+            help_text="A friendly label for the Kafka cluster where AuditLens writes raw, enriched, signal, alert, and DLQ topics.",
         )
-        if inputs.api_token_mode == "generate":
-            generated_token, entries = make_api_token()
-            inputs.generated_admin_token = generated_token
-            token_json = render_token_json(entries)
+        inputs.dest_bootstrap = prompt_text(
+            "Destination bootstrap endpoint",
+            help_text="Example: pkc-yyyyy.ap-south-1.aws.confluent.cloud:9092.",
+            url_hint=URL_HINT_BOOTSTRAP,
+        )
+        inputs.dest_api_key = prompt_text(
+            "Destination Kafka API key",
+            secret=True,
+            help_text="Must allow metadata access and preferably topic creation for the canonical AuditLens topics.",
+            url_hint=URL_HINT_KAFKA_API_KEY,
+        )
+        inputs.dest_api_secret = prompt_text(
+            "Destination Kafka API secret",
+            secret=True,
+            help_text="Required. Kept masked and never echoed back.",
+        )
+        inputs.topics_exist = prompt_bool(
+            "Do the canonical destination topics already exist",
+            default=False,
+            help_text="If you answer no, the installer will try to create the canonical topics: "
+                      + ", ".join(CANONICAL_TOPICS),
+        )
+        dest_result = validate_destination_and_topics(inputs, create_missing_topics=not inputs.topics_exist)
+        ok_line(f"Destination validated — {len(dest_result.verified_topics)} canonical topics ready.")
+        completed.append(2)
+        save_checkpoint(completed, inputs)
+        ok_line("Progress saved.")
+
+    # ── Phase 3 ─────────────────────────────────────────────────────────
+    if 3 in completed:
+        skip_line(f"Phase 3 ({_PHASE_LABELS[3]}) already done — skipping.")
+    else:
+        print_phase_header(3, "Schema Registry walkthrough")
+        inputs.schema_registry_enabled = prompt_bool(
+            "Use Schema Registry",
+            default=False,
+            help_text="Enable this only if your deployment uses Schema Registry and you want the installer to validate it up front.",
+        )
+        if inputs.schema_registry_enabled:
+            inputs.schema_registry_url = prompt_text(
+                "Schema Registry URL",
+                help_text="Example: https://psrc-xxxxx.us-west-2.aws.confluent.cloud",
+                url_hint=URL_HINT_SCHEMA_REGISTRY,
+            )
+            inputs.schema_registry_api_key = prompt_text(
+                "Schema Registry API key",
+                secret=True,
+                help_text="Required only when Schema Registry is enabled.",
+            )
+            inputs.schema_registry_api_secret = prompt_text(
+                "Schema Registry API secret",
+                secret=True,
+                help_text="Required only when Schema Registry is enabled.",
+            )
+            sr_result = validate_schema_registry_access(inputs)
+            ok_line(
+                f"Schema Registry validated — subjects_checked="
+                f"{'yes' if sr_result.subjects_checked else 'no'}, subject_count={sr_result.subject_count}"
+            )
         else:
-            existing_token_path = Path(prompt_text(
-                "Existing API token file path",
-                default=str(REPO_ROOT / "secrets" / "auditlens-api-tokens.json"),
-                help_text="Path to a JSON file containing API auth token records.",
-            ))
-            if not existing_token_path.exists():
-                raise BootstrapError(f"Token file does not exist: {existing_token_path}")
-            token_json = existing_token_path.read_text(encoding="utf-8")
-            payload = json.loads(token_json)
-            if not isinstance(payload, list) or not payload or "token" not in payload[0]:
-                raise BootstrapError("Existing API token file must contain a non-empty list of token objects.")
-            inputs.generated_admin_token = payload[0]["token"]
-        inputs.api_auth_token_file = "/run/secrets/auditlens-api-tokens.json"
+            skip_line("Schema Registry skipped.")
+        completed.append(3)
+        save_checkpoint(completed, inputs)
+        ok_line("Progress saved.")
+
+    # ── Phase 4 ─────────────────────────────────────────────────────────
+    if 4 in completed:
+        skip_line(f"Phase 4 ({_PHASE_LABELS[4]}) already done — skipping.")
+        token_json = _reconstruct_token_json_on_resume(inputs)
     else:
-        inputs.api_token_mode = "disabled"
-        inputs.generated_admin_token = ""
-
-    inputs.dashboard_port = prompt_int(
-        "Dashboard port",
-        DEFAULT_DASHBOARD_PORT,
-        help_text="Local browser port for Streamlit. Default 8503.",
-    )
-    inputs.metrics_port = prompt_int(
-        "Metrics/API port",
-        DEFAULT_METRICS_PORT,
-        help_text="Local forwarder health, metrics, and API port. Default 8003.",
-    )
-    inputs.mcp_port = prompt_int(
-        "MCP port",
-        DEFAULT_MCP_PORT,
-        help_text="Reserved for the optional future MCP profile. Keep it free even if you do not enable that profile now.",
-    )
-    inputs.landing_port = prompt_int(
-        "Landing page port",
-        DEFAULT_LANDING_PORT,
-        help_text="Local single-entry AuditLens landing page port. Default 8088.",
-    )
-    validate_port_choices(
-        inputs.metrics_port,
-        inputs.dashboard_port,
-        inputs.mcp_port,
-        inputs.landing_port,
-        allowed_in_use_ports=existing_auditlens_bound_ports(inputs),
-    )
-
-    inputs.alerting_webhook = prompt_text(
-        "Optional generic alerting webhook",
-        required=False,
-        help_text="Optional. Basic format validation only. Leave blank to skip.",
-    )
-    inputs.slack_webhook = prompt_text(
-        "Optional Slack webhook",
-        required=False,
-        help_text="Optional. Basic format validation only. Leave blank to skip.",
-    )
-    if inputs.alerting_webhook and not inputs.alerting_webhook.startswith(("http://", "https://")):
-        raise BootstrapError("Alerting webhook must start with http:// or https://")
-    if inputs.slack_webhook and not inputs.slack_webhook.startswith("https://"):
-        raise BootstrapError("Slack webhook must start with https://")
-
-    print_phase_header(5, "Persistence validation")
-    inputs.persistence_enabled = prompt_bool(
-        "Enable persistence",
-        default=True,
-        help_text="Recommended. Persistence backs API search/export and replay-aware runtime state.",
-    )
-    if inputs.persistence_enabled:
-        inputs.persistence_backend = prompt_choice(
-            "Persistence backend",
-            ["sqlite"],
-            "sqlite",
-            help_text="The current supported backend is sqlite.",
+        print_phase_header(4, "Product / API settings")
+        inputs.api_auth_enabled = prompt_bool(
+            "Enable API authentication",
+            default=True,
+            help_text="Recommended. The installer can generate a secure local admin token file for first-time use.",
         )
-        inputs.persistence_db_path = prompt_text(
-            "SQLite DB path",
-            default="/var/lib/auditlens/auditlens.db",
-            help_text="The default path is mounted into a Docker named volume or Kubernetes PVC.",
+        if inputs.api_auth_enabled:
+            inputs.api_token_mode = prompt_choice(
+                "API auth token mode",
+                ["generate", "existing"],
+                "generate",
+                help_text="Choose generate for a local first-use token, or existing to point at a prepared token JSON file.",
+            )
+            if inputs.api_token_mode == "generate":
+                generated_token, entries = make_api_token()
+                inputs.generated_admin_token = generated_token
+                token_json = render_token_json(entries)
+            else:
+                existing_token_path = Path(prompt_text(
+                    "Existing API token file path",
+                    default=str(REPO_ROOT / "secrets" / "auditlens-api-tokens.json"),
+                    help_text="Path to a JSON file containing API auth token records.",
+                ))
+                if not existing_token_path.exists():
+                    raise BootstrapError(f"Token file does not exist: {existing_token_path}")
+                token_json = existing_token_path.read_text(encoding="utf-8")
+                payload = json.loads(token_json)
+                if not isinstance(payload, list) or not payload or "token" not in payload[0]:
+                    raise BootstrapError("Existing API token file must contain a non-empty list of token objects.")
+                inputs.generated_admin_token = payload[0]["token"]
+            inputs.api_auth_token_file = "/run/secrets/auditlens-api-tokens.json"
+        else:
+            inputs.api_token_mode = "disabled"
+            inputs.generated_admin_token = ""
+
+        inputs.dashboard_port = prompt_int(
+            "Dashboard port",
+            DEFAULT_DASHBOARD_PORT,
+            help_text="Local browser port for Streamlit. Default 8503.",
         )
-    # Prepare the host directory backing persistence_db_path so the
-    # validate_persistence_config docker run does not fail with
-    # `unable to open database file` on a fresh host. Best-effort.
-    ensure_persistence_dir(inputs)
-    try:
-        persistence_result = validate_persistence_config(inputs, REPO_ROOT)
-        ok_line(f"Persistence validated — {persistence_result.message}")
-    except BootstrapError as exc:
-        # Preflight is informational. Compose will create the bind-mount
-        # path on first `up`, so a preflight miss is not fatal here.
-        warn_line(
-            f"Persistence preflight skipped: {exc}. "
-            "Compose will create the host directory on first start."
+        inputs.metrics_port = prompt_int(
+            "Metrics/API port",
+            DEFAULT_METRICS_PORT,
+            help_text="Local forwarder health, metrics, and API port. Default 8003.",
         )
+        inputs.mcp_port = prompt_int(
+            "MCP port",
+            DEFAULT_MCP_PORT,
+            help_text="Reserved for the optional future MCP profile. Keep it free even if you do not enable that profile now.",
+        )
+        inputs.landing_port = prompt_int(
+            "Landing page port",
+            DEFAULT_LANDING_PORT,
+            help_text="Local single-entry AuditLens landing page port. Default 8088.",
+        )
+        validate_port_choices(
+            inputs.metrics_port,
+            inputs.dashboard_port,
+            inputs.mcp_port,
+            inputs.landing_port,
+            allowed_in_use_ports=existing_auditlens_bound_ports(inputs),
+        )
+
+        inputs.alerting_webhook = prompt_text(
+            "Optional generic alerting webhook",
+            required=False,
+            help_text="Optional. Basic format validation only. Leave blank to skip.",
+        )
+        inputs.slack_webhook = prompt_text(
+            "Optional Slack webhook",
+            required=False,
+            help_text="Optional. Basic format validation only. Leave blank to skip.",
+        )
+        if inputs.alerting_webhook and not inputs.alerting_webhook.startswith(("http://", "https://")):
+            raise BootstrapError("Alerting webhook must start with http:// or https://")
+        if inputs.slack_webhook and not inputs.slack_webhook.startswith("https://"):
+            raise BootstrapError("Slack webhook must start with https://")
+        completed.append(4)
+        save_checkpoint(completed, inputs)
+        ok_line("Progress saved.")
+
+    # ── Phase 5 ─────────────────────────────────────────────────────────
+    if 5 in completed:
+        skip_line(f"Phase 5 ({_PHASE_LABELS[5]}) already done — skipping.")
+    else:
+        print_phase_header(5, "Persistence validation")
+        inputs.persistence_enabled = prompt_bool(
+            "Enable persistence",
+            default=True,
+            help_text="Recommended. Persistence backs API search/export and replay-aware runtime state.",
+        )
+        if inputs.persistence_enabled:
+            inputs.persistence_backend = prompt_choice(
+                "Persistence backend",
+                ["sqlite"],
+                "sqlite",
+                help_text="The current supported backend is sqlite.",
+            )
+            inputs.persistence_db_path = prompt_text(
+                "SQLite DB path",
+                default="/var/lib/auditlens/auditlens.db",
+                help_text="The default path is mounted into a Docker named volume or Kubernetes PVC.",
+            )
+        # Prepare the host directory backing persistence_db_path so the
+        # validate_persistence_config docker run does not fail with
+        # `unable to open database file` on a fresh host. Best-effort.
+        ensure_persistence_dir(inputs)
+        try:
+            persistence_result = validate_persistence_config(inputs, REPO_ROOT)
+            ok_line(f"Persistence validated — {persistence_result.message}")
+        except BootstrapError as exc:
+            # Preflight is informational. Compose will create the bind-mount
+            # path on first `up`, so a preflight miss is not fatal here.
+            warn_line(
+                f"Persistence preflight skipped: {exc}. "
+                "Compose will create the host directory on first start."
+            )
+        completed.append(5)
+        save_checkpoint(completed, inputs)
+        ok_line("Progress saved.")
 
     return inputs, token_json
 
@@ -894,10 +1032,92 @@ def print_final_summary(
         print()
 
 
+def _show_resume_prompt(cp: dict) -> list[int]:
+    """Render the resume / start-fresh prompt for a checkpoint that already
+    exists on disk. Returns the list of completed phase numbers to honour on
+    this run (empty list if the operator chose to start fresh)."""
+    completed_phases = list(cp.get("completed_phases", []))
+    remaining = [p for p in [0, 1, 2, 3, 4, 5] if p not in completed_phases]
+    next_label = _PHASE_LABELS.get(remaining[0], "Startup") if remaining else "Startup"
+
+    print()
+    print(bold(cyan("⚡  Previous setup found (was interrupted).")))
+    done_label = ", ".join(_PHASE_LABELS[p] for p in completed_phases) or "none"
+    print(f"   Already done : {done_label}")
+    print(f"   Will resume  : {next_label}")
+    print()
+    ans = input("   Resume where you left off? [Y/n] ").strip().lower()
+    if ans in ("", "y", "yes"):
+        ok_line("Resuming — skipping completed phases…")
+        return completed_phases
+    ans2 = input("   Start fresh? Clears saved progress. [y/N] ").strip().lower()
+    if ans2 in ("y", "yes"):
+        delete_checkpoint()
+        warn_line("Checkpoint cleared. Starting fresh.")
+        return []
+    print("Exiting.")
+    sys.exit(0)
+
+
+def _show_skip_setup_banner() -> None:
+    """Print the one-shot 'edit .env yourself and skip the wizard' banner,
+    then block on input() so the operator can read it. Ctrl-C / EOF exits
+    cleanly rather than dropping into the wizard."""
+    bar = "━" * 60
+    print()
+    print(bold(cyan(bar)))
+    print(bold(cyan("  ⚡  Already know your cluster details? Skip the wizard.")))
+    print(bold(cyan(bar)))
+    print()
+    print("    Edit .env directly and start with one command:")
+    print()
+    print(bold("      docker compose -f docker-compose.prod.yml up -d"))
+    print()
+    print("    Minimum .env fields needed:")
+    print()
+    print(dim("      # ── Source cluster (Confluent Cloud audit-log) ──────────"))
+    print("      AUDIT_BOOTSTRAP=pkc-xxxxx.us-west-2.aws.confluent.cloud:9092")
+    print("      AUDIT_API_KEY=ABCDE12345ABCDE")
+    print("      AUDIT_API_SECRET=your+source+api+secret")
+    print()
+    print(dim("      # ── Destination cluster (AuditLens internal) ────────────"))
+    print("      DEST_BOOTSTRAP=pkc-yyyyy.us-east-2.aws.confluent.cloud:9092")
+    print("      DEST_API_KEY=FGHIJ67890FGHIJ")
+    print("      DEST_API_SECRET=your+dest+api+secret")
+    print()
+    print("    Where to find these:")
+    print(f"      Bootstrap endpoint : {link('https://confluent.cloud', 'Confluent Cloud')} → Cluster → Settings → Endpoints")
+    print(f"      API keys           : {link('https://confluent.cloud', 'Confluent Cloud')} → Cluster → API Keys → + Add key")
+    print()
+    print(dim("    Press Enter to run the wizard, or Ctrl-C to quit."))
+    try:
+        input()
+    except (KeyboardInterrupt, EOFError):
+        print()
+        print("Exiting setup.")
+        sys.exit(0)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="AuditLens guided installer")
     parser.add_argument("--config-file", help="YAML or JSON file for template-driven installation")
     args = parser.parse_args()
+
+    completed: list[int] = []
+    saved_inputs: dict = {}
+
+    # Resume + skip-setup UX is interactive-only. Config-file mode is
+    # template-driven (no operator at the keyboard) so we skip both.
+    if not args.config_file and stdin_is_interactive():
+        cp = load_checkpoint()
+        if cp:
+            completed = _show_resume_prompt(cp)
+            saved_inputs = cp.get("inputs", {}) if completed else {}
+
+        # The "edit .env yourself" hint only makes sense on a clean start.
+        # Resuming operators have already started the wizard once.
+        if not completed:
+            _show_skip_setup_banner()
 
     try:
         ensure_python_deps()
@@ -907,7 +1127,7 @@ def main() -> int:
             load_result = load_install_config_file(Path(args.config_file))
             inputs, token_json = _prompt_for_missing_from_config(load_result.inputs, load_result)
         else:
-            inputs, token_json = collect_interactive_inputs()
+            inputs, token_json = collect_interactive_inputs(completed, saved_inputs)
 
         validate_port_choices(
             inputs.metrics_port,
@@ -973,6 +1193,11 @@ def main() -> int:
         finally:
             for proc in port_forward_processes:
                 proc.terminate()
+
+        # Compose up + runtime validation made it here — clear the checkpoint
+        # so the next invocation starts fresh rather than offering to resume
+        # a successful install.
+        delete_checkpoint()
 
         print_final_summary(
             inputs,
