@@ -66,6 +66,7 @@ services:
       - ./data/forwarder:/app/data
       - ./secrets:/run/secrets:ro
       - ./actor_mappings.yml:/app/actor_mappings.yml:ro
+      - ./notifications.yml:/app/notifications.yml:ro
     ports:
       - "127.0.0.1:${METRICS_PORT:-8003}:${METRICS_PORT:-8003}"
     logging:
@@ -127,6 +128,7 @@ services:
       - CONFLUENT_CLOUD_API_SECRET=${CONFLUENT_CLOUD_API_SECRET:-}
     volumes:
       - auditlens_data:/var/lib/auditlens
+      - ./notifications.yml:/app/notifications.yml
     networks:
       - kafka-network
       - frontend-network
