@@ -457,6 +457,68 @@ ensure_ports() {
     fi
 }
 
+# ───────────────────────── .env bootstrap (FIX 5) ────────────────────────
+# Seed .env from .env.example on first run. Never overwrite an existing .env —
+# operators commonly hand-edit credentials and we must not blow that away.
+ensure_env_file() {
+    local target="$SCRIPT_DIR/.env"
+    local source="$SCRIPT_DIR/.env.example"
+    if [ -f "$target" ]; then
+        info ".env already present — leaving it alone."
+        return 0
+    fi
+    if [ ! -f "$source" ]; then
+        warn ".env not found and .env.example missing — create .env manually before starting AuditLens."
+        return 0
+    fi
+    cp "$source" "$target"
+    ok "Created .env from .env.example"
+    warn "Edit $target with your Confluent credentials before starting AuditLens."
+}
+
+# ───────────────────────── Python dependencies (FIX 1) ───────────────────
+# Create a virtualenv with the verified python3.11+ interpreter and install
+# requirements.txt before handing off to the bootstrap installer. Without
+# this, a fresh clone fails on the first `from src.product.bootstrap import …`
+# with ModuleNotFoundError: No module named 'orjson'.
+ensure_python_deps() {
+    local venv_dir="$SCRIPT_DIR/.venv"
+    local req="$SCRIPT_DIR/requirements.txt"
+    if [ ! -f "$req" ]; then
+        warn "requirements.txt not found at $req — skipping dep install; bootstrap may fail."
+        return 0
+    fi
+    if [ ! -x "$venv_dir/bin/python" ]; then
+        info "Creating virtualenv at $venv_dir using $PYTHON…"
+        if ! "$PYTHON" -m venv "$venv_dir"; then
+            fail "Failed to create virtualenv. The python-venv package may be missing."
+            case "$OS" in
+                ubuntu|debian) echo "  Try: sudo apt-get install -y python3.11-venv" ;;
+                amzn|rhel)     echo "  Try: sudo dnf install -y python3.11-pip" ;;
+                macos)         echo "  Reinstall python via: brew reinstall python@3.11" ;;
+            esac
+            exit 1
+        fi
+    else
+        info "Virtualenv already present at $venv_dir."
+    fi
+    # Switch the bootstrap interpreter to the venv copy so module-level
+    # imports in scripts/deprecated/bootstrap_auditlens.py resolve.
+    PYTHON="$venv_dir/bin/python"
+    info "Installing Python dependencies (this can take a minute)…"
+    # Best-effort pip upgrade — old pip can trip on modern wheel resolvers.
+    if ! "$venv_dir/bin/pip" install -q --upgrade pip >/dev/null 2>&1; then
+        warn "pip self-upgrade failed (non-fatal) — continuing with bundled pip."
+    fi
+    if ! "$venv_dir/bin/pip" install -q -r "$req"; then
+        fail "pip install -r requirements.txt failed."
+        echo "  Re-run with verbose output for details:"
+        echo "    $venv_dir/bin/pip install -r $req"
+        exit 1
+    fi
+    ok "Python dependencies installed."
+}
+
 # ───────────────────────── Main flow ─────────────────────────────────────
 main() {
     detect_os
@@ -483,9 +545,14 @@ main() {
     echo "Continuing setup..."
     echo ""
 
+    ensure_env_file
+    ensure_python_deps
+
     # Hand off to the guided installer.
     # PYTHONPATH must include the repo root so `scripts.deprecated` resolves
-    # regardless of the user's cwd.
+    # regardless of the user's cwd. PYTHON now points at the venv interpreter
+    # populated by ensure_python_deps so module-level imports in bootstrap
+    # (orjson, fastapi, etc.) resolve on a fresh clone.
     PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}" \
         exec "$PYTHON" "$SCRIPT_DIR/scripts/bootstrap_auditlens.py" "$@"
 }
