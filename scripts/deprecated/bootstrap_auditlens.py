@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import getpass
 import json
+import os
 import shlex
 import stat
 import subprocess
@@ -791,10 +792,23 @@ def collect_interactive_inputs(
                 "sqlite",
                 help_text="The current supported backend is sqlite.",
             )
+            # Path depends on deployment mode because docker bind-mounts
+            # ./data/forwarder as /app/data while k8s mounts the PVC at
+            # /var/lib/auditlens. Suggesting the wrong default puts the DB
+            # file on a tmpfs / unmounted path inside the container.
+            default_db_path = (
+                "/app/data/auditlens.db"
+                if inputs.deployment_mode == "docker"
+                else "/var/lib/auditlens/auditlens.db"
+            )
             inputs.persistence_db_path = prompt_text(
                 "SQLite DB path",
-                default="/var/lib/auditlens/auditlens.db",
-                help_text="The default path is mounted into a Docker named volume or Kubernetes PVC.",
+                default=default_db_path,
+                help_text=(
+                    "Docker bind-mounts ./data/forwarder as /app/data; "
+                    "Kubernetes mounts a PVC at /var/lib/auditlens. The "
+                    "default matches the deployment mode you picked."
+                ),
             )
         # Prepare the host directory backing persistence_db_path so the
         # validate_persistence_config docker run does not fail with
@@ -840,6 +854,40 @@ def write_local_config(inputs: BootstrapInputs, token_json: str | None) -> list[
     if inputs.generated_admin_token:
         write_text_file(admin_token_path, inputs.generated_admin_token + "\n", mode=0o600)
     return backups
+
+
+def _ensure_host_directories() -> None:
+    """Pre-create bind-mount host directories before `docker compose up`.
+    When compose first sees a missing bind-mount source path, it creates the
+    directory as root — that breaks the forwarder which runs as uid 1000
+    and can't write into a root-owned /app/data on fresh EC2 hosts.
+
+    forwarder bind-mounts ./data/forwarder as /app/data and ./secrets as
+    /run/secrets. ./data/postgres and ./data/grafana are pre-created
+    defensively in case future compose changes bind-mount them.
+
+    Chown to the *current* user (typically uid 1000 on Amazon Linux
+    ec2-user). On macOS this is a no-op for ownership purposes — Docker
+    Desktop maps host ↔ container uid transparently.
+    """
+    paths = [
+        REPO_ROOT / "data" / "forwarder",
+        REPO_ROOT / "data" / "postgres",
+        REPO_ROOT / "data" / "grafana",
+        REPO_ROOT / "secrets",
+    ]
+    uid = os.geteuid()
+    gid = os.getegid()
+    for path in paths:
+        os.makedirs(path, exist_ok=True)
+        try:
+            os.chown(path, uid, gid)
+        except (PermissionError, OSError) as exc:
+            # Best-effort: a directory we don't own (e.g. left by a prior
+            # root-owned compose run) will refuse the chown — log but
+            # continue. The operator can `sudo chown -R $USER:$USER data/`
+            # manually if compose still complains about permissions.
+            warn_line(f"Could not chown {path} ({exc.__class__.__name__}). Continuing.")
 
 
 def deploy_docker() -> None:
@@ -1232,6 +1280,7 @@ def main() -> int:
         try:
             print_phase_header(7, "Startup")
             if inputs.deployment_mode == "docker":
+                _ensure_host_directories()
                 deploy_docker()
             else:
                 pf_forwarder, pf_dashboard = deploy_kubernetes(inputs, token_json)
