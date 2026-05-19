@@ -3,7 +3,7 @@ import logging
 from datetime import datetime, timezone
 
 import sqlalchemy as sa
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, select
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, object_session
 
 from src.product.actor_enrichment import enrich_actor
@@ -88,6 +88,13 @@ class AuditEvent(Base):
     _decision_reason: Mapped[str | None] = mapped_column("decision_reason", String(255), nullable=True)
     _decision_label: Mapped[str | None] = mapped_column("decision_label", String(32), nullable=True)
     _recommended_action: Mapped[str | None] = mapped_column("recommended_action", String(255), nullable=True)
+    # Flattened data_json subfields — mirror src/product/db_writer.py audit_events table.
+    auth_granted: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    auth_operation: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    auth_resource_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    auth_pattern_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    result_resource_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    access_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
     summary: Mapped[str] = mapped_column(Text, default="", nullable=False)
     raw_payload_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
     is_failure: Mapped[bool] = mapped_column(default=False, nullable=False)

@@ -536,6 +536,23 @@ def normalize_event(payload: dict[str, Any]) -> dict[str, Any]:
     # classifier currently bins as attention/config_changed despite being
     # pure reads. validateOnly (dry-run preflight) still wins below.
     _read_only_access = _is_read_only_access(payload)
+    # Flattened data_json subfields. flatten_audit() already lifted
+    # authorizationInfo.{granted,operation,resourceType,patternType} to
+    # top-level keys, so we read them straight from `payload`. accessType
+    # and result.data.id need a dip into data/data_json.
+    _data_dict = _data(payload)
+    _request = _data_dict.get("request") if isinstance(_data_dict.get("request"), dict) else {}
+    _result_block = _data_dict.get("result") if isinstance(_data_dict.get("result"), dict) else {}
+    _result_data = _result_block.get("data") if isinstance(_result_block.get("data"), dict) else {}
+    _granted_raw = payload.get("granted")
+    flat_auth = {
+        "auth_granted": bool(_granted_raw) if isinstance(_granted_raw, bool) else None,
+        "auth_operation": _as_text(payload.get("operation")) or None,
+        "auth_resource_type": _as_text(payload.get("resourceType")) or None,
+        "auth_pattern_type": _as_text(payload.get("patternType")) or None,
+        "result_resource_id": _as_text(_result_data.get("id")) or None,
+        "access_type": _as_text(_request.get("accessType")) or None,
+    }
     summary = _as_text(payload.get("summary") or payload.get("message"))
     if not summary:
         summary = f"{actor} {humanize_action(payload)} {resource_info['resource_display']}".strip()
@@ -596,6 +613,7 @@ def normalize_event(payload: dict[str, Any]) -> dict[str, Any]:
         "decision_label": decision["decision_label"],
         "recommended_action": decision["recommended_action"],
         "client_tool": _resolve_client_tool(payload, source_info.get("client_id")),
+        **flat_auth,
     }
 
 

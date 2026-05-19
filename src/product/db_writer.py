@@ -124,6 +124,15 @@ audit_events = Table(
     Column("decision_reason", String(255), nullable=True),
     Column("decision_label", String(32), nullable=True),
     Column("recommended_action", String(255), nullable=True),
+    # Flattened authorizationInfo fields from data_json.
+    Column("auth_granted", Boolean, nullable=True),
+    Column("auth_operation", String(255), nullable=True),
+    Column("auth_resource_type", String(128), nullable=True),
+    Column("auth_pattern_type", String(64), nullable=True),
+    # Flattened result.data.id (created/mutated resource id).
+    Column("result_resource_id", String(255), nullable=True),
+    # Flattened request.accessType — READ_ONLY / READ_WRITE / etc.
+    Column("access_type", String(64), nullable=True),
     Column("summary", Text, nullable=False),
     Column("raw_payload_json", Text, nullable=False),
     Column("is_failure", Boolean, nullable=False),

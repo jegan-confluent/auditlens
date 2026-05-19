@@ -39,4 +39,19 @@ AUDIT_EVENT_COLUMNS: dict[str, str] = {
     "decision_reason": "VARCHAR(255)",
     "decision_label": "VARCHAR(32)",
     "recommended_action": "VARCHAR(255)",
+    # Flattened authorizationInfo fields from data_json. Distinct from the
+    # outer resource_type / pattern_type columns — these mirror the
+    # authorizationInfo.{granted,operation,resourceType,patternType} fields
+    # so Tableflow can surface them as queryable columns.
+    "auth_granted": "BOOLEAN",
+    "auth_operation": "VARCHAR(255)",
+    "auth_resource_type": "VARCHAR(128)",
+    "auth_pattern_type": "VARCHAR(64)",
+    # Flattened result.data.id — set by methods that return a created or
+    # mutated resource id. Empty for read methods.
+    "result_resource_id": "VARCHAR(255)",
+    # Flattened request.accessType — usually READ_ONLY / READ_WRITE.
+    # Used by event_normalization to demote READ_ONLY events to
+    # signal_type=informational.
+    "access_type": "VARCHAR(64)",
 }
