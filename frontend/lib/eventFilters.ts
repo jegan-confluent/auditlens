@@ -17,9 +17,11 @@ export type EventFilters = {
   action: string;
 };
 
-// Default landing state = "Action Required": last 12h, decision-mode, only
-// action_required events (the ones that need immediate attention). The user
-// can widen to attention/all via the filter chips or FilterBar.
+// Default landing state = "Needs attention": last 12h, decision-mode,
+// action_required + attention events. action_required alone was too narrow
+// and hid common review-worthy activity (topic creates, API key changes,
+// ACL edits) that surface as signal=attention. The user can widen further
+// via the filter chips or narrow to action_required via the signal pills.
 export const defaultFilters: EventFilters = {
   mode: "decision",
   time_window: "12h",
@@ -30,7 +32,7 @@ export const defaultFilters: EventFilters = {
   action_category: "",
   actor: "",
   result: "",
-  signal: "action_required",
+  signal: "action_required,attention",
   hide_noise: "true",
   impact_type: "",
   q: "",
