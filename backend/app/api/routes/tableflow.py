@@ -6,6 +6,7 @@ the standard CONFLUENT_CLOUD_API_KEY / CONFLUENT_CLOUD_API_SECRET.
 """
 from __future__ import annotations
 
+import os
 from typing import Any
 
 import httpx
