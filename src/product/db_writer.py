@@ -88,7 +88,7 @@ audit_events = Table(
     Column("actor_type", String(64), nullable=True),
     Column("actor_source", String(64), nullable=True),
     Column("actor_confidence", String(32), nullable=True),
-    Column("actor_enriched_at", String(64), nullable=True),
+    Column("actor_enriched_at", DateTime(timezone=True), nullable=True),
     Column("action", String(255), nullable=False),
     Column("normalized_action", String(255), nullable=False),
     Column("action_category", String(64), nullable=False),
