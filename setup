@@ -1,59 +1,418 @@
 #!/usr/bin/env bash
-set -euo pipefail
+# AuditLens setup — single entry point.
+#
+# Detects missing prerequisites, offers to install them on supported OSes
+# (Amazon Linux 2023, Ubuntu/Debian, macOS) and then hands off to
+# scripts/bootstrap_auditlens.py with a clean environment. Designed to
+# avoid the "run, fail, install one thing, run again" cycle.
+#
+# Non-interactive overrides:
+#   AUDITLENS_AUTO_INSTALL=1   answer "yes" to every install prompt
+#   AUDITLENS_NO_INSTALL=1     answer "no" to every install prompt
+#   PYTHON=...                 override the python binary used after install
+#
+# Pipefail but no -e: we handle errors explicitly so the user never gets a
+# silent exit mid-recovery.
+set -uo pipefail
 
-# AuditLens setup — single entry point
-# Wraps scripts/bootstrap_auditlens.py with pre-flight checks.
-
+# ───────────────────────── Minimum versions ──────────────────────────────
 PYTHON=${PYTHON:-python3}
-REQUIRED_PYTHON_MINOR=11
+PYTHON_MIN_MAJOR=3
+PYTHON_MIN_MINOR=11
+DOCKER_MIN_MAJOR=20
+DOCKER_MIN_MINOR=10
+COMPOSE_MIN_MAJOR=2
+COMPOSE_MIN_MINOR=0
+MIN_DISK_GB=2
+REQUIRED_PORTS=(80 443 8003)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-echo ""
-echo "╔══════════════════════════════════════╗"
-echo "║        AuditLens Setup               ║"
-echo "╚══════════════════════════════════════╝"
-echo ""
-
-# Check Python version
-if ! command -v "$PYTHON" &>/dev/null; then
-    echo "❌  Python 3 not found. Install Python 3.11+ and retry."
-    exit 1
+# ───────────────────────── UI helpers ────────────────────────────────────
+if [ -t 1 ]; then
+    GREEN=$'\033[0;32m'; RED=$'\033[0;31m'; YELLOW=$'\033[0;33m'; BLUE=$'\033[0;34m'; NC=$'\033[0m'
+else
+    GREEN=""; RED=""; YELLOW=""; BLUE=""; NC=""
 fi
+ok()   { printf '%b✅%b  %s\n' "$GREEN" "$NC" "$*"; }
+warn() { printf '%b⚠%b  %s\n'  "$YELLOW" "$NC" "$*"; }
+fail() { printf '%b❌%b  %s\n'  "$RED"   "$NC" "$*"; }
+info() { printf '%bℹ%b  %s\n'  "$BLUE"  "$NC" "$*"; }
 
-PYTHON_MAJOR=$("$PYTHON" -c "import sys; print(sys.version_info.major)")
-PYTHON_MINOR=$("$PYTHON" -c "import sys; print(sys.version_info.minor)")
-if [ "$PYTHON_MAJOR" -lt 3 ] || { [ "$PYTHON_MAJOR" -eq 3 ] && [ "$PYTHON_MINOR" -lt "$REQUIRED_PYTHON_MINOR" ]; }; then
-    echo "❌  Python 3.${REQUIRED_PYTHON_MINOR}+ required. Found: $($PYTHON --version)"
-    exit 1
-fi
+# prompt_yn QUESTION [DEFAULT_Y_OR_N]
+#   Echoes "Y" or "N". Honours AUDITLENS_AUTO_INSTALL / AUDITLENS_NO_INSTALL.
+#   In non-interactive shells (no tty) returns the default.
+prompt_yn() {
+    local question="$1" default="${2:-Y}"
+    if [ "${AUDITLENS_AUTO_INSTALL:-}" = "1" ]; then echo "Y"; return; fi
+    if [ "${AUDITLENS_NO_INSTALL:-}"   = "1" ]; then echo "N"; return; fi
+    if [ ! -t 0 ] && [ ! -r /dev/tty ]; then echo "$default"; return; fi
+    local hint="[Y/n]"; [ "$default" = "N" ] && hint="[y/N]"
+    local ans=""
+    if [ -r /dev/tty ]; then
+        read -r -p "$question $hint " ans </dev/tty
+    else
+        read -r -p "$question $hint " ans
+    fi
+    ans=${ans:-$default}
+    case "$ans" in [Yy]|[Yy][Ee][Ss]) echo "Y" ;; *) echo "N" ;; esac
+}
 
-# Check Docker
-if ! command -v docker &>/dev/null; then
-    echo "❌  Docker not found. Install Docker Desktop and retry."
-    echo "    https://docs.docker.com/get-docker/"
-    exit 1
-fi
+# ───────────────────────── OS detection ──────────────────────────────────
+OS=unknown; PKG_MGR=""; OS_PRETTY="unknown"
+detect_os() {
+    case "$(uname -s)" in
+        Darwin) OS=macos; PKG_MGR=brew; OS_PRETTY="macOS $(sw_vers -productVersion 2>/dev/null || echo)" ;;
+        Linux)
+            if [ -r /etc/os-release ]; then
+                # shellcheck disable=SC1091
+                . /etc/os-release
+                OS_PRETTY="${PRETTY_NAME:-Linux}"
+                case "${ID:-}" in
+                    amzn)            OS=amzn;   PKG_MGR=dnf ;;
+                    ubuntu)          OS=ubuntu; PKG_MGR=apt ;;
+                    debian)          OS=debian; PKG_MGR=apt ;;
+                    rhel|centos|fedora) OS=rhel; PKG_MGR=dnf ;;
+                    *)               OS=linux-unknown; PKG_MGR="" ;;
+                esac
+            else
+                OS=linux-unknown; OS_PRETTY="Linux (unknown distro)"
+            fi
+            ;;
+        MINGW*|CYGWIN*|MSYS*) OS=windows; OS_PRETTY="Windows" ;;
+        *) OS=unknown; OS_PRETTY="$(uname -s)" ;;
+    esac
+}
 
-if ! docker info &>/dev/null 2>&1; then
-    echo "❌  Docker is not running. Start Docker Desktop and retry."
-    exit 1
-fi
+# ───────────────────────── Banner + prereqs list ─────────────────────────
+print_banner() {
+    echo ""
+    echo "╔══════════════════════════════════════╗"
+    echo "║        AuditLens Setup               ║"
+    echo "╚══════════════════════════════════════╝"
+    echo ""
+    info "Detected OS: $OS_PRETTY"
+    echo ""
+    echo "AuditLens requires:"
+    echo "  • Python ${PYTHON_MIN_MAJOR}.${PYTHON_MIN_MINOR}+"
+    echo "  • Docker ${DOCKER_MIN_MAJOR}.${DOCKER_MIN_MINOR}+"
+    echo "  • Docker Compose ${COMPOSE_MIN_MAJOR}.${COMPOSE_MIN_MINOR}+"
+    echo "  • Git"
+    echo "  • ${MIN_DISK_GB}GB+ free disk space"
+    echo "  • Ports ${REQUIRED_PORTS[*]} available"
+    echo ""
+}
 
-# Check docker compose (v2)
-if ! docker compose version &>/dev/null 2>&1; then
-    echo "❌  Docker Compose v2 not found."
-    echo "    Update Docker Desktop or install the compose plugin."
-    exit 1
-fi
+# ───────────────────────── Python ────────────────────────────────────────
+PYTHON_VERSION_STR=""
+check_python() {
+    PYTHON_VERSION_STR=""
+    if ! command -v "$PYTHON" >/dev/null 2>&1; then
+        # Try a few common interpreter names before giving up.
+        for alt in python3.11 python3.12 python3.13 python3; do
+            if command -v "$alt" >/dev/null 2>&1; then PYTHON="$alt"; break; fi
+        done
+    fi
+    command -v "$PYTHON" >/dev/null 2>&1 || return 1
+    local maj min
+    maj=$("$PYTHON" -c 'import sys; print(sys.version_info.major)' 2>/dev/null) || return 1
+    min=$("$PYTHON" -c 'import sys; print(sys.version_info.minor)' 2>/dev/null) || return 1
+    PYTHON_VERSION_STR=$("$PYTHON" -c 'import sys; print(".".join(map(str, sys.version_info[:3])))' 2>/dev/null)
+    if [ "$maj" -gt "$PYTHON_MIN_MAJOR" ]; then return 0; fi
+    if [ "$maj" -eq "$PYTHON_MIN_MAJOR" ] && [ "$min" -ge "$PYTHON_MIN_MINOR" ]; then return 0; fi
+    return 1
+}
 
-echo "✅  Python $($PYTHON --version 2>&1 | awk '{print $2}')"
-echo "✅  Docker $(docker --version | awk '{print $3}' | tr -d ',')"
-echo "✅  Docker Compose $(docker compose version --short)"
-echo ""
+install_python() {
+    info "Installing Python ${PYTHON_MIN_MAJOR}.${PYTHON_MIN_MINOR}…"
+    case "$OS" in
+        amzn|rhel)
+            sudo dnf install -y python3.11 python3.11-pip || return 1 ;;
+        ubuntu|debian)
+            sudo apt-get update -y && sudo apt-get install -y python3.11 python3.11-venv python3.11-distutils || return 1 ;;
+        macos)
+            command -v brew >/dev/null 2>&1 || {
+                fail "Homebrew not found. Install brew from https://brew.sh and retry."
+                return 1
+            }
+            brew install python@3.11 || return 1 ;;
+        *)
+            return 1 ;;
+    esac
+    # Prefer the freshly-installed interpreter on the next check.
+    if   command -v python3.11 >/dev/null 2>&1; then PYTHON=python3.11
+    elif command -v python3    >/dev/null 2>&1; then PYTHON=python3
+    fi
+    return 0
+}
 
-# Hand off to the guided installer.
-# PYTHONPATH must include the repo root so `scripts.deprecated` resolves
-# regardless of the user's cwd.
-PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}" \
-    exec "$PYTHON" "$SCRIPT_DIR/scripts/bootstrap_auditlens.py" "$@"
+manual_install_python() {
+    echo "  Manual install:"
+    case "$OS" in
+        amzn|rhel)     echo "    sudo dnf install -y python3.11 python3.11-pip" ;;
+        ubuntu|debian) echo "    sudo apt-get install -y python3.11 python3.11-venv" ;;
+        macos)         echo "    brew install python@3.11" ;;
+        *)             echo "    Install Python 3.${PYTHON_MIN_MINOR}+ for your OS." ;;
+    esac
+}
+
+# ───────────────────────── Docker ────────────────────────────────────────
+DOCKER_VERSION_STR=""
+check_docker() {
+    DOCKER_VERSION_STR=""
+    command -v docker >/dev/null 2>&1 || return 1
+    DOCKER_VERSION_STR=$(docker --version 2>/dev/null | awk '{print $3}' | tr -d ',')
+    if ! docker info >/dev/null 2>&1; then return 2; fi   # installed but not running
+    local maj min
+    maj=$(printf '%s' "$DOCKER_VERSION_STR" | cut -d. -f1)
+    min=$(printf '%s' "$DOCKER_VERSION_STR" | cut -d. -f2)
+    [[ "$maj" =~ ^[0-9]+$ ]] || return 1
+    [[ "$min" =~ ^[0-9]+$ ]] || return 1
+    if [ "$maj" -gt "$DOCKER_MIN_MAJOR" ]; then return 0; fi
+    if [ "$maj" -eq "$DOCKER_MIN_MAJOR" ] && [ "$min" -ge "$DOCKER_MIN_MINOR" ]; then return 0; fi
+    return 1
+}
+
+install_docker() {
+    info "Installing Docker…"
+    case "$OS" in
+        amzn|rhel)
+            sudo dnf install -y docker || return 1
+            sudo systemctl start docker || warn "Could not start docker via systemctl — check 'sudo systemctl status docker'"
+            sudo systemctl enable docker >/dev/null 2>&1 || true
+            if [ "$(id -u)" -ne 0 ] && id -nG "$USER" | grep -qvw docker; then
+                sudo usermod -aG docker "$USER" || true
+                warn "Added $USER to the 'docker' group. Log out and back in (or run 'newgrp docker') for the group to take effect in this shell."
+            fi
+            ;;
+        ubuntu|debian)
+            sudo apt-get update -y && sudo apt-get install -y docker.io docker-compose-plugin || return 1
+            sudo systemctl start docker || true
+            sudo systemctl enable docker >/dev/null 2>&1 || true
+            if [ "$(id -u)" -ne 0 ] && id -nG "$USER" | grep -qvw docker; then
+                sudo usermod -aG docker "$USER" || true
+                warn "Added $USER to the 'docker' group. Log out and back in (or run 'newgrp docker') for the group to take effect in this shell."
+            fi
+            ;;
+        macos)
+            fail "Docker Desktop must be installed manually on macOS."
+            echo "    Download: https://docker.com/products/docker-desktop"
+            echo "    After install, launch Docker Desktop and re-run ./setup."
+            return 1
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    return 0
+}
+
+manual_install_docker() {
+    echo "  Manual install:"
+    case "$OS" in
+        amzn|rhel)     echo "    sudo dnf install -y docker && sudo systemctl enable --now docker" ;;
+        ubuntu|debian) echo "    sudo apt-get install -y docker.io docker-compose-plugin" ;;
+        macos)         echo "    Download Docker Desktop from https://docker.com/products/docker-desktop" ;;
+        *)             echo "    Install Docker ${DOCKER_MIN_MAJOR}.${DOCKER_MIN_MINOR}+ for your OS." ;;
+    esac
+}
+
+# ───────────────────────── Docker Compose v2 ─────────────────────────────
+COMPOSE_VERSION_STR=""
+check_compose() {
+    COMPOSE_VERSION_STR=""
+    command -v docker >/dev/null 2>&1 || return 1
+    docker compose version >/dev/null 2>&1 || return 1
+    COMPOSE_VERSION_STR=$(docker compose version --short 2>/dev/null)
+    local maj min
+    maj=$(printf '%s' "$COMPOSE_VERSION_STR" | cut -d. -f1)
+    min=$(printf '%s' "$COMPOSE_VERSION_STR" | cut -d. -f2)
+    [[ "$maj" =~ ^[0-9]+$ ]] || return 1
+    [[ "$min" =~ ^[0-9]+$ ]] || return 1
+    if [ "$maj" -gt "$COMPOSE_MIN_MAJOR" ]; then return 0; fi
+    if [ "$maj" -eq "$COMPOSE_MIN_MAJOR" ] && [ "$min" -ge "$COMPOSE_MIN_MINOR" ]; then return 0; fi
+    return 1
+}
+
+install_compose() {
+    info "Installing Docker Compose v2…"
+    case "$OS" in
+        amzn|rhel)     sudo dnf install -y docker-compose-plugin || return 1 ;;
+        ubuntu|debian) sudo apt-get install -y docker-compose-plugin || return 1 ;;
+        macos)
+            fail "Docker Compose v2 ships with Docker Desktop on macOS. Update Docker Desktop."
+            return 1 ;;
+        *)             return 1 ;;
+    esac
+}
+
+manual_install_compose() {
+    echo "  Manual install:"
+    case "$OS" in
+        amzn|rhel|ubuntu|debian) echo "    sudo $PKG_MGR install -y docker-compose-plugin" ;;
+        macos)                   echo "    Update Docker Desktop (ships with Compose v2)" ;;
+        *)                       echo "    Install docker-compose-plugin (v2) for your OS." ;;
+    esac
+}
+
+# ───────────────────────── ensure_* drivers ──────────────────────────────
+# Each driver: check → if missing, ask → install → re-check → fail with manual cmd.
+ensure_python() {
+    if check_python; then ok "Python $PYTHON_VERSION_STR"; return 0; fi
+    fail "Python ${PYTHON_MIN_MAJOR}.${PYTHON_MIN_MINOR}+ not found${PYTHON_VERSION_STR:+ (found $PYTHON_VERSION_STR)}."
+    if [ "$(prompt_yn "Install it automatically?" Y)" != "Y" ]; then
+        manual_install_python; exit 1
+    fi
+    if ! install_python; then
+        fail "Automatic install failed."
+        manual_install_python; exit 1
+    fi
+    if ! check_python; then
+        fail "Python ${PYTHON_MIN_MAJOR}.${PYTHON_MIN_MINOR}+ still not detected after install."
+        manual_install_python; exit 1
+    fi
+    ok "Python $PYTHON_VERSION_STR (installed)"
+}
+
+ensure_docker() {
+    check_docker; local rc=$?
+    if [ "$rc" -eq 0 ]; then ok "Docker $DOCKER_VERSION_STR"; return 0; fi
+    if [ "$rc" -eq 2 ]; then
+        # Installed but daemon not running.
+        fail "Docker is installed (v$DOCKER_VERSION_STR) but the daemon is not running."
+        case "$OS" in
+            macos)         echo "  Start Docker Desktop and re-run ./setup." ;;
+            amzn|rhel|ubuntu|debian) echo "  Try:  sudo systemctl start docker" ;;
+            *)             echo "  Start Docker for your OS and re-run ./setup." ;;
+        esac
+        exit 1
+    fi
+    fail "Docker not found."
+    if [ "$(prompt_yn "Install it automatically?" Y)" != "Y" ]; then
+        manual_install_docker; exit 1
+    fi
+    if ! install_docker; then
+        fail "Automatic install failed."
+        manual_install_docker; exit 1
+    fi
+    if ! check_docker; then
+        fail "Docker still not usable after install. Make sure the daemon is running and your user is in the 'docker' group (logout/login may be required)."
+        manual_install_docker; exit 1
+    fi
+    ok "Docker $DOCKER_VERSION_STR (installed)"
+}
+
+ensure_compose() {
+    if check_compose; then ok "Docker Compose $COMPOSE_VERSION_STR"; return 0; fi
+    fail "Docker Compose v${COMPOSE_MIN_MAJOR}.${COMPOSE_MIN_MINOR}+ not found${COMPOSE_VERSION_STR:+ (found $COMPOSE_VERSION_STR)}."
+    if [ "$(prompt_yn "Install it automatically?" Y)" != "Y" ]; then
+        manual_install_compose; exit 1
+    fi
+    if ! install_compose; then
+        fail "Automatic install failed."
+        manual_install_compose; exit 1
+    fi
+    if ! check_compose; then
+        fail "Docker Compose still not usable after install."
+        manual_install_compose; exit 1
+    fi
+    ok "Docker Compose $COMPOSE_VERSION_STR (installed)"
+}
+
+# Git is needed by any subsequent clone/pull flows in the bootstrap.
+# Treat as a simple presence check; do not version-gate.
+ensure_git() {
+    if command -v git >/dev/null 2>&1; then ok "Git $(git --version | awk '{print $3}')"; return 0; fi
+    fail "Git not found."
+    if [ "$(prompt_yn "Install it automatically?" Y)" != "Y" ]; then
+        echo "  Manual install: sudo $PKG_MGR install -y git  (or 'brew install git' on macOS)"
+        exit 1
+    fi
+    case "$OS" in
+        amzn|rhel)     sudo dnf install -y git ;;
+        ubuntu|debian) sudo apt-get update -y && sudo apt-get install -y git ;;
+        macos)         command -v brew >/dev/null && brew install git || true ;;
+    esac
+    command -v git >/dev/null 2>&1 || { fail "Git install failed."; exit 1; }
+    ok "Git $(git --version | awk '{print $3}') (installed)"
+}
+
+# ───────────────────────── Disk space (hard-fail rule) ───────────────────
+ensure_disk() {
+    local target=$SCRIPT_DIR
+    # df -k is portable across BSD and GNU. Field 4 = available 1K-blocks.
+    local avail_kb
+    avail_kb=$(df -k "$target" 2>/dev/null | awk 'NR==2 {print $4}')
+    if ! [[ "$avail_kb" =~ ^[0-9]+$ ]]; then
+        warn "Could not determine free disk space for $target — continuing."
+        return 0
+    fi
+    local avail_gb=$(( avail_kb / 1024 / 1024 ))
+    if [ "$avail_gb" -lt "$MIN_DISK_GB" ]; then
+        fail "Insufficient disk space: ${avail_gb}GB available at $target, ${MIN_DISK_GB}GB required."
+        echo "  Free up at least $((MIN_DISK_GB - avail_gb))GB and re-run ./setup."
+        exit 1
+    fi
+    ok "Disk space ${avail_gb}GB available (need ${MIN_DISK_GB}GB)"
+}
+
+# ───────────────────────── Port availability (soft, ask to continue) ─────
+ensure_ports() {
+    local conflicts=()
+    for p in "${REQUIRED_PORTS[@]}"; do
+        if command -v lsof >/dev/null 2>&1; then
+            if lsof -nP -iTCP:"$p" -sTCP:LISTEN >/dev/null 2>&1; then
+                conflicts+=("$p")
+            fi
+        elif command -v ss >/dev/null 2>&1; then
+            if ss -ltn "sport = :$p" 2>/dev/null | grep -q ":$p\b"; then
+                conflicts+=("$p")
+            fi
+        fi
+    done
+    if [ ${#conflicts[@]} -eq 0 ]; then
+        ok "Ports ${REQUIRED_PORTS[*]} available"
+        return 0
+    fi
+    warn "Port(s) already in use: ${conflicts[*]}"
+    echo "  AuditLens needs ports ${REQUIRED_PORTS[*]} for Caddy + forwarder."
+    if [ "$(prompt_yn "Continue anyway?" N)" != "Y" ]; then
+        echo "  Free the port(s) and re-run ./setup."
+        exit 1
+    fi
+}
+
+# ───────────────────────── Main flow ─────────────────────────────────────
+main() {
+    detect_os
+    if [ "$OS" = "windows" ]; then
+        echo ""
+        echo "╔══════════════════════════════════════╗"
+        echo "║        AuditLens Setup               ║"
+        echo "╚══════════════════════════════════════╝"
+        echo ""
+        fail "Windows is not supported. Use WSL2 (Ubuntu) instead:"
+        echo "    https://learn.microsoft.com/windows/wsl/install"
+        exit 1
+    fi
+    print_banner
+
+    ensure_python
+    ensure_docker
+    ensure_compose
+    ensure_git
+    ensure_disk
+    ensure_ports
+
+    echo ""
+    echo "Continuing setup..."
+    echo ""
+
+    # Hand off to the guided installer.
+    # PYTHONPATH must include the repo root so `scripts.deprecated` resolves
+    # regardless of the user's cwd.
+    PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}" \
+        exec "$PYTHON" "$SCRIPT_DIR/scripts/bootstrap_auditlens.py" "$@"
+}
+
+main "$@"
