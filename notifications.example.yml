@@ -16,9 +16,12 @@
 
 destinations:
   - name: "security-alerts"          # human label for logs
-    type: slack                      # slack | teams | webhook
+    type: slack                      # slack | teams | webhook | pagerduty
     webhook_url: "https://hooks.slack.com/services/REPLACE_ME"
     enabled: true
+    # Max deliveries per 60s window. Excess events are batched into one
+    # "N events suppressed" summary notification. 0 = unlimited. Default: 10.
+    rate_limit_per_minute: 10
     filters:
       signal_type:
         - action_required
@@ -35,6 +38,7 @@ destinations:
     type: teams
     webhook_url: "https://company.webhook.office.com/REPLACE_ME"
     enabled: true
+    rate_limit_per_minute: 10
     filters:
       signal_type:
         - action_required
@@ -45,6 +49,7 @@ destinations:
     type: webhook                    # generic HTTP POST
     webhook_url: "https://your-siem.company.com/ingest"
     enabled: false
+    rate_limit_per_minute: 30        # SIEM ingest can usually take more
     filters:
       signal_type:
         - action_required
@@ -53,6 +58,7 @@ destinations:
     type: pagerduty                  # PagerDuty Events API v2
     integration_key: "REPLACE_WITH_PD_INTEGRATION_KEY"  # routing_key from a PD Events API v2 integration
     enabled: false
+    rate_limit_per_minute: 5         # PD wants real incidents — keep low
     filters:
       signal_type:
         - action_required

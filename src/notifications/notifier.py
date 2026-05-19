@@ -112,6 +112,16 @@ THREAD_TIMEOUT_SECONDS = 30
 RETRY_BACKOFFS_SECONDS = (2, 4, 8)
 HTTP_REQUEST_TIMEOUT_SECONDS = 5
 
+# Rate-limit window: per-destination cap measured over a 60-second sliding
+# window. A 0 limit means "unlimited" (skip rate check). When the cap is hit,
+# subsequent events in the window are counted as suppressed and a single
+# summary notification is delivered at window-roll, either lazily on the
+# next notify() call or eagerly by the polling thread below.
+RATE_LIMIT_DEFAULT = 10
+RATE_LIMIT_WINDOW_SECONDS = 60
+RATE_LIMIT_POLL_SECONDS = 10
+RATE_LIMIT_SAMPLE_CAP = 5
+
 VALID_TYPES = {"slack", "teams", "webhook", "pagerduty"}
 
 _RISK_ORDER = {
@@ -178,6 +188,8 @@ class NotificationDestination:
     filters: dict[str, Any]
     # PagerDuty Events API v2 routing key. Empty for slack/teams/webhook.
     integration_key: str = ""
+    # Burst protection: cap deliveries per 60s window. 0 = unlimited.
+    rate_limit_per_minute: int = RATE_LIMIT_DEFAULT
 
 
 class AuditLensNotifier:
@@ -190,6 +202,11 @@ class AuditLensNotifier:
         self._dedup_lock = threading.Lock()
         self._call_count = 0
         self._mtime: float | None = None
+        # Per-destination rate-limit state: {name: {window_start, sent, suppressed, sample}}
+        self._rate_lock = threading.Lock()
+        self._rate_state: dict[str, dict[str, Any]] = {}
+        self._rate_timer_lock = threading.Lock()
+        self._rate_timer_started = False
         self._load_config()
 
     # ------------------------------------------------------------------
@@ -292,6 +309,18 @@ class AuditLensNotifier:
                 name,
             )
             return None
+        rate_raw = entry.get("rate_limit_per_minute", RATE_LIMIT_DEFAULT)
+        try:
+            rate_limit = int(rate_raw)
+            if rate_limit < 0:
+                raise ValueError("rate_limit_per_minute must be >= 0")
+        except (TypeError, ValueError):
+            logger.warning(
+                "notifications.yml: %s.rate_limit_per_minute must be a non-negative int — using default %d",
+                name,
+                RATE_LIMIT_DEFAULT,
+            )
+            rate_limit = RATE_LIMIT_DEFAULT
         return NotificationDestination(
             name=name,
             type=dtype,
@@ -299,6 +328,7 @@ class AuditLensNotifier:
             enabled=enabled,
             filters=filters,
             integration_key=integration_key,
+            rate_limit_per_minute=rate_limit,
         )
 
     def _maybe_reload(self) -> None:
@@ -383,12 +413,25 @@ class AuditLensNotifier:
             self._maybe_reload()
             if not self._destinations:
                 return
+            self._ensure_rate_timer()
             fingerprint = self._event_fingerprint(event)
             for destination in self._destinations:
                 if not destination.enabled:
                     continue
                 if not self.should_notify(event, destination):
                     continue
+                if destination.rate_limit_per_minute > 0:
+                    sample_item = {
+                        "actor": event.get("actor_display_name") or event.get("actor") or "",
+                        "action": event.get("action") or event.get("methodName") or "",
+                    }
+                    allowed, pending = self._consume_rate_slot(
+                        destination.name, destination.rate_limit_per_minute, sample_item
+                    )
+                    if pending is not None:
+                        self._spawn_burst_summary(destination, pending["count"], pending["sample"])
+                    if not allowed:
+                        continue
                 if self._check_and_record_dedup(fingerprint, destination.name):
                     continue
                 t = threading.Thread(
@@ -400,6 +443,138 @@ class AuditLensNotifier:
                 t.start()
         except Exception as exc:
             logger.exception("notifier.notify failed unexpectedly: %s", exc)
+
+    # ------------------------------------------------------------------
+    # Rate limiting
+    # ------------------------------------------------------------------
+    def _consume_rate_slot(
+        self, name: str, limit: int, event_sample: dict
+    ) -> tuple[bool, dict | None]:
+        """Try to consume a delivery slot for destination ``name``.
+
+        Returns (allowed, pending_summary). ``pending_summary`` is non-None
+        when the window just rolled over with suppressed > 0 — the caller
+        should dispatch a burst summary before continuing.
+        """
+        now = time.monotonic()
+        with self._rate_lock:
+            state = self._rate_state.get(name)
+            pending_summary: dict | None = None
+            if state is None or now - state["window_start"] >= RATE_LIMIT_WINDOW_SECONDS:
+                if state is not None and state["suppressed"] > 0:
+                    pending_summary = {
+                        "count": state["suppressed"],
+                        "sample": list(state["sample"]),
+                    }
+                state = {"window_start": now, "sent": 0, "suppressed": 0, "sample": []}
+                self._rate_state[name] = state
+            if state["sent"] < limit:
+                state["sent"] += 1
+                return True, pending_summary
+            state["suppressed"] += 1
+            if len(state["sample"]) < RATE_LIMIT_SAMPLE_CAP:
+                state["sample"].append(event_sample)
+            return False, pending_summary
+
+    def _ensure_rate_timer(self) -> None:
+        """Start the background flusher on first notify(). Idempotent."""
+        with self._rate_timer_lock:
+            if self._rate_timer_started:
+                return
+            t = threading.Thread(
+                target=self._rate_timer_loop,
+                name="notifier-rate-flush",
+                daemon=True,
+            )
+            t.start()
+            self._rate_timer_started = True
+
+    def _rate_timer_loop(self) -> None:
+        """Daemon: every RATE_LIMIT_POLL_SECONDS, roll over any expired windows
+        and send burst summaries for destinations that had suppressed events.
+        Without this, a burst followed by silence would never emit a summary.
+        """
+        while True:
+            time.sleep(RATE_LIMIT_POLL_SECONDS)
+            try:
+                self._flush_expired_windows()
+            except Exception as exc:
+                logger.warning("rate limit flush failed: %s", exc)
+
+    def _flush_expired_windows(self) -> None:
+        now = time.monotonic()
+        pending: list[tuple[str, int, list]] = []
+        with self._rate_lock:
+            for dest_name, state in self._rate_state.items():
+                if now - state["window_start"] >= RATE_LIMIT_WINDOW_SECONDS:
+                    if state["suppressed"] > 0:
+                        pending.append((dest_name, state["suppressed"], list(state["sample"])))
+                    state["window_start"] = now
+                    state["sent"] = 0
+                    state["suppressed"] = 0
+                    state["sample"] = []
+        if not pending:
+            return
+        # Resolve destinations outside the lock — _destinations is mutated
+        # only by _load_config(), which itself runs under the GIL serially.
+        by_name = {d.name: d for d in self._destinations}
+        for dest_name, count, sample in pending:
+            destination = by_name.get(dest_name)
+            if destination is not None and destination.enabled:
+                self._spawn_burst_summary(destination, count, sample)
+
+    def _spawn_burst_summary(
+        self, destination: NotificationDestination, count: int, sample: list
+    ) -> None:
+        t = threading.Thread(
+            target=self._send_burst_summary,
+            args=(destination, count, sample),
+            name=f"notify-burst-{destination.name}",
+            daemon=True,
+        )
+        t.start()
+
+    def _send_burst_summary(
+        self, destination: NotificationDestination, count: int, sample: list
+    ) -> None:
+        """Build a synthetic 'X events suppressed' event and dispatch it
+        through the destination's normal formatter. Bypasses rate + dedup
+        so the summary itself is never suppressed."""
+        try:
+            actors = sorted(
+                {
+                    str(item.get("actor"))
+                    for item in sample
+                    if isinstance(item, dict) and item.get("actor")
+                }
+            )[:3]
+            actor_hint = ", ".join(actors) if actors else "(see logs)"
+            event = {
+                "signal_type": "informational",
+                "event_title": f"AuditLens: {count} notification(s) suppressed",
+                "event_summary": (
+                    f"Rate limit hit on destination '{destination.name}'. "
+                    f"{count} additional event(s) in the last minute were not delivered "
+                    f"individually. Recent actors: {actor_hint}."
+                ),
+                "action": "rate_limit_burst",
+                "actor_display_name": destination.name,
+                "actor": destination.name,
+                "resource_name": "rate_limit",
+                "resource_type": "—",
+                "risk_level": "—",
+                "result": "—",
+                "recommended_action": (
+                    "Tune notifications.yml rate_limit_per_minute if this is frequent."
+                ),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "event_fingerprint": f"burst:{destination.name}:{int(time.time())}",
+            }
+            self._send_with_retry(event, destination)
+        except Exception as exc:
+            logger.warning(
+                "burst summary dispatch failed for %s: %s", destination.name, exc
+            )
 
     def _send_with_retry(
         self, event: dict, destination: NotificationDestination
