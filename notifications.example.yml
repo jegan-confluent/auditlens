@@ -48,3 +48,18 @@ destinations:
     filters:
       signal_type:
         - action_required
+
+  - name: "pagerduty-prod"
+    type: pagerduty                  # PagerDuty Events API v2
+    integration_key: "REPLACE_WITH_PD_INTEGRATION_KEY"  # routing_key from a PD Events API v2 integration
+    enabled: false
+    filters:
+      signal_type:
+        - action_required
+      min_risk_level: high
+    # PagerDuty severity is derived from signal_type + risk_level:
+    #   action_required + risk_level=critical → critical
+    #   action_required (other)                → error
+    #   attention                              → warning
+    #   informational                          → info
+    # dedup_key = event_fingerprint, so PD suppresses duplicate pages within its own window.

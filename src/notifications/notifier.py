@@ -112,7 +112,7 @@ THREAD_TIMEOUT_SECONDS = 30
 RETRY_BACKOFFS_SECONDS = (2, 4, 8)
 HTTP_REQUEST_TIMEOUT_SECONDS = 5
 
-VALID_TYPES = {"slack", "teams", "webhook"}
+VALID_TYPES = {"slack", "teams", "webhook", "pagerduty"}
 
 _RISK_ORDER = {
     "informational": 0,
@@ -121,6 +121,30 @@ _RISK_ORDER = {
     "high": 3,
     "critical": 4,
 }
+
+# PagerDuty Events API v2 enqueue endpoint. Fixed per the public PD contract;
+# per-destination integration_key (routing_key) selects the service.
+PAGERDUTY_ENDPOINT_URL = "https://events.pagerduty.com/v2/enqueue"
+
+
+def _pagerduty_severity(signal_type: str | None, risk_level: str | None) -> str:
+    """Map AuditLens signal_type + risk_level to PagerDuty severity.
+
+    action_required + critical risk → "critical"
+    action_required + high risk     → "error"
+    action_required (other)         → "error"  (escalated, but not "critical")
+    attention                       → "warning"
+    everything else                 → "info"
+    """
+    s = (signal_type or "").lower()
+    r = (risk_level or "").lower()
+    if s == "action_required":
+        if r == "critical":
+            return "critical"
+        return "error"
+    if s == "attention":
+        return "warning"
+    return "info"
 
 
 def _validate_webhook_url(url: str) -> None:
@@ -152,6 +176,8 @@ class NotificationDestination:
     webhook_url: str
     enabled: bool
     filters: dict[str, Any]
+    # PagerDuty Events API v2 routing key. Empty for slack/teams/webhook.
+    integration_key: str = ""
 
 
 class AuditLensNotifier:
@@ -240,11 +266,25 @@ class AuditLensNotifier:
                 "notifications.yml: %s has invalid type %r — skipping", name, dtype
             )
             return None
-        try:
-            _validate_webhook_url(webhook_url)
-        except ValueError as exc:
-            logger.error("Skipping destination '%s': %s", name, exc)
-            return None
+        integration_key = str(entry.get("integration_key") or "")
+        if dtype == "pagerduty":
+            if not integration_key:
+                logger.warning(
+                    "notifications.yml: %s is type=pagerduty but missing integration_key — skipping",
+                    name,
+                )
+                return None
+            try:
+                _validate_webhook_url(PAGERDUTY_ENDPOINT_URL)
+            except ValueError as exc:
+                logger.error("Skipping pagerduty destination '%s' (endpoint unreachable): %s", name, exc)
+                return None
+        else:
+            try:
+                _validate_webhook_url(webhook_url)
+            except ValueError as exc:
+                logger.error("Skipping destination '%s': %s", name, exc)
+                return None
         signal_types = filters.get("signal_type")
         if not isinstance(signal_types, list) or not signal_types:
             logger.warning(
@@ -258,6 +298,7 @@ class AuditLensNotifier:
             webhook_url=webhook_url,
             enabled=enabled,
             filters=filters,
+            integration_key=integration_key,
         )
 
     def _maybe_reload(self) -> None:
@@ -404,6 +445,8 @@ class AuditLensNotifier:
             return self._send_teams(event, destination)
         if destination.type == "webhook":
             return self._send_webhook(event, destination)
+        if destination.type == "pagerduty":
+            return self._send_pagerduty(event, destination)
         logger.warning("notify %s: unknown type %r", destination.name, destination.type)
         return False
 
@@ -440,6 +483,46 @@ class AuditLensNotifier:
         self, event: dict, destination: NotificationDestination
     ) -> bool:
         return self._post_json(destination.webhook_url, self._format_webhook(event))
+
+    def _send_pagerduty(
+        self, event: dict, destination: NotificationDestination
+    ) -> bool:
+        return self._post_json(
+            PAGERDUTY_ENDPOINT_URL,
+            self._format_pagerduty(event, destination),
+        )
+
+    def _format_pagerduty(
+        self, event: dict, destination: NotificationDestination
+    ) -> dict:
+        signal_type = (event.get("signal_type") or "informational").lower()
+        severity = _pagerduty_severity(signal_type, event.get("risk_level"))
+        title = _safe(
+            event.get("event_title") or event.get("action"),
+            default="AuditLens event",
+        )
+        dedup_key = str(
+            event.get("event_fingerprint") or self._event_fingerprint(event)
+        )
+        return {
+            "routing_key": destination.integration_key,
+            "event_action": "trigger",
+            "dedup_key": dedup_key,
+            "payload": {
+                # PagerDuty enforces 1024 chars on summary; truncate defensively.
+                "summary": title[:1024],
+                "severity": severity,
+                "source": "AuditLens",
+                "custom_details": {
+                    "actor": _actor_display(event),
+                    "action": _safe(event.get("action") or event.get("methodName")),
+                    "resource": _resource_display(event),
+                    "signal_type": signal_type,
+                    "risk_level": _safe(event.get("risk_level")),
+                    "recommended_action": _safe(event.get("recommended_action")),
+                },
+            },
+        }
 
     def _format_slack(self, event: dict) -> dict:
         signal_type = (event.get("signal_type") or "informational").lower()
