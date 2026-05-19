@@ -220,7 +220,10 @@ services:
     environment:
       - POSTGRES_DB=${POSTGRES_DB:-auditlens}
       - POSTGRES_USER=${POSTGRES_USER:-auditlens}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+      # Default is a placeholder so `docker compose down` and other lifecycle
+      # commands work even when .env is mid-setup or missing. The wizard
+      # writes a real generated value into .env before `up` is run.
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-changeme_set_in_env}
     entrypoint: ["/bin/bash", "/usr/local/bin/tune.sh"]
     volumes:
       - postgres_data:/var/lib/postgresql/data
@@ -302,7 +305,9 @@ services:
       - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
     environment:
       - GF_SECURITY_ADMIN_USER=${GF_ADMIN_USER:-admin}
-      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD must be set in .env}
+      # Default placeholder keeps compose lifecycle working when .env is
+      # mid-setup; wizard writes a real generated value before `up`.
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-changeme_set_in_env}
       - GF_USERS_ALLOW_SIGN_UP=false
       - GF_SERVER_ROOT_URL=http://localhost:3001
       - GF_ANALYTICS_REPORTING_ENABLED=false
@@ -427,7 +432,7 @@ services:
     container_name: auditlens-postgres-exporter
     restart: always
     environment:
-      - DATA_SOURCE_NAME=postgresql://${POSTGRES_USER:-auditlens}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}@postgres:5432/${POSTGRES_DB:-auditlens}?sslmode=disable
+      - DATA_SOURCE_NAME=postgresql://${POSTGRES_USER:-auditlens}:${POSTGRES_PASSWORD:-changeme_set_in_env}@postgres:5432/${POSTGRES_DB:-auditlens}?sslmode=disable
     ports:
       - "127.0.0.1:9187:9187"
     mem_limit: 64m
