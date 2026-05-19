@@ -476,11 +476,14 @@ def _prompt_for_missing_from_config(inputs: BootstrapInputs, load_result: Config
             inputs.generated_admin_token = payload[0]["token"]
             inputs.api_auth_token_file = "/run/secrets/auditlens-api-tokens.json"
 
-    # docker-compose.prod.yml requires POSTGRES_PASSWORD; auto-generate it
-    # the same way the API auth token is generated. Skip if a checkpoint
-    # already restored a value so the same password survives across resumes.
+    # docker-compose.prod.yml requires POSTGRES_PASSWORD and
+    # GRAFANA_ADMIN_PASSWORD; auto-generate them the same way the API auth
+    # token is generated. Skip if a checkpoint already restored a value so
+    # the same password survives across resumes.
     if not inputs.postgres_password:
         inputs.postgres_password = make_admin_password()
+    if not inputs.grafana_admin_password:
+        inputs.grafana_admin_password = make_admin_password()
 
     return inputs, token_json
 
@@ -795,12 +798,15 @@ def collect_interactive_inputs(
         save_checkpoint(completed, inputs)
         ok_line("Progress saved.")
 
-    # docker-compose.prod.yml requires POSTGRES_PASSWORD; auto-generate the
-    # same way the API auth token is generated. Skip if a checkpoint already
-    # restored a value so the same password survives across resumes (and the
-    # postgres volume keeps working).
+    # docker-compose.prod.yml requires POSTGRES_PASSWORD and
+    # GRAFANA_ADMIN_PASSWORD; auto-generate the same way the API auth token
+    # is generated. Skip if a checkpoint already restored a value so the
+    # same password survives across resumes (and the postgres volume / any
+    # existing grafana login keeps working).
     if not inputs.postgres_password:
         inputs.postgres_password = make_admin_password()
+    if not inputs.grafana_admin_password:
+        inputs.grafana_admin_password = make_admin_password()
 
     return inputs, token_json
 
