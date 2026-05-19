@@ -69,3 +69,23 @@ destinations:
     #   attention                              → warning
     #   informational                          → info
     # dedup_key = event_fingerprint, so PD suppresses duplicate pages within its own window.
+
+  - name: "daily-digest-slack"
+    type: slack
+    webhook_url: "https://hooks.slack.com/services/REPLACE_DIGEST_CHANNEL"
+    enabled: false
+    mode: digest                     # realtime (default) | digest
+    digest_schedule: "09:00"         # UTC HH:MM — one summary delivered after this time, once per day
+    rate_limit_per_minute: 0         # digest is a single message per day; no rate cap needed
+    filters:
+      signal_type:
+        - action_required
+        - attention
+    # Digest mode buffers matching events in memory (FIFO, bounded at 1000 per destination).
+    # At digest_schedule UTC, posts one Slack Block Kit summary with:
+    #   - action_required + attention counts
+    #   - Top 3 actors (action_required)
+    #   - Top 3 actions (attention)
+    #   - Top resource by event count
+    #   - Dashboard link (only when DASHBOARD_URL env var is set)
+    # Buffer + last_sent state reset on forwarder restart.

@@ -13,11 +13,13 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import socket
 import threading
 import time
 import urllib.error
 import urllib.request
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -122,6 +124,14 @@ RATE_LIMIT_WINDOW_SECONDS = 60
 RATE_LIMIT_POLL_SECONDS = 10
 RATE_LIMIT_SAMPLE_CAP = 5
 
+# Daily digest poll cadence and per-destination buffer cap. The buffer is
+# bounded so a noisy day cannot exhaust memory — once full, oldest events
+# are dropped (FIFO).
+DIGEST_POLL_SECONDS = 60
+DIGEST_BUFFER_MAX = 1000
+_DIGEST_TIME_RE = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+VALID_MODES = {"realtime", "digest"}
+
 VALID_TYPES = {"slack", "teams", "webhook", "pagerduty"}
 
 _RISK_ORDER = {
@@ -190,6 +200,10 @@ class NotificationDestination:
     integration_key: str = ""
     # Burst protection: cap deliveries per 60s window. 0 = unlimited.
     rate_limit_per_minute: int = RATE_LIMIT_DEFAULT
+    # Delivery cadence: "realtime" (per event, default) or "digest" (one
+    # summary at digest_schedule HH:MM UTC).
+    mode: str = "realtime"
+    digest_schedule: str = "09:00"
 
 
 class AuditLensNotifier:
@@ -207,6 +221,14 @@ class AuditLensNotifier:
         self._rate_state: dict[str, dict[str, Any]] = {}
         self._rate_timer_lock = threading.Lock()
         self._rate_timer_started = False
+        # Digest mode state: per-destination buffer of accepted events and
+        # the YYYY-MM-DD of the last digest delivery (UTC). Both reset on
+        # process restart by design.
+        self._digest_lock = threading.Lock()
+        self._digest_buffer: dict[str, list[dict]] = {}
+        self._digest_last_sent: dict[str, str] = {}
+        self._digest_timer_lock = threading.Lock()
+        self._digest_timer_started = False
         self._load_config()
 
     # ------------------------------------------------------------------
@@ -321,6 +343,33 @@ class AuditLensNotifier:
                 RATE_LIMIT_DEFAULT,
             )
             rate_limit = RATE_LIMIT_DEFAULT
+        mode = str(entry.get("mode") or "realtime").lower()
+        if mode not in VALID_MODES:
+            logger.warning(
+                "notifications.yml: %s.mode %r is not one of %s — using realtime",
+                name,
+                mode,
+                sorted(VALID_MODES),
+            )
+            mode = "realtime"
+        digest_schedule = str(entry.get("digest_schedule") or "09:00")
+        if not _DIGEST_TIME_RE.match(digest_schedule):
+            logger.warning(
+                "notifications.yml: %s.digest_schedule %r must be HH:MM (UTC, 00:00-23:59) — using 09:00",
+                name,
+                digest_schedule,
+            )
+            digest_schedule = "09:00"
+        # PagerDuty in digest mode is nonsensical (it is an alerting channel,
+        # not a daily-summary channel). Demote to realtime with a warning so
+        # the operator can fix the config.
+        if mode == "digest" and dtype == "pagerduty":
+            logger.warning(
+                "notifications.yml: %s is type=pagerduty mode=digest — demoting to realtime "
+                "(PagerDuty is for actionable alerts, not daily summaries)",
+                name,
+            )
+            mode = "realtime"
         return NotificationDestination(
             name=name,
             type=dtype,
@@ -329,6 +378,8 @@ class AuditLensNotifier:
             filters=filters,
             integration_key=integration_key,
             rate_limit_per_minute=rate_limit,
+            mode=mode,
+            digest_schedule=digest_schedule,
         )
 
     def _maybe_reload(self) -> None:
@@ -414,11 +465,15 @@ class AuditLensNotifier:
             if not self._destinations:
                 return
             self._ensure_rate_timer()
+            self._ensure_digest_timer()
             fingerprint = self._event_fingerprint(event)
             for destination in self._destinations:
                 if not destination.enabled:
                     continue
                 if not self.should_notify(event, destination):
+                    continue
+                if destination.mode == "digest":
+                    self._append_to_digest_buffer(destination.name, event)
                     continue
                 if destination.rate_limit_per_minute > 0:
                     sample_item = {
@@ -575,6 +630,238 @@ class AuditLensNotifier:
             logger.warning(
                 "burst summary dispatch failed for %s: %s", destination.name, exc
             )
+
+    # ------------------------------------------------------------------
+    # Digest mode (daily summary)
+    # ------------------------------------------------------------------
+    def _append_to_digest_buffer(self, name: str, event: dict) -> None:
+        """Append a copy of the relevant event fields to the destination's
+        digest buffer. Bounded at DIGEST_BUFFER_MAX (FIFO drop)."""
+        snapshot = {
+            "signal_type": event.get("signal_type"),
+            "actor": event.get("actor_display_name") or event.get("actor"),
+            "action": event.get("action") or event.get("methodName"),
+            "resource": _resource_display(event),
+            "risk_level": event.get("risk_level"),
+            "timestamp": event.get("timestamp"),
+        }
+        with self._digest_lock:
+            buf = self._digest_buffer.setdefault(name, [])
+            buf.append(snapshot)
+            if len(buf) > DIGEST_BUFFER_MAX:
+                # Drop oldest to keep memory bounded.
+                del buf[: len(buf) - DIGEST_BUFFER_MAX]
+
+    def _ensure_digest_timer(self) -> None:
+        """Start the daily-digest polling thread lazily on first notify()."""
+        with self._digest_timer_lock:
+            if self._digest_timer_started:
+                return
+            t = threading.Thread(
+                target=self._digest_loop,
+                name="notifier-digest",
+                daemon=True,
+            )
+            t.start()
+            self._digest_timer_started = True
+
+    def _digest_loop(self) -> None:
+        while True:
+            time.sleep(DIGEST_POLL_SECONDS)
+            try:
+                self._maybe_send_digests()
+            except Exception as exc:
+                logger.warning("digest loop failed: %s", exc)
+
+    def _maybe_send_digests(self) -> None:
+        now = datetime.now(timezone.utc)
+        today = now.strftime("%Y-%m-%d")
+        for destination in list(self._destinations):
+            if destination.mode != "digest" or not destination.enabled:
+                continue
+            schedule = destination.digest_schedule
+            if not _DIGEST_TIME_RE.match(schedule):
+                continue  # already warned at parse time
+            target_h, target_m = (int(part) for part in schedule.split(":"))
+            if (now.hour, now.minute) < (target_h, target_m):
+                continue
+            if self._digest_last_sent.get(destination.name) == today:
+                continue
+            with self._digest_lock:
+                events = list(self._digest_buffer.get(destination.name, []))
+                self._digest_buffer[destination.name] = []
+                self._digest_last_sent[destination.name] = today
+            if not events:
+                logger.info(
+                    "Digest for %s on %s — no events buffered, marking sent",
+                    destination.name,
+                    today,
+                )
+                continue
+            t = threading.Thread(
+                target=self._send_digest,
+                args=(destination, events, today),
+                name=f"digest-{destination.name}",
+                daemon=True,
+            )
+            t.start()
+
+    def _send_digest(
+        self,
+        destination: NotificationDestination,
+        events: list[dict],
+        date_str: str,
+    ) -> None:
+        """Aggregate buffered events and dispatch the daily summary."""
+        try:
+            action_required = [e for e in events if e.get("signal_type") == "action_required"]
+            attention = [e for e in events if e.get("signal_type") == "attention"]
+            top_actors = Counter(
+                str(e.get("actor") or "—") for e in action_required
+            ).most_common(3)
+            top_actions = Counter(
+                str(e.get("action") or "—") for e in attention
+            ).most_common(3)
+            top_resource = Counter(
+                str(e.get("resource") or "—") for e in events
+            ).most_common(1)
+            dashboard_url = (os.getenv("DASHBOARD_URL") or "").strip()
+            if destination.type == "slack":
+                payload = self._format_slack_digest(
+                    date_str=date_str,
+                    action_required_count=len(action_required),
+                    attention_count=len(attention),
+                    top_actors=top_actors,
+                    top_actions=top_actions,
+                    top_resource=top_resource[0] if top_resource else None,
+                    dashboard_url=dashboard_url,
+                )
+                self._post_json(destination.webhook_url, payload)
+                return
+            # Non-slack digest: synthesize an informational event and route
+            # through the destination's standard formatter. Less polished
+            # than the Slack Block Kit version but works for teams/webhook.
+            summary_parts: list[str] = [
+                f"{len(action_required)} action_required",
+                f"{len(attention)} attention",
+            ]
+            if top_actors:
+                summary_parts.append(
+                    "Top actors: " + ", ".join(f"{a} ({n})" for a, n in top_actors)
+                )
+            if top_actions:
+                summary_parts.append(
+                    "Top actions: " + ", ".join(f"{a} ({n})" for a, n in top_actions)
+                )
+            if top_resource:
+                summary_parts.append(
+                    f"Top resource: {top_resource[0][0]} ({top_resource[0][1]})"
+                )
+            if dashboard_url:
+                summary_parts.append(f"Dashboard: {dashboard_url}")
+            synthetic = {
+                "signal_type": "informational",
+                "event_title": f"AuditLens Daily Digest — {date_str}",
+                "event_summary": " · ".join(summary_parts),
+                "action": "daily_digest",
+                "actor_display_name": destination.name,
+                "actor": destination.name,
+                "resource_name": "digest",
+                "resource_type": "—",
+                "risk_level": "—",
+                "result": "—",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "event_fingerprint": f"digest:{destination.name}:{date_str}",
+            }
+            self._send_with_retry(synthetic, destination)
+        except Exception as exc:
+            logger.warning(
+                "digest dispatch failed for %s: %s", destination.name, exc
+            )
+
+    def _format_slack_digest(
+        self,
+        *,
+        date_str: str,
+        action_required_count: int,
+        attention_count: int,
+        top_actors: list[tuple[str, int]],
+        top_actions: list[tuple[str, int]],
+        top_resource: tuple[str, int] | None,
+        dashboard_url: str,
+    ) -> dict:
+        blocks: list[dict] = [
+            {
+                "type": "header",
+                "text": {
+                    "type": "plain_text",
+                    "text": f"AuditLens Daily Digest — {date_str}",
+                    "emoji": False,
+                },
+            },
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        f"🔴 *{action_required_count}* action_required  ·  "
+                        f"🟡 *{attention_count}* attention"
+                    ),
+                },
+            },
+        ]
+        if top_actors:
+            blocks.append(
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": "*Top action_required actors:*\n"
+                        + "\n".join(f"• {a} — {n}" for a, n in top_actors),
+                    },
+                }
+            )
+        if top_actions:
+            blocks.append(
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": "*Top attention actions:*\n"
+                        + "\n".join(f"• {a} — {n}" for a, n in top_actions),
+                    },
+                }
+            )
+        if top_resource is not None:
+            blocks.append(
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": (
+                            f"*Top resource affected:* {top_resource[0]} "
+                            f"({top_resource[1]} event(s))"
+                        ),
+                    },
+                }
+            )
+        if dashboard_url:
+            blocks.append(
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"<{dashboard_url}|Open AuditLens dashboard →>",
+                    },
+                }
+            )
+        return {
+            "blocks": blocks,
+            "text": (
+                f"AuditLens Daily Digest — {date_str}: "
+                f"{action_required_count} action_required, {attention_count} attention"
+            ),
+        }
 
     def _send_with_retry(
         self, event: dict, destination: NotificationDestination

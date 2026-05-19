@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     confluent_cloud_api_secret: str = Field(default="", alias="CONFLUENT_CLOUD_API_SECRET")
     confluent_api_key: str = Field(default="", alias="CONFLUENT_API_KEY")
     confluent_api_secret: str = Field(default="", alias="CONFLUENT_API_SECRET")
+    # Public dashboard URL used in notification digests and other outbound
+    # messages. Empty default → digest omits the dashboard link section.
+    dashboard_url: str = Field(default="", alias="DASHBOARD_URL")
 
     @property
     def database_mode(self) -> Literal["sqlite", "postgres"]:
