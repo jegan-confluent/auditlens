@@ -56,6 +56,128 @@ from src.product.bootstrap import (
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# ANSI styling helpers. All check sys.stdout.isatty() so output stays
+# clean when piped or running in CI (no escape codes leak into logs).
+# Patterned after Vercel / Stripe CLI / Fly.io conventions: cyan for
+# section headers + labels, dim for hints, green/yellow/red for state.
+# ─────────────────────────────────────────────────────────────────────────
+def _supports_color() -> bool:
+    return sys.stdout.isatty()
+
+
+def _wrap(code: str, text: str) -> str:
+    if not _supports_color():
+        return text
+    return f"\033[{code}m{text}\033[0m"
+
+
+def cyan(text: str) -> str:    return _wrap("36", text)
+def green(text: str) -> str:   return _wrap("32", text)
+def yellow(text: str) -> str:  return _wrap("33", text)
+def red(text: str) -> str:     return _wrap("31", text)
+def bold(text: str) -> str:    return _wrap("1",  text)
+def dim(text: str) -> str:     return _wrap("2",  text)
+
+
+def link(url: str, label: str | None = None) -> str:
+    """OSC 8 hyperlink — clickable in modern terminals (iTerm2, kitty,
+    WezTerm, Windows Terminal, GNOME Terminal 3.26+). Falls back to plain
+    text when stdout is not a tty so logs/CI stay readable."""
+    text = label or url
+    if not _supports_color():
+        return text
+    return f"\033]8;;{url}\033\\{text}\033]8;;\033\\"
+
+
+# Per-credential URL hints. Used by prompt_text(url_hint=…) to print a
+# clickable "Find it here" line under the field label so operators don't
+# have to leave the terminal to look up Confluent Cloud paths.
+URL_HINT_BOOTSTRAP        = "https://confluent.cloud (Cluster → Settings → Endpoints)"
+URL_HINT_KAFKA_API_KEY    = "https://confluent.cloud (Cluster → API Keys)"
+URL_HINT_CLOUD_API_KEY    = "https://confluent.cloud/settings/api-keys"
+URL_HINT_SCHEMA_REGISTRY  = "https://confluent.cloud (Environment → Stream Governance API)"
+
+
+def ok_line(message: str) -> None:
+    print(green(f"  ✅  {message}"))
+
+
+def warn_line(message: str) -> None:
+    print(yellow(f"  ⚠   {message}"))
+
+
+def err_line(message: str) -> None:
+    print(red(f"  ❌  {message}"))
+
+
+def info_line(message: str) -> None:
+    print(cyan(f"  ℹ   {message}"))
+
+
+def skip_line(message: str) -> None:
+    print(yellow(f"  ⏭   {message}"))
+
+
+# Phase headers map an internal phase number to a step counter so the
+# operator sees consistent "N of 6" progress. Phase 7 (startup) renders
+# as "Final step" — a deliberate label rather than a number.
+_PHASE_TOTAL_STEPS = 6
+_PHASE_STEP_INDEX = {0: 1, 1: 2, 2: 3, 3: 4, 4: 5, 5: 6}
+
+
+def print_phase_header(phase_num: int, title: str) -> None:
+    step = _PHASE_STEP_INDEX.get(phase_num)
+    if step is not None:
+        filled = "■" * step + "□" * (_PHASE_TOTAL_STEPS - step)
+        step_text = f"Step {step} of {_PHASE_TOTAL_STEPS}"
+    else:
+        filled = "■" * _PHASE_TOTAL_STEPS
+        step_text = "Final step"
+    bar_width = 60
+    print()
+    print(bold(cyan("━" * bar_width)))
+    print(bold(cyan(f"  Phase {phase_num} — {title}")))
+    print(bold(cyan("━" * bar_width)))
+    print(dim(f"  [{filled}] {step_text}"))
+    print()
+
+
+def ensure_persistence_dir(inputs: BootstrapInputs) -> None:
+    """Create the host directory backing inputs.persistence_db_path before
+    the preflight docker run tries to open the file. On a fresh EC2 host
+    /var/lib/auditlens does not exist; the bind-mount preflight inside the
+    forwarder image then errors with `sqlite3.OperationalError: unable to
+    open database file`. Best-effort: failures (no sudo, no write perm) are
+    warned and ignored so the install still proceeds — docker compose
+    itself creates the directory on first `up`.
+    """
+    if not inputs.persistence_enabled:
+        return
+    db_path = inputs.persistence_db_path or "/var/lib/auditlens/auditlens.db"
+    target_dir = Path(db_path).parent
+    if str(target_dir) in ("", "/") or target_dir.exists():
+        return
+    for cmd in (
+        ["sudo", "mkdir", "-p", str(target_dir)],
+        ["sudo", "chmod", "755", str(target_dir)],
+    ):
+        try:
+            result = subprocess.run(cmd, check=False, capture_output=True, timeout=10)
+            if result.returncode != 0:
+                warn_line(
+                    f"Could not prepare {target_dir} (`{' '.join(cmd)}` exited {result.returncode}). "
+                    "Docker compose will create it on first start."
+                )
+                return
+        except Exception as exc:  # FileNotFoundError on no-sudo, etc.
+            warn_line(
+                f"Could not prepare {target_dir} ({exc.__class__.__name__}). "
+                "Docker compose will create it on first start."
+            )
+            return
+
+
 SOURCE_CLUSTER_HELP = """
 Confluent Cloud audit-log source help
 
@@ -94,41 +216,66 @@ def print_source_cluster_help() -> None:
     print(textwrap.dedent(SOURCE_CLUSTER_HELP).strip())
 
 
-def prompt_text(label: str, *, default: str | None = None, secret: bool = False, help_text: str | None = None, required: bool = True) -> str:
+def prompt_text(
+    label: str,
+    *,
+    default: str | None = None,
+    secret: bool = False,
+    help_text: str | None = None,
+    required: bool = True,
+    url_hint: str | None = None,
+) -> str:
+    """Visual style: cyan label on its own line, dim wrapped help under it,
+    optional clickable URL hint line, then a `→` prompt. Preserves the
+    existing default + required + secret semantics — purely a presentation
+    change.
+    """
+    print()
+    print(cyan(f"  {label}"))
     if help_text:
-        print(textwrap.fill(help_text, width=100))
-    suffix = f" [{default}]" if default not in {None, ''} else ""
+        for line in textwrap.fill(help_text, width=88).splitlines():
+            print(dim(f"    {line}"))
+    if url_hint:
+        print(dim(f"    Find it: {link(url_hint, url_hint)}"))
+    suffix = f" [{default}]" if default not in {None, ""} else ""
+    prompt_str = f"  → {suffix.strip()} " if suffix else "  → "
     while True:
         if secret:
-            value = getpass.getpass(f"{label}{suffix}: ")
+            value = getpass.getpass(prompt_str)
         else:
-            value = input(f"{label}{suffix}: ").strip()
+            value = input(prompt_str).strip()
         if not value and default is not None:
             value = default
         if value or not required:
             return value
-        print("This field is required.")
+        err_line("This field is required.")
 
 
 def prompt_bool(label: str, default: bool = True, help_text: str | None = None) -> bool:
+    print()
+    print(cyan(f"  {label}"))
     if help_text:
-        print(textwrap.fill(help_text, width=100))
-    suffix = " [Y/n]" if default else " [y/N]"
-    raw = input(f"{label}{suffix}: ").strip().lower()
+        for line in textwrap.fill(help_text, width=88).splitlines():
+            print(dim(f"    {line}"))
+    suffix = "[Y/n]" if default else "[y/N]"
+    raw = input(f"  → {suffix} ").strip().lower()
     if not raw:
         return default
     return raw in {"y", "yes"}
 
 
 def prompt_choice(label: str, choices: list[str], default: str, help_text: str | None = None) -> str:
+    print()
+    print(cyan(f"  {label}"))
     if help_text:
-        print(textwrap.fill(help_text, width=100))
+        for line in textwrap.fill(help_text, width=88).splitlines():
+            print(dim(f"    {line}"))
     rendered = "/".join(choices)
     while True:
-        value = input(f"{label} ({rendered}) [{default}]: ").strip().lower() or default
+        value = input(f"  → ({rendered}) [{default}] ").strip().lower() or default
         if value in choices:
             return value
-        print(f"Choose one of: {', '.join(choices)}")
+        err_line(f"Choose one of: {', '.join(choices)}")
 
 
 def prompt_int(label: str, default: int, help_text: str | None = None) -> int:
@@ -185,15 +332,16 @@ def _prompt_for_missing_from_config(inputs: BootstrapInputs, load_result: Config
             + ", ".join(load_result.missing_required_fields)
         )
 
-    print("\nLoaded config file.")
+    print()
+    info_line("Loaded config file.")
     if load_result.placeholder_fields:
-        print("These fields still use placeholders and will be requested interactively:")
+        warn_line("These fields still use placeholders and will be requested interactively:")
         for field_name in load_result.placeholder_fields:
-            print(f"- {field_name}")
+            print(dim(f"      • {field_name}"))
     if load_result.missing_required_fields:
-        print("These required fields are missing and will be requested interactively:")
+        warn_line("These required fields are missing and will be requested interactively:")
         for field_name in load_result.missing_required_fields:
-            print(f"- {field_name}")
+            print(dim(f"      • {field_name}"))
 
     token_json = None
 
@@ -266,9 +414,10 @@ def _prompt_for_missing_from_config(inputs: BootstrapInputs, load_result: Config
 def collect_interactive_inputs() -> tuple[BootstrapInputs, str | None]:
     inputs = BootstrapInputs()
 
-    print("\nPhase 0. Local prerequisites")
+    print_phase_header(0, "Local prerequisites")
     check_local_prerequisites(REPO_ROOT)
-    print("Local prerequisites validated.\n")
+    ok_line("Local prerequisites validated.")
+    print()
 
     inputs.deployment_mode = prompt_choice(
         "Deployment mode",
@@ -277,7 +426,7 @@ def collect_interactive_inputs() -> tuple[BootstrapInputs, str | None]:
         help_text="Choose Docker for local first-time installation. Use Kubernetes only if you already have kubectl access and image delivery handled.",
     )
 
-    print("\nPhase 1. Source cluster walkthrough")
+    print_phase_header(1, "Source cluster walkthrough")
     if prompt_bool(
         "Need help finding your source audit-log cluster details",
         default=False,
@@ -292,12 +441,14 @@ def collect_interactive_inputs() -> tuple[BootstrapInputs, str | None]:
     )
     inputs.audit_bootstrap = prompt_text(
         "Source bootstrap endpoint",
-        help_text="Required technical value. Example: pkc-xxxxx.us-west-2.aws.confluent.cloud:9092. Get it from the Kafka cluster settings for the audit-log cluster. It does not come from `confluent audit-log describe`.",
+        help_text="Example: pkc-xxxxx.us-west-2.aws.confluent.cloud:9092. Get it from the Kafka cluster settings for the audit-log cluster. It does not come from `confluent audit-log describe`.",
+        url_hint=URL_HINT_BOOTSTRAP,
     )
     inputs.audit_api_key = prompt_text(
         "Source Kafka API key",
         secret=True,
-        help_text="Required secret. Use a Kafka API key scoped to the audit-log cluster. Use `confluent api-key list --resource <CLUSTER_ID>` or create one for the service account from audit-log config.",
+        help_text="Use a Kafka API key scoped to the audit-log cluster. `confluent api-key list --resource <CLUSTER_ID>` or create one for the audit-log service account.",
+        url_hint=URL_HINT_KAFKA_API_KEY,
     )
     inputs.audit_api_secret = prompt_text(
         "Source Kafka API secret",
@@ -321,9 +472,12 @@ def collect_interactive_inputs() -> tuple[BootstrapInputs, str | None]:
         help_text="Use earliest for first-time installs if you want to inspect retained audit history. Use latest if you only want new events.",
     )
     source_result = validate_source_access(inputs)
-    print(f"Source validated: topic={source_result.topic}, partitions={source_result.partitions}, retained_events={'yes' if source_result.retained_messages_present else 'no'}")
+    ok_line(
+        f"Source validated — topic={source_result.topic}, partitions={source_result.partitions}, "
+        f"retained_events={'yes' if source_result.retained_messages_present else 'no'}"
+    )
 
-    print("\nPhase 2. Destination cluster walkthrough")
+    print_phase_header(2, "Destination cluster walkthrough")
     inputs.destination_display_name = prompt_text(
         "Destination cluster display name",
         default="AuditLens Internal Kafka",
@@ -331,12 +485,14 @@ def collect_interactive_inputs() -> tuple[BootstrapInputs, str | None]:
     )
     inputs.dest_bootstrap = prompt_text(
         "Destination bootstrap endpoint",
-        help_text="Required. Example: pkc-yyyyy.ap-south-1.aws.confluent.cloud:9092.",
+        help_text="Example: pkc-yyyyy.ap-south-1.aws.confluent.cloud:9092.",
+        url_hint=URL_HINT_BOOTSTRAP,
     )
     inputs.dest_api_key = prompt_text(
         "Destination Kafka API key",
         secret=True,
-        help_text="Required. Must allow metadata access and preferably topic creation for the canonical AuditLens topics.",
+        help_text="Must allow metadata access and preferably topic creation for the canonical AuditLens topics.",
+        url_hint=URL_HINT_KAFKA_API_KEY,
     )
     inputs.dest_api_secret = prompt_text(
         "Destination Kafka API secret",
@@ -350,9 +506,9 @@ def collect_interactive_inputs() -> tuple[BootstrapInputs, str | None]:
                   + ", ".join(CANONICAL_TOPICS),
     )
     dest_result = validate_destination_and_topics(inputs, create_missing_topics=not inputs.topics_exist)
-    print(f"Destination validated: {len(dest_result.verified_topics)} canonical topics ready.")
+    ok_line(f"Destination validated — {len(dest_result.verified_topics)} canonical topics ready.")
 
-    print("\nPhase 3. Schema Registry walkthrough")
+    print_phase_header(3, "Schema Registry walkthrough")
     inputs.schema_registry_enabled = prompt_bool(
         "Use Schema Registry",
         default=False,
@@ -362,6 +518,7 @@ def collect_interactive_inputs() -> tuple[BootstrapInputs, str | None]:
         inputs.schema_registry_url = prompt_text(
             "Schema Registry URL",
             help_text="Example: https://psrc-xxxxx.us-west-2.aws.confluent.cloud",
+            url_hint=URL_HINT_SCHEMA_REGISTRY,
         )
         inputs.schema_registry_api_key = prompt_text(
             "Schema Registry API key",
@@ -374,11 +531,14 @@ def collect_interactive_inputs() -> tuple[BootstrapInputs, str | None]:
             help_text="Required only when Schema Registry is enabled.",
         )
         sr_result = validate_schema_registry_access(inputs)
-        print(f"Schema Registry validated: subjects_checked={'yes' if sr_result.subjects_checked else 'no'}, subject_count={sr_result.subject_count}")
+        ok_line(
+            f"Schema Registry validated — subjects_checked="
+            f"{'yes' if sr_result.subjects_checked else 'no'}, subject_count={sr_result.subject_count}"
+        )
     else:
-        print("Schema Registry skipped.")
+        skip_line("Schema Registry skipped.")
 
-    print("\nPhase 4. Product/API settings")
+    print_phase_header(4, "Product / API settings")
     inputs.api_auth_enabled = prompt_bool(
         "Enable API authentication",
         default=True,
@@ -457,7 +617,7 @@ def collect_interactive_inputs() -> tuple[BootstrapInputs, str | None]:
     if inputs.slack_webhook and not inputs.slack_webhook.startswith("https://"):
         raise BootstrapError("Slack webhook must start with https://")
 
-    print("\nPhase 5. Persistence validation")
+    print_phase_header(5, "Persistence validation")
     inputs.persistence_enabled = prompt_bool(
         "Enable persistence",
         default=True,
@@ -475,8 +635,20 @@ def collect_interactive_inputs() -> tuple[BootstrapInputs, str | None]:
             default="/var/lib/auditlens/auditlens.db",
             help_text="The default path is mounted into a Docker named volume or Kubernetes PVC.",
         )
-    persistence_result = validate_persistence_config(inputs, REPO_ROOT)
-    print(f"Persistence validated: {persistence_result.message}")
+    # Prepare the host directory backing persistence_db_path so the
+    # validate_persistence_config docker run does not fail with
+    # `unable to open database file` on a fresh host. Best-effort.
+    ensure_persistence_dir(inputs)
+    try:
+        persistence_result = validate_persistence_config(inputs, REPO_ROOT)
+        ok_line(f"Persistence validated — {persistence_result.message}")
+    except BootstrapError as exc:
+        # Preflight is informational. Compose will create the bind-mount
+        # path on first `up`, so a preflight miss is not fatal here.
+        warn_line(
+            f"Persistence preflight skipped: {exc}. "
+            "Compose will create the host directory on first start."
+        )
 
     return inputs, token_json
 
@@ -634,6 +806,16 @@ def validate_flow(inputs: BootstrapInputs) -> bool:
     )
 
 
+def _row(label: str, value: str, width: int = 41) -> str:
+    """Render `│  label:    value <padding>│` so the box right edge lines up
+    regardless of value length. Width is the inner box width (chars between
+    the two `│`)."""
+    raw = f"  {label}:".ljust(11) + value
+    if len(raw) > width:
+        raw = raw[: width - 1] + "…"
+    return bold(cyan("│")) + raw.ljust(width) + bold(cyan("│"))
+
+
 def print_final_summary(
     inputs: BootstrapInputs,
     source_validated: bool,
@@ -643,44 +825,73 @@ def print_final_summary(
     services_started: bool,
     flow_visible: bool,
 ) -> None:
-    print("")
-    print("AuditLens guided installation summary")
-    print(f"- source cluster validated: {'yes' if source_validated else 'no'}")
-    print(f"- destination cluster validated: {'yes' if destination_validated else 'no'}")
-    print(f"- Schema Registry validated: {schema_registry_status}")
-    print(f"- persistence validated: {'yes' if persistence_validated else 'no'}")
-    print(f"- services started: {'yes' if services_started else 'no'}")
-    print(f"- dashboard URL: http://localhost:{inputs.dashboard_port}")
-    print(f"- metrics URL: http://localhost:{inputs.metrics_port}/metrics")
-    print(f"- API health URL: http://localhost:{inputs.metrics_port}/api/v1/health")
-    if inputs.api_auth_enabled and inputs.generated_admin_token:
-        print(f"- bootstrap admin token: {mask_secret(inputs.generated_admin_token)}")
-        print(f"- bootstrap admin token file: {REPO_ROOT / 'secrets' / 'auditlens-bootstrap-admin.token'}")
-    print(f"- enriched output visible: {'yes' if flow_visible else 'not yet'}")
-    print("")
-    if not flow_visible:
-        print("If no events appear yet:")
-        print("- confirm the audit-log cluster is receiving new events")
-        print("- confirm the source topic still has retained data inside the default seven-day window")
-        print("- check firewall or private networking paths for source and destination Kafka")
-        print(f"- inspect forwarder logs: docker compose logs -f auditlens-forwarder")
-        return
+    # ── Top: ready-to-launch box with the five operator-relevant facts ──
+    print()
+    inner_width = 41
+    print(bold(cyan("┌" + "─" * inner_width + "┐")))
+    title = "  AuditLens is ready to launch"
+    print(bold(cyan("│")) + title.ljust(inner_width) + bold(cyan("│")))
+    print(bold(cyan("├" + "─" * inner_width + "┤")))
+    print(_row("Source",  inputs.source_display_name or "(unset)", inner_width))
+    print(_row("Dest",    inputs.destination_display_name or "(unset)", inner_width))
+    print(_row("Auth",    "enabled" if inputs.api_auth_enabled else "disabled", inner_width))
+    storage_label = inputs.persistence_backend if inputs.persistence_enabled else "off"
+    print(_row("Storage", storage_label or "(unset)", inner_width))
+    print(_row("SR",      schema_registry_status, inner_width))
+    print(bold(cyan("└" + "─" * inner_width + "┘")))
+    print()
 
+    # ── Validation roll-up ──
+    def _state(ok: bool, label: str) -> None:
+        (ok_line if ok else warn_line)(label)
+    _state(source_validated,      "Source cluster validated")
+    _state(destination_validated, "Destination cluster validated")
+    if schema_registry_status == "yes":
+        ok_line("Schema Registry validated")
+    elif schema_registry_status == "skipped":
+        skip_line("Schema Registry skipped")
+    else:
+        warn_line(f"Schema Registry: {schema_registry_status}")
+    _state(persistence_validated, "Persistence validated")
+    _state(services_started,      "Services started")
+    if flow_visible:
+        ok_line("Enriched output flowing")
+    else:
+        warn_line("Enriched output not yet visible — see troubleshooting below")
+    print()
+
+    # ── Access URLs ──
     if services_started and inputs.deployment_mode == "docker":
-        print("")
-        print("╔══════════════════════════════════════════════╗")
-        print("║                                              ║")
-        print("║   ✅  AuditLens is ready.                   ║")
-        print("║                                              ║")
-        print("║   Open http://localhost:3000                 ║")
-        print("║                                              ║")
-        print("║   Useful commands:                           ║")
-        print("║     make status   — check pipeline health   ║")
-        print("║     make logs     — follow forwarder logs   ║")
-        print("║     make stop     — stop all services       ║")
-        print("║                                              ║")
-        print("╚══════════════════════════════════════════════╝")
-        print("")
+        dashboard_url = f"http://localhost:{inputs.dashboard_port}"
+        api_url       = f"http://localhost:{inputs.metrics_port}/api/v1/health"
+        metrics_url   = f"http://localhost:{inputs.metrics_port}/metrics"
+        landing_url   = f"http://localhost:{inputs.landing_port}"
+        print(bold(green("  AuditLens is running!")))
+        print()
+        print(f"  Dashboard:  {link(dashboard_url)}")
+        print(f"  API:        {link(api_url)}")
+        print(f"  Metrics:    {link(metrics_url)}")
+        print(f"  Landing:    {link(landing_url)}")
+        print()
+        if inputs.api_auth_enabled and inputs.generated_admin_token:
+            token_file = REPO_ROOT / "secrets" / "auditlens-bootstrap-admin.token"
+            info_line(f"Bootstrap admin token: {mask_secret(inputs.generated_admin_token)}")
+            info_line(f"Token file: {token_file}")
+            print()
+        print(dim("  To stop:    docker compose -f docker-compose.prod.yml down"))
+        print(dim("  To restart: docker compose -f docker-compose.prod.yml up -d"))
+        print(dim("  Logs:       docker logs auditlens-forwarder --tail=50 -f"))
+        print(dim("  Status:     make status"))
+        print()
+
+    # ── Troubleshooting hints when nothing flowed yet ──
+    if not flow_visible:
+        print(yellow("  If no events appear yet:"))
+        print(dim("    • confirm the audit-log cluster is receiving new events"))
+        print(dim("    • confirm the source topic still has retained data inside the 7-day window"))
+        print(dim("    • check firewall / private networking for source and destination Kafka"))
+        print(dim("    • inspect forwarder logs: docker compose logs -f auditlens-forwarder"))
+        print()
 
 
 def main() -> int:
@@ -712,32 +923,43 @@ def main() -> int:
                 "Likely causes: seven-day retention window already passed, or the audit-log cluster has not emitted events yet."
             )
         dest_result = validate_destination_and_topics(inputs, create_missing_topics=not inputs.topics_exist)
-        persistence_result = validate_persistence_config(inputs, REPO_ROOT)
+        ensure_persistence_dir(inputs)
+        try:
+            persistence_result = validate_persistence_config(inputs, REPO_ROOT)
+            persistence_validated = (
+                persistence_result.enabled or inputs.persistence_enabled is False
+            )
+        except BootstrapError as exc:
+            warn_line(
+                f"Persistence preflight skipped: {exc}. "
+                "Compose will create the host directory on first start."
+            )
+            persistence_validated = inputs.persistence_enabled is False
 
         source_validated = bool(source_result.readable)
         destination_validated = bool(dest_result.verified_topics)
         schema_registry_status = "skipped"
-        persistence_validated = persistence_result.enabled or inputs.persistence_enabled is False
 
         if inputs.schema_registry_enabled:
             validate_schema_registry_access(inputs)
             schema_registry_status = "yes"
 
-        print("\nMasked review before write")
-        print(render_review_summary(inputs))
+        print()
+        print(bold(cyan("  Masked review before write")))
+        print(dim(render_review_summary(inputs)))
         if stdin_is_interactive() and not prompt_bool("Write config and continue to startup", default=True):
             raise BootstrapError("Installer stopped before writing config.")
 
         backups = write_local_config(inputs, token_json)
         if backups:
-            print("Backed up prior local config:")
+            info_line("Backed up prior local config:")
             for backup in backups:
-                print(f"- {backup}")
+                print(dim(f"      • {backup}"))
 
         port_forward_processes: list[subprocess.Popen[str]] = []
         services_started = False
         try:
-            print("\nPhase 7. Startup")
+            print_phase_header(7, "Startup")
             if inputs.deployment_mode == "docker":
                 deploy_docker()
             else:
@@ -745,7 +967,7 @@ def main() -> int:
                 port_forward_processes.extend([pf_forwarder, pf_dashboard])
             services_started = True
 
-            print("Waiting for forwarder, persistence, metrics, dashboard, and API health...")
+            info_line("Waiting for forwarder, persistence, metrics, dashboard, and API health…")
             validate_runtime(inputs)
             flow_visible = validate_flow(inputs)
         finally:
@@ -763,9 +985,11 @@ def main() -> int:
         )
         return 0 if flow_visible else 2
     except BootstrapError as exc:
-        print("")
-        print("AuditLens installation failed")
-        print(textwrap.fill(str(exc), width=100))
+        print()
+        print(bold(red("  ❌  AuditLens installation failed")))
+        for line in textwrap.fill(str(exc), width=88).splitlines():
+            print(red(f"      {line}"))
+        print()
         return 1
 
 
