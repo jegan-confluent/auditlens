@@ -55,7 +55,12 @@ from src.product.bootstrap import (
 )
 
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+# scripts/deprecated/bootstrap_auditlens.py → parent (deprecated/) → parent
+# (scripts/) → parent (repo root). The file lived at scripts/<name>.py before
+# the move into deprecated/, so a missing third .parent silently pointed at
+# scripts/ — .env, .secrets, and `docker compose -f docker-compose.prod.yml`
+# all need the actual repo root.
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
 # ─────────────────────────────────────────────────────────────────────────
