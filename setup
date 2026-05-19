@@ -106,20 +106,33 @@ print_banner() {
 # ───────────────────────── Python ────────────────────────────────────────
 PYTHON_VERSION_STR=""
 check_python() {
+    # Try every plausible interpreter name and pick the first that meets the
+    # version floor. Earlier versions of this script trusted whatever `python3`
+    # pointed at; on systems where the default `python3` is 3.9 (Amazon Linux
+    # 2023, older macOS), the version check then failed even when a separate
+    # `python3.11` binary existed from a prior install. Iterating the full
+    # candidate list every run keeps the prereq state honest after a session
+    # install.
     PYTHON_VERSION_STR=""
-    if ! command -v "$PYTHON" >/dev/null 2>&1; then
-        # Try a few common interpreter names before giving up.
-        for alt in python3.11 python3.12 python3.13 python3; do
-            if command -v "$alt" >/dev/null 2>&1; then PYTHON="$alt"; break; fi
-        done
-    fi
-    command -v "$PYTHON" >/dev/null 2>&1 || return 1
-    local maj min
-    maj=$("$PYTHON" -c 'import sys; print(sys.version_info.major)' 2>/dev/null) || return 1
-    min=$("$PYTHON" -c 'import sys; print(sys.version_info.minor)' 2>/dev/null) || return 1
-    PYTHON_VERSION_STR=$("$PYTHON" -c 'import sys; print(".".join(map(str, sys.version_info[:3])))' 2>/dev/null)
-    if [ "$maj" -gt "$PYTHON_MIN_MAJOR" ]; then return 0; fi
-    if [ "$maj" -eq "$PYTHON_MIN_MAJOR" ] && [ "$min" -ge "$PYTHON_MIN_MINOR" ]; then return 0; fi
+    local candidates=("$PYTHON" python3.13 python3.12 python3.11 python3)
+    local seen_version=""
+    for cand in "${candidates[@]}"; do
+        command -v "$cand" >/dev/null 2>&1 || continue
+        local maj min full
+        maj=$("$cand" -c 'import sys; print(sys.version_info.major)' 2>/dev/null) || continue
+        min=$("$cand" -c 'import sys; print(sys.version_info.minor)' 2>/dev/null) || continue
+        full=$("$cand" -c 'import sys; print(".".join(map(str, sys.version_info[:3])))' 2>/dev/null)
+        # Capture the highest version we've seen for the error message even
+        # when nothing qualifies.
+        [ -z "$seen_version" ] && seen_version="$full"
+        if [ "$maj" -gt "$PYTHON_MIN_MAJOR" ] || \
+           { [ "$maj" -eq "$PYTHON_MIN_MAJOR" ] && [ "$min" -ge "$PYTHON_MIN_MINOR" ]; }; then
+            PYTHON="$cand"
+            PYTHON_VERSION_STR="$full"
+            return 0
+        fi
+    done
+    PYTHON_VERSION_STR="$seen_version"
     return 1
 }
 
@@ -178,8 +191,12 @@ install_docker() {
     case "$OS" in
         amzn|rhel)
             sudo dnf install -y docker || return 1
-            sudo systemctl start docker || warn "Could not start docker via systemctl — check 'sudo systemctl status docker'"
-            sudo systemctl enable docker >/dev/null 2>&1 || true
+            # Combined enable + start. The previous two-step (start, then
+            # enable) sometimes left the daemon stopped on AL2023 when the
+            # first systemctl call failed silently — `--now` makes the
+            # success/failure atomic and is the idiomatic command.
+            sudo systemctl enable --now docker \
+                || warn "Could not enable+start docker via systemctl — check 'sudo systemctl status docker'"
             if [ "$(id -u)" -ne 0 ] && id -nG "$USER" | grep -qvw docker; then
                 sudo usermod -aG docker "$USER" || true
                 warn "Added $USER to the 'docker' group. Log out and back in (or run 'newgrp docker') for the group to take effect in this shell."
@@ -187,8 +204,8 @@ install_docker() {
             ;;
         ubuntu|debian)
             sudo apt-get update -y && sudo apt-get install -y docker.io docker-compose-plugin || return 1
-            sudo systemctl start docker || true
-            sudo systemctl enable docker >/dev/null 2>&1 || true
+            sudo systemctl enable --now docker \
+                || warn "Could not enable+start docker via systemctl — check 'sudo systemctl status docker'"
             if [ "$(id -u)" -ne 0 ] && id -nG "$USER" | grep -qvw docker; then
                 sudo usermod -aG docker "$USER" || true
                 warn "Added $USER to the 'docker' group. Log out and back in (or run 'newgrp docker') for the group to take effect in this shell."
@@ -219,14 +236,11 @@ manual_install_docker() {
 
 # ───────────────────────── Docker Compose v2 ─────────────────────────────
 COMPOSE_VERSION_STR=""
-check_compose() {
-    COMPOSE_VERSION_STR=""
-    command -v docker >/dev/null 2>&1 || return 1
-    docker compose version >/dev/null 2>&1 || return 1
-    COMPOSE_VERSION_STR=$(docker compose version --short 2>/dev/null)
+_compose_version_ok() {
+    local ver="$1"
     local maj min
-    maj=$(printf '%s' "$COMPOSE_VERSION_STR" | cut -d. -f1)
-    min=$(printf '%s' "$COMPOSE_VERSION_STR" | cut -d. -f2)
+    maj=$(printf '%s' "$ver" | cut -d. -f1)
+    min=$(printf '%s' "$ver" | cut -d. -f2)
     [[ "$maj" =~ ^[0-9]+$ ]] || return 1
     [[ "$min" =~ ^[0-9]+$ ]] || return 1
     if [ "$maj" -gt "$COMPOSE_MIN_MAJOR" ]; then return 0; fi
@@ -234,10 +248,59 @@ check_compose() {
     return 1
 }
 
+check_compose() {
+    # Accept either Compose v2 (docker subcommand) or v1 (standalone binary)
+    # at runtime — both expose `docker-compose-like` commands and both
+    # satisfy the 2.0+ floor. Probing `--version` keeps the check honest
+    # after a session install rather than caching first-call state.
+    COMPOSE_VERSION_STR=""
+    if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+        COMPOSE_VERSION_STR=$(docker compose version --short 2>/dev/null)
+        if _compose_version_ok "$COMPOSE_VERSION_STR"; then return 0; fi
+    fi
+    if command -v docker-compose >/dev/null 2>&1; then
+        # `docker-compose --version` → "Docker Compose version v2.20.0" (v2)
+        # or "docker-compose version 1.29.2, build ..." (v1). Strip the
+        # leading "v" if present.
+        local v1
+        v1=$(docker-compose --version 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i ~ /[0-9]+\.[0-9]+/) {print $i; exit}}' | tr -d 'v,')
+        if [ -n "$v1" ]; then
+            COMPOSE_VERSION_STR="$v1"
+            if _compose_version_ok "$v1"; then return 0; fi
+        fi
+    fi
+    return 1
+}
+
 install_compose() {
     info "Installing Docker Compose v2…"
     case "$OS" in
-        amzn|rhel)     sudo dnf install -y docker-compose-plugin || return 1 ;;
+        amzn|rhel)
+            # Amazon Linux 2023 ships compose v2 bundled with Docker as a
+            # `docker compose` subcommand — there is no docker-compose-plugin
+            # package. If the subcommand already works (e.g. Docker was just
+            # installed by this script a few lines up), we're done. Only
+            # fall back to the manual plugin download when it doesn't.
+            if docker compose version >/dev/null 2>&1; then
+                info "Compose v2 already available via the docker subcommand — no separate install needed."
+                return 0
+            fi
+            local plugin_arch plugin_dir
+            case "$(uname -m)" in
+                x86_64)         plugin_arch=x86_64 ;;
+                aarch64|arm64)  plugin_arch=aarch64 ;;
+                *)              fail "Unsupported architecture for compose plugin: $(uname -m)"; return 1 ;;
+            esac
+            plugin_dir=${DOCKER_CONFIG:-$HOME/.docker}/cli-plugins
+            mkdir -p "$plugin_dir" || return 1
+            if ! curl -fSL \
+                "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-${plugin_arch}" \
+                -o "$plugin_dir/docker-compose"; then
+                fail "Failed to download docker-compose plugin from GitHub releases"
+                return 1
+            fi
+            chmod +x "$plugin_dir/docker-compose"
+            ;;
         ubuntu|debian) sudo apt-get install -y docker-compose-plugin || return 1 ;;
         macos)
             fail "Docker Compose v2 ships with Docker Desktop on macOS. Update Docker Desktop."
@@ -249,9 +312,21 @@ install_compose() {
 manual_install_compose() {
     echo "  Manual install:"
     case "$OS" in
-        amzn|rhel|ubuntu|debian) echo "    sudo $PKG_MGR install -y docker-compose-plugin" ;;
-        macos)                   echo "    Update Docker Desktop (ships with Compose v2)" ;;
-        *)                       echo "    Install docker-compose-plugin (v2) for your OS." ;;
+        amzn|rhel)
+            # AL2023 has no docker-compose-plugin package — point users at the
+            # bundled-with-docker subcommand or the official static download.
+            echo "    Compose v2 ships bundled with Docker on Amazon Linux 2023."
+            echo "    Run: sudo dnf install -y docker && sudo systemctl enable --now docker"
+            echo "    Then: docker compose version  (should report 2.x)"
+            echo "    Fallback (manual plugin download):"
+            echo "      mkdir -p \$HOME/.docker/cli-plugins"
+            echo "      curl -SL https://github.com/docker/compose/releases/latest/download/docker-compose-linux-\$(uname -m) \\"
+            echo "        -o \$HOME/.docker/cli-plugins/docker-compose"
+            echo "      chmod +x \$HOME/.docker/cli-plugins/docker-compose"
+            ;;
+        ubuntu|debian) echo "    sudo apt-get install -y docker-compose-plugin" ;;
+        macos)         echo "    Update Docker Desktop (ships with Compose v2)" ;;
+        *)             echo "    Install docker-compose-plugin (v2) for your OS." ;;
     esac
 }
 
