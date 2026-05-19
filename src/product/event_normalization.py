@@ -529,6 +529,13 @@ def normalize_event(payload: dict[str, Any]) -> dict[str, Any]:
     actor_info = enrich_actor(actor, subject_type=payload.get("principal_type") or "")
     source_info = extract_source_info(payload)
     decision = decision_snapshot(payload)
+    # Reads carry data.request.accessType=READ_ONLY in the raw payload —
+    # demote any classifier verdict to informational regardless of method
+    # name. Catches TableflowCatalogConfig, TableflowListTables,
+    # ListTableFlowCatalog, GetComputePool, GetPeerings, etc. which the
+    # classifier currently bins as attention/config_changed despite being
+    # pure reads. validateOnly (dry-run preflight) still wins below.
+    _read_only_access = _is_read_only_access(payload)
     summary = _as_text(payload.get("summary") or payload.get("message"))
     if not summary:
         summary = f"{actor} {humanize_action(payload)} {resource_info['resource_display']}".strip()
@@ -569,8 +576,16 @@ def normalize_event(payload: dict[str, Any]) -> dict[str, Any]:
         "is_failure": failure,
         "is_denied": denied,
         "is_routine_noise": True if payload.get("validateOnly") else is_routine_noise(payload, action_category),
-        "signal_type": "noise" if payload.get("validateOnly") else decision["signal_type"],
-        "signal_reason": "dry_run_preflight" if payload.get("validateOnly") else decision["signal_reason"],
+        "signal_type": (
+            "noise" if payload.get("validateOnly")
+            else "informational" if _read_only_access
+            else decision["signal_type"]
+        ),
+        "signal_reason": (
+            "dry_run_preflight" if payload.get("validateOnly")
+            else "read_only_operation" if _read_only_access
+            else decision["signal_reason"]
+        ),
         "impact_type": decision["impact_type"],
         "risk_level": decision["risk_level"],
         "change_type": decision["change_type"],
@@ -582,6 +597,18 @@ def normalize_event(payload: dict[str, Any]) -> dict[str, Any]:
         "recommended_action": decision["recommended_action"],
         "client_tool": _resolve_client_tool(payload, source_info.get("client_id")),
     }
+
+
+def _is_read_only_access(payload: dict[str, Any]) -> bool:
+    """True iff data.request.accessType == 'READ_ONLY' in the raw payload.
+    Used to demote READ_ONLY operations to signal_type=informational. The
+    _data() helper transparently handles both raw CloudEvents and the
+    flatten_audit shape (data_json string).
+    """
+    data = _data(payload)
+    request = data.get("request") if isinstance(data.get("request"), dict) else {}
+    access_type = request.get("accessType")
+    return isinstance(access_type, str) and access_type.upper() == "READ_ONLY"
 
 
 def _resolve_client_tool(payload: dict[str, Any], client_id: Any) -> str | None:
