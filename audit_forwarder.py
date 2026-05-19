@@ -81,6 +81,8 @@ from src.product.event_normalization import (
     BULK_NOISE_METHODS,
     parse_event_timestamp,
     flatten_audit,
+    normalize_event,
+    event_fingerprint as _compute_event_fingerprint,
     _to_scalar,
     _extract_email,
     _extract_client_ip,
@@ -353,7 +355,18 @@ def build_normalized_event(flat: dict) -> dict:
 
 
 def build_enriched_event(flat: dict) -> dict:
-    """Return enriched contract used by the dashboard and operator workflows."""
+    """Return enriched contract used by the dashboard and operator workflows.
+
+    Merges normalize_event() output so the Kafka audit.enriched.v1 message
+    carries the same fields the DB row holds — event_fingerprint, actor_*,
+    normalized_action, action_category, signal_*, risk_level, impact_type,
+    change_type, event_title, event_summary, recommended_action,
+    is_failure, is_denied, is_routine_noise. This is the contract Tableflow
+    surfaces; without the merge, the registered schema would describe
+    fields that never reach the topic. enrich_actor() is internally
+    cached (TTLCache, 1h) so the double-call from the DB writer path is
+    cheap on cache hit.
+    """
     enriched = dict(flat)
     enriched["schema_version"] = "audit.enriched.v1"
     enriched["pipeline_stage"] = "enriched"
@@ -362,6 +375,25 @@ def build_enriched_event(flat: dict) -> dict:
         enriched.get("criticality") == "CRITICAL" or
         enriched.get("methodName") in HIGH_RISK_SIGNAL_METHODS
     )
+    try:
+        normalized = normalize_event(flat)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("normalize_event merge failed during build_enriched_event: %s", exc)
+        normalized = {}
+    # The DB-side normalize_event() returns some fields as datetime objects
+    # (e.g. actor_enriched_at). The Kafka topic is JSON, so coerce every
+    # datetime in the merge dict to an ISO-8601 string before emitting.
+    for key, value in list(normalized.items()):
+        if hasattr(value, "isoformat"):
+            normalized[key] = value.isoformat()
+    if not enriched.get("event_fingerprint"):
+        try:
+            enriched["event_fingerprint"] = _compute_event_fingerprint(flat)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("event_fingerprint compute failed during build_enriched_event: %s", exc)
+    # Normalized fields win for the keys they own (actor_*, signal_*, etc).
+    # flatten_audit's `granted`/`operation`/etc remain available alongside.
+    enriched.update({k: v for k, v in normalized.items() if v is not None or k not in enriched})
     return enriched
 
 

@@ -6,20 +6,38 @@ the standard CONFLUENT_CLOUD_API_KEY / CONFLUENT_CLOUD_API_SECRET.
 """
 from __future__ import annotations
 
+import json
+import logging
 import os
+from pathlib import Path
 from typing import Any
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
 from backend.app.api.routes.patterns import _require_admin
+from backend.app.api.routes.settings import _get_sr_creds
 from backend.app.core.config import get_settings
+from backend.app.db.database import get_db
+
+logger = logging.getLogger("auditlens.backend.tableflow")
 
 router = APIRouter(tags=["tableflow"])
 
 _TIMEOUT = 15.0
 _AUDIT_TOPIC = "audit.enriched.v1"
+_SCHEMA_SUBJECT = f"{_AUDIT_TOPIC}-value"
+# tableflow.py lives at backend/app/api/routes/tableflow.py; the schemas
+# directory sits at the repo root, so it is parents[4] from this file.
+# Override via AUDITLENS_SCHEMA_DIR for tests/non-standard layouts.
+_SCHEMA_FILE = Path(
+    os.getenv(
+        "AUDITLENS_SCHEMA_DIR",
+        str(Path(__file__).resolve().parents[4] / "schemas"),
+    )
+) / "audit.enriched.v1.json"
 
 
 def _confluent_base() -> str:
@@ -43,6 +61,56 @@ def _cluster_context() -> tuple[str, str, str]:
     env_id = os.getenv("CONFLUENT_ENV_ID", "")
     cluster_cloud = (os.getenv("CONFLUENT_CLUSTER_CLOUD") or "").lower()
     return cluster_id, env_id, cluster_cloud
+
+
+async def _maybe_register_schema(db: Session) -> dict[str, Any]:
+    """Best-effort: register schemas/audit.enriched.v1.json with Schema
+    Registry under the {topic}-value subject before enabling Tableflow.
+
+    Returns a result dict with at least {'status': 'ok'|'skipped'|'error', ...}
+    The caller treats failure as a warning, never a hard block — Tableflow
+    enable proceeds regardless. (Per the agreed policy for SR hiccups.)
+    """
+    sr_url, sr_key, sr_secret = _get_sr_creds(db)
+    if not sr_url:
+        return {"status": "skipped", "reason": "SCHEMA_REGISTRY_URL not configured"}
+    if not _SCHEMA_FILE.is_file():
+        return {"status": "error", "reason": f"schema file not found at {_SCHEMA_FILE}"}
+    try:
+        schema_text = _SCHEMA_FILE.read_text(encoding="utf-8")
+        # Validate it parses — bad JSON would fail downstream with a less clear error.
+        json.loads(schema_text)
+    except (OSError, json.JSONDecodeError) as exc:
+        return {"status": "error", "reason": f"could not read schema file: {exc}"}
+    body = {"schemaType": "JSON", "schema": schema_text}
+    auth = (sr_key, sr_secret) if (sr_key and sr_secret) else None
+    url = f"{sr_url.rstrip('/')}/subjects/{_SCHEMA_SUBJECT}/versions"
+    try:
+        async with httpx.AsyncClient(auth=auth, timeout=_TIMEOUT) as client:
+            resp = await client.post(
+                url,
+                content=json.dumps(body),
+                headers={"Content-Type": "application/vnd.schemaregistry.v1+json"},
+            )
+    except Exception as exc:
+        logger.warning("Schema Registry POST failed for %s: %s", _SCHEMA_SUBJECT, exc)
+        return {"status": "error", "reason": f"request failed: {exc}"}
+    if not resp.is_success:
+        logger.warning(
+            "Schema Registry returned %s for %s: %s",
+            resp.status_code, _SCHEMA_SUBJECT, resp.text[:300],
+        )
+        return {
+            "status": "error",
+            "reason": f"HTTP {resp.status_code}: {resp.text[:300]}",
+        }
+    try:
+        payload = resp.json()
+        schema_id = payload.get("id")
+    except (ValueError, AttributeError):
+        schema_id = None
+    logger.info("Schema registered: %s (id=%s)", _SCHEMA_SUBJECT, schema_id)
+    return {"status": "ok", "subject": _SCHEMA_SUBJECT, "schema_id": schema_id}
 
 
 class EnableTableflowRequest(BaseModel):
@@ -95,7 +163,12 @@ async def tableflow_status(request: Request, _auth: None = Depends(_require_admi
 
 
 @router.post("/tableflow/enable")
-async def tableflow_enable(body: EnableTableflowRequest, request: Request, _auth: None = Depends(_require_admin)) -> dict[str, Any]:
+async def tableflow_enable(
+    body: EnableTableflowRequest,
+    request: Request,
+    _auth: None = Depends(_require_admin),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
     key, secret = _require_creds()
     cluster_id, env_id, cluster_cloud = _cluster_context()
 
@@ -105,6 +178,10 @@ async def tableflow_enable(body: EnableTableflowRequest, request: Request, _auth
         raise HTTPException(status_code=400, detail="Delta Lake format requires storage_type=custom")
     if body.storage_type == "custom" and not body.storage_bucket:
         raise HTTPException(status_code=400, detail="storage_bucket required when storage_type=custom")
+
+    # Best-effort schema registration. Per policy: SR failures degrade to a
+    # warning in the response, never block the Tableflow enable.
+    schema_registration = await _maybe_register_schema(db)
 
     bucket = body.storage_bucket or ""
     if body.storage_type == "managed":
@@ -132,7 +209,11 @@ async def tableflow_enable(body: EnableTableflowRequest, request: Request, _auth
             resp = await client.post(f"{_confluent_base()}/tableflow/v1/topics", json=payload)
         if not resp.is_success:
             raise HTTPException(status_code=resp.status_code, detail=resp.text)
-        return {"enabled": True, "format": body.format}
+        return {
+            "enabled": True,
+            "format": body.format,
+            "schema_registration": schema_registration,
+        }
     except HTTPException:
         raise
     except Exception as exc:
