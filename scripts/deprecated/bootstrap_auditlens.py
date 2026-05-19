@@ -525,6 +525,17 @@ def collect_interactive_inputs(
         completed = []
     token_json: str | None = None
 
+    # docker-compose.prod.yml requires POSTGRES_PASSWORD and
+    # GRAFANA_ADMIN_PASSWORD; generate ONCE at the top of the wizard so the
+    # values are included in every phase's save_checkpoint snapshot. On
+    # resume, _restore_inputs has already restored them from the checkpoint,
+    # so `if not …` is false and we don't regenerate — preserving the
+    # password baked into the postgres data volume from the first attempt.
+    if not inputs.postgres_password:
+        inputs.postgres_password = make_admin_password()
+    if not inputs.grafana_admin_password:
+        inputs.grafana_admin_password = make_admin_password()
+
     # ── Phase 0 ─────────────────────────────────────────────────────────
     if 0 in completed:
         skip_line(f"Phase 0 ({_PHASE_LABELS[0]}) already done — skipping.")
@@ -803,15 +814,9 @@ def collect_interactive_inputs(
         save_checkpoint(completed, inputs)
         ok_line("Progress saved.")
 
-    # docker-compose.prod.yml requires POSTGRES_PASSWORD and
-    # GRAFANA_ADMIN_PASSWORD; auto-generate the same way the API auth token
-    # is generated. Skip if a checkpoint already restored a value so the
-    # same password survives across resumes (and the postgres volume / any
-    # existing grafana login keeps working).
-    if not inputs.postgres_password:
-        inputs.postgres_password = make_admin_password()
-    if not inputs.grafana_admin_password:
-        inputs.grafana_admin_password = make_admin_password()
+    # Postgres / Grafana passwords are generated at the top of this function
+    # so every save_checkpoint above persists them; resumes restore the same
+    # value and keep postgres-volume auth working.
 
     return inputs, token_json
 
