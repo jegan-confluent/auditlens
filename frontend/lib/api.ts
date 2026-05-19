@@ -276,6 +276,48 @@ export async function testNotification(destinationName?: string): Promise<{ succ
   return response.json() as Promise<{ success: boolean; message: string }>;
 }
 
+export type NotificationDestinationView = {
+  name: string;
+  type: string;
+  enabled: boolean;
+  mode: string;
+  digest_schedule: string;
+  rate_limit_per_minute: number;
+  filters: {
+    signal_type: string[];
+    min_risk_level: string | null;
+    action_category: string[];
+    exclude_actions: string[];
+  };
+};
+
+export type NotificationDestinationsResponse = {
+  status: "ok" | "no_config" | "no_destinations" | "parse_error";
+  config_path: string;
+  destinations: NotificationDestinationView[];
+};
+
+export async function getNotificationDestinations(signal?: AbortSignal): Promise<NotificationDestinationsResponse> {
+  const response = await fetch(`${API_BASE}/notifications/destinations`, { cache: "no-store", signal });
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(body || `${response.status} ${response.statusText}`);
+  }
+  return response.json() as Promise<NotificationDestinationsResponse>;
+}
+
+export async function toggleNotificationDestination(name: string): Promise<{ name: string; enabled: boolean; config_path: string }> {
+  const response = await fetch(`${API_BASE}/notifications/destinations/${encodeURIComponent(name)}/toggle`, {
+    method: "PATCH",
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(body || `${response.status} ${response.statusText}`);
+  }
+  return response.json() as Promise<{ name: string; enabled: boolean; config_path: string }>;
+}
+
 export type ReadinessSnapshot = {
   ok: boolean;
   status: number;
