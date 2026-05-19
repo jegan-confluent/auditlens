@@ -299,6 +299,18 @@ def get_pipeline_lag(db: Session) -> dict[str, Any]:
         delta = (datetime.now(timezone.utc) - db_latest).total_seconds()
         db_behind_seconds = int(max(0, delta))
 
+    # Forwarder reports None for db_last_successful_write immediately after
+    # restart until the first batch commits — fall back to the DB's own
+    # MAX(timestamp) so the dashboard does not show "Last DB Write: never".
+    # Only when the forwarder is reachable: if it's unreachable we cannot
+    # vouch that the DB timestamp reflects current flow, so leave it None.
+    if (
+        forwarder_last_write_at is None
+        and db_latest is not None
+        and not forwarder_unreachable
+    ):
+        forwarder_last_write_at = _to_iso_z(db_latest)
+
     if forwarder_unreachable:
         status = "unknown"
     else:
