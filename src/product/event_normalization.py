@@ -348,6 +348,14 @@ def summarize_resource(value: Any) -> str:
     return _summarize_resource(value)
 
 
+# Matches Kafka Admin Client auto-generated client IDs (adminclient-755,
+# adminclient-1099, …). Used as a forward-only fallback in normalize_event
+# when an upstream code path produced a payload without client_tool set —
+# the existing flatten_audit→_map_client_tool path already handles this,
+# but events that bypass flatten_audit (e.g. minimal_normalize fast path
+# graduating to the full table) would otherwise persist null client_tool.
+_ADMINCLIENT_RE = re.compile(r"^adminclient-\d+$")
+
 # Pre-compiled for derive_action_category hot path (called once per event).
 _RE_NORM_SPLIT = re.compile(r"[_./-]+")
 _RE_NORM_COMPACT = re.compile(r"[^a-z0-9]+")
@@ -572,8 +580,21 @@ def normalize_event(payload: dict[str, Any]) -> dict[str, Any]:
         "decision_reason": decision["decision_reason"],
         "decision_label": decision["decision_label"],
         "recommended_action": decision["recommended_action"],
-        "client_tool": payload.get("client_tool") or None,
+        "client_tool": _resolve_client_tool(payload, source_info.get("client_id")),
     }
+
+
+def _resolve_client_tool(payload: dict[str, Any], client_id: Any) -> str | None:
+    """Return payload's client_tool, or fall back to a regex-derived label
+    when client_tool is missing AND client_id looks like an auto-generated
+    Kafka Admin Client id (adminclient-NNN). Forward-only — no backfill.
+    """
+    existing = payload.get("client_tool")
+    if isinstance(existing, str) and existing.strip():
+        return existing
+    if isinstance(client_id, str) and _ADMINCLIENT_RE.match(client_id):
+        return "Kafka Admin Client"
+    return None
 
 
 def _is_management_plane(payload: dict[str, Any]) -> bool:
