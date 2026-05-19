@@ -30,6 +30,7 @@ from src.product.bootstrap import (
     check_local_prerequisites,
     docker_auth_headers,
     load_install_config_file,
+    make_admin_password,
     make_api_token,
     mask_secret,
     render_env_file,
@@ -475,6 +476,12 @@ def _prompt_for_missing_from_config(inputs: BootstrapInputs, load_result: Config
             inputs.generated_admin_token = payload[0]["token"]
             inputs.api_auth_token_file = "/run/secrets/auditlens-api-tokens.json"
 
+    # docker-compose.prod.yml requires POSTGRES_PASSWORD; auto-generate it
+    # the same way the API auth token is generated. Skip if a checkpoint
+    # already restored a value so the same password survives across resumes.
+    if not inputs.postgres_password:
+        inputs.postgres_password = make_admin_password()
+
     return inputs, token_json
 
 
@@ -787,6 +794,13 @@ def collect_interactive_inputs(
         completed.append(5)
         save_checkpoint(completed, inputs)
         ok_line("Progress saved.")
+
+    # docker-compose.prod.yml requires POSTGRES_PASSWORD; auto-generate the
+    # same way the API auth token is generated. Skip if a checkpoint already
+    # restored a value so the same password survives across resumes (and the
+    # postgres volume keeps working).
+    if not inputs.postgres_password:
+        inputs.postgres_password = make_admin_password()
 
     return inputs, token_json
 
@@ -1169,6 +1183,27 @@ def main() -> int:
         print(dim(render_review_summary(inputs)))
         if stdin_is_interactive() and not prompt_bool("Write config and continue to startup", default=True):
             raise BootstrapError("Installer stopped before writing config.")
+
+        # Refuse to clobber a working .env with empty credentials.
+        # write_local_config renames the existing .env to .env.backup.<ts>
+        # then writes a fresh one — if any of these are empty here, the new
+        # file would have empty AUDIT_BOOTSTRAP / DEST_BOOTSTRAP lines and
+        # docker compose would start with a broken config. Fail loud while
+        # the on-disk .env is still intact.
+        _required_for_env = [
+            ("audit_bootstrap", "Source bootstrap endpoint"),
+            ("audit_api_key", "Source Kafka API key"),
+            ("dest_bootstrap", "Destination bootstrap endpoint"),
+            ("dest_api_key", "Destination Kafka API key"),
+        ]
+        _missing = [label for attr, label in _required_for_env if not getattr(inputs, attr, "")]
+        if _missing:
+            raise BootstrapError(
+                "Refusing to write .env — required credentials are empty: "
+                + ", ".join(_missing)
+                + ". The current .env on disk has NOT been touched. "
+                "Re-run ./setup and supply every credential."
+            )
 
         backups = write_local_config(inputs, token_json)
         if backups:
