@@ -320,7 +320,7 @@ function EventRow({ event, options }: { event: AuditEvent; options: RowOptions }
           ) : null}
         </td>
         <td className="event-client-tool-cell" style={{ textAlign: "right", fontSize: "0.75em", color: "var(--muted)", whiteSpace: "nowrap" }}>
-          {resolveClientTool(event.client_tool) || null}
+          {resolveClientTool(event.client_tool) || "—"}
         </td>
       </tr>
       {isExpanded ? (
@@ -366,7 +366,7 @@ function GroupRow({ group, expanded, onToggle, onActorClick }: {
         <div className="event-relative-time">{formatRelativeCompact(head.timestamp)}</div>
       </td>
       <td className="event-client-tool-cell" style={{ textAlign: "right", fontSize: "0.75em", color: "var(--muted)", whiteSpace: "nowrap" }}>
-        {head.client_tool || null}
+        {resolveClientTool(head.client_tool) || "—"}
       </td>
     </tr>
   );
