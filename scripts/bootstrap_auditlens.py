@@ -392,28 +392,38 @@ def prompt_missing_int(current: int, label: str, default: int, help_text: str | 
     return prompt_int(label, default, help_text=help_text)
 
 
-def _validate_cc_credentials(api_key: str, api_secret: str, timeout_seconds: float = 10.0) -> bool:
-    """Quick auth probe against GET /org/v2/environments. Returns True iff
-    the API responds 200 — any HTTP, network, or auth failure is treated
-    as invalid so the wizard falls back to manual entry."""
+def _validate_cc_credentials(api_key: str, api_secret: str, timeout_seconds: float = 10.0) -> int:
+    """Probe GET /org/v2/environments. Returns the HTTP status code on a
+    completed request (200 on success, 401/403/etc. on failure), or 0 on
+    network / parse failure. The caller dispatches on the code to surface
+    a specific error message (auth vs. permissions vs. transient)."""
     import base64
     from urllib.request import Request, urlopen
+    from urllib.error import HTTPError
 
     auth = base64.b64encode(f"{api_key}:{api_secret}".encode()).decode()
     headers = {"Authorization": f"Basic {auth}", "Accept": "application/json"}
     try:
         req = Request("https://api.confluent.cloud/org/v2/environments", headers=headers)
         with urlopen(req, timeout=timeout_seconds) as resp:
-            return resp.status == 200
+            return resp.status
+    except HTTPError as exc:
+        return exc.code
     except Exception:
-        return False
+        return 0
 
 
-def _fetch_audit_log_cluster(api_key: str, api_secret: str, timeout_seconds: float = 10.0) -> dict | None:
-    """Hit GET /audit-log/v1/config. Returns
-        {"bootstrap": "pkc-xxx.region.aws.confluent.cloud:9092",
-         "cluster_id": "lkc-xxx", "env_id": "env-xxx"}
-    or None on any failure.
+def _fetch_audit_log_cluster(
+    api_key: str, api_secret: str, timeout_seconds: float = 10.0,
+) -> tuple[int, dict | None]:
+    """Hit GET /audit-log/v1/config. Returns (status_code, data | None).
+
+    Successful response: (200, {bootstrap, cluster_id, env_id}).
+    HTTP failure (401/403/404/etc.): (status_code, None).
+    Network / parse failure: (0, None).
+
+    The caller uses the status code to pick a specific error message
+    (permissions vs. not-configured vs. transient).
 
     Confluent auto-creates a system-managed audit-log cluster per org —
     it is NOT visible via /cmk/v2/clusters and the operator's regular
@@ -427,15 +437,22 @@ def _fetch_audit_log_cluster(api_key: str, api_secret: str, timeout_seconds: flo
     """
     import base64
     from urllib.request import Request, urlopen
+    from urllib.error import HTTPError
 
     auth = base64.b64encode(f"{api_key}:{api_secret}".encode()).decode()
     headers = {"Authorization": f"Basic {auth}", "Accept": "application/json"}
     try:
         req = Request("https://api.confluent.cloud/audit-log/v1/config", headers=headers)
         with urlopen(req, timeout=timeout_seconds) as resp:
+            status = resp.status
             data = json.loads(resp.read().decode("utf-8"))
+    except HTTPError as exc:
+        return exc.code, None
     except Exception:
-        return None
+        return 0, None
+
+    if status != 200:
+        return status, None
 
     destinations = data.get("destinations") or {}
     metadata = data.get("metadata") or {}
@@ -446,14 +463,14 @@ def _fetch_audit_log_cluster(api_key: str, api_secret: str, timeout_seconds: flo
     if isinstance(bootstrap, list):
         bootstrap = bootstrap[0] if bootstrap else ""
     if not isinstance(bootstrap, str):
-        return None
+        return status, None
     if "://" in bootstrap:
         bootstrap = bootstrap.split("://", 1)[1]
     bootstrap = bootstrap.strip()
     if not bootstrap:
-        return None
+        return status, None
 
-    return {
+    return status, {
         "bootstrap": bootstrap,
         "cluster_id": (metadata.get("resource_id") or "").strip(),
         "env_id": (metadata.get("environment_id") or "").strip(),
@@ -477,11 +494,12 @@ def _try_autodetect_audit_log_cluster(inputs: BootstrapInputs) -> bool:
     entry. Credentials are NEVER persisted until BOTH validation and
     audit-log discovery succeed — an invalid or partial attempt leaves
     no stray CC creds in inputs (and thus none in .secrets)."""
-    # Step 1: prompt for cloud-scoped CC API key (or reuse one from config-file
-    # mode). Empty input → skip auto-detect, fall through to manual.
+    # Step 1: collect cloud-scoped CC API key + secret (or reuse one already
+    # populated from config-file mode). Skip the secret prompt when the key
+    # prompt was left blank — saves a keystroke.
     api_key = inputs.cloud_api_key
     api_secret = inputs.cloud_api_secret
-    if not (api_key and api_secret):
+    if not api_key:
         api_key = prompt_text(
             "Confluent Cloud API key (cloud-scoped)",
             secret=True,
@@ -493,28 +511,56 @@ def _try_autodetect_audit_log_cluster(inputs: BootstrapInputs) -> bool:
             ),
             url_hint=URL_HINT_CLOUD_API_KEY,
         )
-        if not api_key:
-            return False
+    if api_key and not api_secret:
         api_secret = prompt_text(
             "Confluent Cloud API secret",
             secret=True,
             required=False,
         )
-        if not api_secret:
-            return False
 
-    # Validate the key before persisting it to inputs.
-    if not _validate_cc_credentials(api_key, api_secret):
-        warn_line("Cloud API key invalid — falling back to manual entry.")
+    # If EITHER key or secret is missing, bail with a single informational
+    # line — no API call, no error, just steer the operator to manual entry.
+    if not (api_key and api_secret):
+        info_line("No Cloud API key provided — enter bootstrap endpoint manually.")
         return False
 
-    # Step 2: discover the org's audit-log cluster via the dedicated endpoint.
-    config = _fetch_audit_log_cluster(api_key, api_secret)
-    if not config:
-        warn_line("Could not auto-detect audit log cluster — enter details manually.")
+    # Step 2: validate credentials before touching the audit-log endpoint.
+    # Specific dispatch on the HTTP status code so operators can tell auth
+    # failures apart from permission gaps.
+    val_status = _validate_cc_credentials(api_key, api_secret)
+    if val_status == 401:
+        err_line("Cloud API key invalid — wrong key or secret. Enter bootstrap manually.")
+        return False
+    if val_status == 403:
+        err_line("Cloud API key lacks permissions — needs org-level read access. Enter bootstrap manually.")
+        return False
+    if val_status != 200:
+        err_line(
+            f"Cloud API key validation failed ({val_status or 'no response'}) — "
+            "enter bootstrap manually."
+        )
         return False
 
-    # Persist only after BOTH validation and discovery succeeded.
+    # Step 3: discover the org's audit-log cluster. The status tells us
+    # whether the cred works *but* lacks the AuditLogViewer role (403),
+    # whether the org simply doesn't have audit logging (404), or whether
+    # something else broke. None of these block the wizard — they just
+    # short-circuit to manual entry with a specific message.
+    audit_status, config = _fetch_audit_log_cluster(api_key, api_secret)
+    if audit_status == 403:
+        err_line("Cloud API key cannot access audit log config — needs AuditLogViewer role.")
+        return False
+    if audit_status == 404:
+        err_line("No audit log cluster found — your org may not have Standard/Dedicated clusters yet.")
+        return False
+    if audit_status != 200 or not config:
+        err_line(
+            f"Audit log discovery failed ({audit_status or 'no response'}) — "
+            "enter bootstrap manually."
+        )
+        return False
+
+    # Step 4: persist only after BOTH validation and discovery succeeded.
     inputs.cloud_api_key = api_key
     inputs.cloud_api_secret = api_secret
     inputs.audit_bootstrap = config["bootstrap"]
