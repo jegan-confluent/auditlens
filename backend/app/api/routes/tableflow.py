@@ -119,6 +119,144 @@ class EnableTableflowRequest(BaseModel):
     storage_bucket: str | None = None
 
 
+_TABLEFLOW_DOCS_URL = "https://docs.confluent.io/cloud/current/topics/tableflow/overview.html"
+# Per Confluent docs: Tableflow requires one of these cluster kinds. Basic /
+# Standard clusters are explicitly not supported.
+_SUPPORTED_CLUSTER_KINDS = {"Dedicated", "Enterprise", "Freight"}
+# AWS + Azure only. GCP is excluded; this also gates the per-region check
+# because Tableflow's region eligibility tracks the supported clouds.
+_SUPPORTED_CLOUDS = {"aws", "azure"}
+
+
+@router.get("/tableflow/prerequisites")
+async def tableflow_prerequisites(
+    request: Request,
+    _auth: None = Depends(_require_admin),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Check the Confluent-side prerequisites for Tableflow before exposing
+    the enable / configure form. Pure read — never calls /tableflow/* APIs,
+    so it works on clusters where Tableflow itself is unreachable.
+
+    Response shape:
+        creds_missing: bool — CC API key / cluster context not set
+        api_error: str|None — CC /cmk lookup failed (we treat as soft-degrade)
+        all_passed: bool
+        prerequisites: { cluster_type, cloud_provider, schema_registry, region }
+            each = { ok: bool, value: str, message: str }
+        docs_url: str
+    """
+    s = get_settings()
+    key = s.confluent_cloud_api_key or s.confluent_api_key
+    secret = s.confluent_cloud_api_secret or s.confluent_api_secret
+    cluster_id, env_id, _ = _cluster_context()
+
+    if not (key and secret and cluster_id and env_id):
+        return {
+            "creds_missing": True,
+            "all_passed": False,
+            "prerequisites": {},
+            "docs_url": _TABLEFLOW_DOCS_URL,
+            "message": (
+                "Set CONFLUENT_CLOUD_API_KEY, CONFLUENT_CLOUD_API_SECRET, "
+                "CONFLUENT_CLUSTER_ID, and CONFLUENT_ENV_ID to enable "
+                "automatic prerequisite checking."
+            ),
+        }
+
+    cluster_kind: str | None = None
+    cluster_cloud: str | None = None
+    cluster_region: str | None = None
+    api_error: str | None = None
+    try:
+        async with httpx.AsyncClient(auth=(key, secret), timeout=_TIMEOUT) as client:
+            resp = await client.get(
+                f"{_confluent_base()}/cmk/v2/clusters/{cluster_id}",
+                params={"environment": env_id},
+            )
+        if resp.is_success:
+            data = resp.json() or {}
+            spec = data.get("spec") or {}
+            cluster_kind = ((spec.get("config") or {}).get("kind") or "").strip() or None
+            cluster_cloud = (spec.get("cloud") or "").lower() or None
+            cluster_region = spec.get("region") or None
+        else:
+            api_error = f"HTTP {resp.status_code}: {resp.text[:200]}"
+    except Exception as exc:
+        api_error = f"{exc.__class__.__name__}: {exc}"
+
+    if api_error:
+        return {
+            "creds_missing": False,
+            "all_passed": False,
+            "api_error": api_error,
+            "prerequisites": {},
+            "docs_url": _TABLEFLOW_DOCS_URL,
+        }
+
+    sr_url, _sr_key, _sr_secret = _get_sr_creds(db)
+
+    kind_ok = cluster_kind in _SUPPORTED_CLUSTER_KINDS
+    cloud_ok = (cluster_cloud or "") in _SUPPORTED_CLOUDS
+    sr_ok = bool(sr_url)
+    # Region check follows cloud eligibility: AWS = all Flink regions, Azure
+    # GA, GCP = unsupported. We don't ship a region allow-list because it
+    # changes faster than this code does.
+    region_ok = cloud_ok and bool(cluster_region)
+
+    prerequisites = {
+        "cluster_type": {
+            "ok": kind_ok,
+            "value": cluster_kind or "unknown",
+            "message": (
+                f"{cluster_kind} (supported)"
+                if kind_ok
+                else (
+                    f"{cluster_kind or 'unknown'} — Tableflow requires Dedicated, "
+                    "Enterprise, or Freight (Basic / Standard are not supported)."
+                )
+            ),
+        },
+        "cloud_provider": {
+            "ok": cloud_ok,
+            "value": cluster_cloud or "unknown",
+            "message": (
+                f"{(cluster_cloud or '').upper()} (supported)"
+                if cloud_ok
+                else (
+                    f"{(cluster_cloud or 'unknown').upper()} — Tableflow is AWS "
+                    "and Azure only (GCP not supported)."
+                )
+            ),
+        },
+        "schema_registry": {
+            "ok": sr_ok,
+            "value": "configured" if sr_ok else "not configured",
+            "message": (
+                "configured"
+                if sr_ok
+                else "Schema Registry must be enabled (Tableflow does not support schemaless topics)."
+            ),
+        },
+        "region": {
+            "ok": region_ok,
+            "value": cluster_region or "unknown",
+            "message": (
+                f"{cluster_region} (supported)"
+                if region_ok
+                else f"{cluster_region or 'unknown'} — region eligibility follows the cloud provider."
+            ),
+        },
+    }
+
+    return {
+        "creds_missing": False,
+        "all_passed": all(p["ok"] for p in prerequisites.values()),
+        "prerequisites": prerequisites,
+        "docs_url": _TABLEFLOW_DOCS_URL,
+    }
+
+
 @router.get("/tableflow/status")
 async def tableflow_status(request: Request, _auth: None = Depends(_require_admin)) -> dict[str, Any]:
     key, secret = _require_creds()
