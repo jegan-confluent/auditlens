@@ -129,6 +129,10 @@ services:
     volumes:
       - auditlens_data:/var/lib/auditlens
       - ./notifications.yml:/app/notifications.yml
+    ports:
+      # Host-bound so the install wizard can poll /health directly. Caddy
+      # at :80 still reverse-proxies /api/* and /health for normal traffic.
+      - "127.0.0.1:8080:8080"
     networks:
       - kafka-network
       - frontend-network
@@ -171,6 +175,10 @@ services:
     restart: always
     environment:
       - NEXT_PUBLIC_API_BASE_URL=${NEXT_PUBLIC_API_BASE_URL:-/api}
+    ports:
+      # Host-bound so the install wizard can probe the Next.js server
+      # directly. Caddy at :80 still serves end users via reverse proxy.
+      - "127.0.0.1:3000:3000"
     networks:
       - frontend-network
     depends_on:

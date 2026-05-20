@@ -503,7 +503,7 @@ ensure_python_deps() {
         info "Virtualenv already present at $venv_dir."
     fi
     # Switch the bootstrap interpreter to the venv copy so module-level
-    # imports in scripts/deprecated/bootstrap_auditlens.py resolve.
+    # imports in scripts/bootstrap_auditlens.py resolve.
     PYTHON="$venv_dir/bin/python"
     info "Installing Python dependencies (this can take a minute)…"
     # Best-effort pip upgrade — old pip can trip on modern wheel resolvers.
@@ -549,10 +549,10 @@ main() {
     ensure_python_deps
 
     # Hand off to the guided installer.
-    # PYTHONPATH must include the repo root so `scripts.deprecated` resolves
-    # regardless of the user's cwd. PYTHON now points at the venv interpreter
-    # populated by ensure_python_deps so module-level imports in bootstrap
-    # (orjson, fastapi, etc.) resolve on a fresh clone.
+    # PYTHONPATH must include the repo root so `scripts.bootstrap_auditlens`
+    # resolves regardless of the user's cwd. PYTHON now points at the venv
+    # interpreter populated by ensure_python_deps so module-level imports
+    # in bootstrap (orjson, fastapi, etc.) resolve on a fresh clone.
     PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}" \
         exec "$PYTHON" "$SCRIPT_DIR/scripts/bootstrap_auditlens.py" "$@"
 }
