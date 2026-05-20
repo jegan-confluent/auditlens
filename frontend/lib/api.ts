@@ -1,6 +1,11 @@
 import type { ActorIpBaseline, ActorNarrative, AuditEvent, EventListResponse, FilterHierarchy, FilterOptions, ForwarderHealth, PatternListResponse, SummaryResponse, SystemStatus, VacuumResult } from "./types";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost/api";
+// Relative default: works on every platform (macOS, Linux EC2, Windows
+// WSL2) without baking a host into the production bundle. Caddy on :80
+// reverse-proxies /api/* → api:8080. NEXT_PUBLIC_API_BASE_URL is honoured
+// when a deployment runs without Caddy or behind a non-default proxy —
+// e.g. tunnel users who hit `http://localhost:8080/api`.
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || "/api";
 
 async function request<T>(path: string, signal?: AbortSignal): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, { cache: "no-store", signal });

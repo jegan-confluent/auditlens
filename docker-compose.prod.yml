@@ -232,6 +232,11 @@ services:
     ports:
       - "80:80"
       - "443:443"
+      # macOS / dev fallback. :80 sometimes collides on macOS (local
+      # Apache, AirPlay receiver before Sonoma, etc.); the Caddyfile
+      # binds :8088 to the same routes so the operator can hit the UI
+      # on http://localhost:8088 without touching the privileged port.
+      - "${CADDY_FALLBACK_PORT:-8088}:8088"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data

@@ -1575,15 +1575,32 @@ def get_ec2_public_ip(timeout_seconds: float = 1.5) -> str | None:
         return None
 
 
+def _public_host(default: str = "localhost") -> str:
+    """Return the host the operator's browser should hit.
+
+    Source of truth is the PLATFORM_HOST env var exported by the setup
+    shell's detect_platform() (macos → localhost, linux-ec2 → public IPv4,
+    linux-local → localhost, windows-wsl2 → localhost). Falls back to the
+    in-process IMDS probe (get_ec2_public_ip) when PLATFORM_HOST is unset
+    — which only happens when bootstrap_auditlens.py is invoked directly
+    without going through the setup shell first."""
+    env_value = os.environ.get("PLATFORM_HOST", "").strip()
+    if env_value:
+        return env_value
+    return get_ec2_public_ip() or default
+
+
 def print_service_status_panel(inputs: BootstrapInputs) -> None:
     """Service status + quick-link panel printed after Phase 7 health
-    checks pass. localhost links are useful when port-forwarding from the
-    operator's laptop; the EC2 public-IP links are useful when ./setup ran
-    directly on the instance and the operator is hitting it from elsewhere.
-    On non-EC2 hosts the IMDS call times out and we fall back to localhost.
-    """
+    checks pass.
+
+    The SERVICE STATUS rows always show localhost URLs — those probes
+    fire from the wizard process on the host, where compose binds each
+    service to 127.0.0.1. The QUICK LINKS rows show what the operator
+    types into their browser; on EC2 that's the public IPv4 the setup
+    shell discovered via IMDS, on a laptop / Mac it stays localhost."""
     metrics_port = inputs.metrics_port
-    public_ip = get_ec2_public_ip() or "localhost"
+    public_host = _public_host()
 
     print()
     print(bold(cyan("  SERVICE STATUS")))
@@ -1598,9 +1615,9 @@ def print_service_status_panel(inputs: BootstrapInputs) -> None:
     print()
     print(bold(cyan("  QUICK LINKS")))
     quick_rows = [
-        ("🔍", "Frontend", f"http://{public_ip}:3000"),
-        ("📡", "API",      f"http://{public_ip}:8080"),
-        ("📊", "Metrics",  f"http://{public_ip}:{metrics_port}/metrics"),
+        ("🔍", "Frontend", f"http://{public_host}:3000"),
+        ("📡", "API",      f"http://{public_host}:8080"),
+        ("📊", "Metrics",  f"http://{public_host}:{metrics_port}/metrics"),
     ]
     for icon, label, url in quick_rows:
         print(f"  {icon} {label.ljust(13)} : {link(url)}")
@@ -1665,11 +1682,15 @@ def print_final_summary(
     # Match the SERVICE STATUS panel above: forwarder /metrics on 8003,
     # api /health on 8080, frontend on 3000. Dashboard:8503 (Streamlit)
     # and Landing:8088 are gone — those containers were removed from
-    # docker-compose.prod.yml, so don't print dead links.
+    # docker-compose.prod.yml, so don't print dead links. The host comes
+    # from PLATFORM_HOST (set by the setup shell's detect_platform) so
+    # an EC2 operator gets clickable public-IP URLs instead of links
+    # that only work from inside the box.
     if services_started and inputs.deployment_mode == "docker":
-        frontend_url = "http://localhost:3000"
-        api_url      = "http://localhost:8080/health"
-        metrics_url  = f"http://localhost:{inputs.metrics_port}/metrics"
+        public_host = _public_host()
+        frontend_url = f"http://{public_host}:3000"
+        api_url      = f"http://{public_host}:8080/health"
+        metrics_url  = f"http://{public_host}:{inputs.metrics_port}/metrics"
         print(bold(green("  AuditLens is running!")))
         print()
         print(f"  Frontend:  {link(frontend_url)}")

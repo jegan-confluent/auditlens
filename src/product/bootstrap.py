@@ -982,6 +982,12 @@ def render_env_file(inputs: BootstrapInputs) -> str:
         f"API_EXPORT_MAX_ROWS={inputs.api_export_max_rows}",
         f"API_EXPORT_MAX_HOURS={inputs.api_export_max_hours}",
         "",
+        "# Frontend → API base URL.",
+        "# Relative '/api' lets Caddy on :80 reverse-proxy to api:8080,",
+        "# which works on every platform (macOS Docker Desktop, Linux EC2,",
+        "# Windows WSL2). Override to a full URL only for non-Caddy deploys.",
+        "NEXT_PUBLIC_API_BASE_URL=/api",
+        "",
     ]
     return "\n".join(lines)
 

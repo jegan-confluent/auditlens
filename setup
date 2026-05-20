@@ -142,6 +142,80 @@ prompt_yn() {
     case "$ans" in [Yy]|[Yy][Ee][Ss]) echo "Y" ;; *) echo "N" ;; esac
 }
 
+# ───────────────────────── Platform detection ────────────────────────────
+# Sets PLATFORM_OS / PLATFORM_HOST / PLATFORM_IS_CLOUD, exports them so
+# scripts/bootstrap_auditlens.py can read them via os.environ. The output
+# of detect_platform is what we use everywhere a URL needs a hostname:
+#
+#   • PLATFORM_OS=macos        → PLATFORM_HOST=localhost (Docker Desktop)
+#   • PLATFORM_OS=linux-ec2    → PLATFORM_HOST=<public IPv4 via IMDS>
+#   • PLATFORM_OS=linux-local  → PLATFORM_HOST=localhost (developer laptop)
+#   • PLATFORM_OS=windows-wsl2 → PLATFORM_HOST=localhost (Docker Desktop+WSL2)
+#
+# IMDS probing uses IMDSv2 first (PUT a short-TTL token, then GET); falls
+# back to IMDSv1 for old AMIs. Non-EC2 hosts time out fast (1s max) so the
+# laptop path doesn't pay a noticeable cost. Mirrors the Python helper
+# `get_ec2_public_ip()` in scripts/bootstrap_auditlens.py.
+PLATFORM_OS=""; PLATFORM_HOST=""; PLATFORM_IS_CLOUD=""
+detect_platform() {
+    local uname_s uname_r
+    uname_s=$(uname -s 2>/dev/null || echo unknown)
+    uname_r=$(uname -r 2>/dev/null || echo)
+    case "$uname_s" in
+        Darwin)
+            PLATFORM_OS=macos
+            PLATFORM_HOST=localhost
+            PLATFORM_IS_CLOUD=false
+            ;;
+        Linux)
+            # WSL2 distinguishable via the kernel release containing "microsoft".
+            if printf '%s' "$uname_r" | grep -qi microsoft; then
+                PLATFORM_OS=windows-wsl2
+                PLATFORM_HOST=localhost
+                PLATFORM_IS_CLOUD=false
+                return 0
+            fi
+            # Probe AWS IMDS (very short timeout — non-EC2 hosts return
+            # immediately, no measurable wizard latency).
+            local imds_token public_ip
+            imds_token=$(curl -s --max-time 1 -X PUT \
+                "http://169.254.169.254/latest/api/token" \
+                -H "X-aws-ec2-metadata-token-ttl-seconds: 60" 2>/dev/null || true)
+            if [ -n "$imds_token" ]; then
+                public_ip=$(curl -s --max-time 1 \
+                    -H "X-aws-ec2-metadata-token: $imds_token" \
+                    "http://169.254.169.254/latest/meta-data/public-ipv4" 2>/dev/null || true)
+            else
+                # IMDSv1 fallback for older AMIs.
+                public_ip=$(curl -s --max-time 1 \
+                    "http://169.254.169.254/latest/meta-data/public-ipv4" 2>/dev/null || true)
+            fi
+            if [ -n "$public_ip" ]; then
+                PLATFORM_OS=linux-ec2
+                PLATFORM_HOST="$public_ip"
+                PLATFORM_IS_CLOUD=true
+            else
+                PLATFORM_OS=linux-local
+                PLATFORM_HOST=localhost
+                PLATFORM_IS_CLOUD=false
+            fi
+            ;;
+        MINGW*|CYGWIN*|MSYS*)
+            # Native bash on Windows (Git Bash). Not WSL2 — Docker Desktop
+            # still binds to localhost from the operator's perspective.
+            PLATFORM_OS=windows-wsl2
+            PLATFORM_HOST=localhost
+            PLATFORM_IS_CLOUD=false
+            ;;
+        *)
+            PLATFORM_OS=unknown
+            PLATFORM_HOST=localhost
+            PLATFORM_IS_CLOUD=false
+            ;;
+    esac
+    export PLATFORM_OS PLATFORM_HOST PLATFORM_IS_CLOUD
+}
+
 # ───────────────────────── OS detection ──────────────────────────────────
 OS=unknown; PKG_MGR=""; OS_PRETTY="unknown"
 detect_os() {
@@ -774,6 +848,7 @@ ensure_python_deps() {
 # ───────────────────────── Main flow ─────────────────────────────────────
 main() {
     detect_os
+    detect_platform
     if [ "$OS" = "windows" ]; then
         echo ""
         echo "╔══════════════════════════════════════╗"

@@ -2,7 +2,9 @@
 
 import { useEffect, useState } from "react";
 
-export const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost/api";
+// Same relative-default rationale as frontend/lib/api.ts:3 — never bake
+// a host into the production bundle. Caddy maps /api/* → api:8080.
+export const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || "/api";
 
 export type SettingEntry = {
   is_secret: boolean;

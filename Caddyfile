@@ -1,4 +1,12 @@
-:80 {
+# AuditLens reverse proxy.
+#
+# Listens on :80 (standard HTTP) AND :8088 (non-privileged fallback so
+# macOS Docker Desktop doesn't need :80 published — handy when port 80
+# is already taken by something else on the host, e.g. local Apache).
+# Both addresses route the same way: /api/* → api container, /health
+# and /ready → api container, everything else → Next.js frontend.
+
+(routes) {
     handle /api/* {
         uri strip_prefix /api
         reverse_proxy api:8080
@@ -12,4 +20,12 @@
     handle {
         reverse_proxy frontend:3000
     }
+}
+
+:80 {
+    import routes
+}
+
+:8088 {
+    import routes
 }
