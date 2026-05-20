@@ -1,7 +1,7 @@
 # Makefile for Audit Forwarder
 # Production-ready build, test, and deployment tasks
 
-.PHONY: help build build-alpine build-distroless test scan clean deploy deploy-check migrate setup start stop restart status monitoring logs health ps sync backup backup-list backup-restore
+.PHONY: help build build-alpine build-distroless test scan clean deploy deploy-check migrate setup start stop restart status monitoring logs health ps sync backup backup-list backup-restore update update-check
 
 ##############################################################################
 # Quickstart Lifecycle (Phase 3 — single-command install + service control)
@@ -43,6 +43,39 @@ monitoring: ## Show monitoring URLs
 	@echo "Grafana:    http://localhost:3001 (admin/admin)"
 	@echo "Prometheus: http://localhost:9090"
 	@echo ""
+
+##############################################################################
+# Update flow for an already-running deployment
+#   - `make update`        : git pull → docker compose pull → up -d --build → migrate
+#   - `make update-check`  : does NOT modify anything; just compares HEAD ↔ origin/main
+#
+# Both are safe to run repeatedly. The migrate step is best-effort — the api
+# container's own entrypoint also runs alembic upgrade on start, so a
+# transient failure here doesn't leave the DB in a bad state.
+##############################################################################
+
+update: ## Pull latest + rebuild containers + run migrations
+	@echo "⬆  Pulling latest AuditLens..."
+	@git pull origin main
+	@echo "ℹ  Rebuilding and restarting containers..."
+	@docker compose -f docker-compose.prod.yml pull --quiet
+	@docker compose -f docker-compose.prod.yml up -d --build
+	@echo "ℹ  Running migrations..."
+	@docker exec auditlens-api bash -c \
+	  "cd /app/backend && python -m alembic upgrade head" 2>/dev/null || \
+	  echo "⚠  Migration step failed — check manually"
+	@echo "✅  AuditLens updated to $$(git rev-parse --short HEAD)"
+
+update-check: ## Check if a remote update exists (no changes)
+	@git fetch origin main --quiet 2>/dev/null || true
+	@LOCAL=$$(git rev-parse HEAD); \
+	 REMOTE=$$(git rev-parse origin/main 2>/dev/null); \
+	 if [ "$$LOCAL" = "$$REMOTE" ]; then \
+	   echo "✅  Already up to date ($$(git rev-parse --short HEAD))"; \
+	 else \
+	   echo "⬆  Update available: $$(git rev-parse --short HEAD) → $$(git rev-parse --short origin/main)"; \
+	   echo "   Run: make update"; \
+	 fi
 
 ##############################################################################
 # Postgres backup / restore

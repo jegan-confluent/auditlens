@@ -240,7 +240,13 @@ All host ports bind to `127.0.0.1` by default. The legacy Streamlit dashboard (f
 You don't need to re-run the wizard to pick up changes. Existing `.env` / `.secrets` are preserved across `git pull`.
 
 ```bash
-# Workstation
+# Workstation — full lifecycle (pull + rebuild + migrations) in one target
+make update
+
+# Just check if an update exists, without applying it
+make update-check
+
+# Manual equivalent
 git pull origin main
 docker compose -f docker-compose.prod.yml up -d --build
 
@@ -248,7 +254,30 @@ docker compose -f docker-compose.prod.yml up -d --build
 git pull origin main && docker compose -f docker-compose.prod.yml up -d --build
 ```
 
+`./setup` itself also self-updates on launch: if the local clone is behind `origin/main`, it pulls and re-execs before the wizard starts. Disable with `--no-update` (or `AUDITLENS_NO_UPDATE=1`) for offline / CI runs.
+
+A `watchtower` service in `docker-compose.prod.yml` polls every 5 minutes for newer images of any container that isn't digest-pinned (configurable via `WATCHTOWER_POLL_INTERVAL`). Today most images are pinned by `@sha256:` so watchtower is mostly a no-op; the service exists so future un-pinned dependencies pick up security patches automatically.
+
 `make deploy` does the same flow remotely (rsync + rebuild) — see [docs/Deployment_Guide.md](docs/Deployment_Guide.md).
+
+### Windows / WSL2
+
+The bash `./setup` wizard cannot run from CMD or PowerShell directly. Install WSL2 once and use the Ubuntu shell for everything:
+
+```powershell
+# In PowerShell (run as Administrator), one-time install:
+wsl --install
+```
+
+Then open Ubuntu from the Start Menu and run:
+
+```bash
+git clone https://github.com/jegan-confluent/auditlens
+cd auditlens
+./setup
+```
+
+Docker Desktop for Windows with the WSL2 backend is also required (containers run inside the WSL2 VM). The repo includes a `setup.bat` stub that prints these instructions for anyone who accidentally double-clicks it from Explorer.
 
 ---
 

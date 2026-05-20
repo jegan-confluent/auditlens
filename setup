@@ -15,6 +15,59 @@
 # silent exit mid-recovery.
 set -uo pipefail
 
+# ───────────────────────── Self-update on launch ─────────────────────────
+# Top-of-script auto-pull so a stale clone gets the latest setup logic
+# before any prereq checks run. Guard rails:
+#
+#   • Sentinel AUDITLENS_UPDATED=1 is exported just before we re-exec
+#     ourselves after a successful pull, so the re-execed script skips
+#     this block — no infinite loop.
+#   • $1 == "--no-update" or AUDITLENS_NO_UPDATE=1 disables the check
+#     entirely (CI, offline installs, when the operator is mid-debug).
+#   • Every git call has a fast failure path: no git binary, no origin,
+#     network error → we fall through silently / with one info line and
+#     continue with the local copy. The wizard is the source of value;
+#     the update is a convenience.
+#
+# Inline printf (no color helpers) because this block runs BEFORE any UI
+# helpers / OS detection are defined.
+if [ "${AUDITLENS_UPDATED:-}" = "1" ]; then
+    : # We just re-execed after a successful pull — skip to setup.
+elif [ "${1:-}" = "--no-update" ]; then
+    # Consume the flag so the rest of the script (and the Python wizard
+    # it hands off to) never sees an unknown argument.
+    shift
+elif [ "${AUDITLENS_NO_UPDATE:-}" = "1" ]; then
+    : # Explicit env-var opt-out.
+elif ! command -v git >/dev/null 2>&1; then
+    : # No git, can't update.
+else
+    _UPDATE_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    if ! git -C "$_UPDATE_SCRIPT_DIR" remote get-url origin >/dev/null 2>&1; then
+        : # Not in a git repo with an origin (e.g. user untarred a release).
+    elif ! git -C "$_UPDATE_SCRIPT_DIR" fetch origin main --quiet --depth=1 2>/dev/null; then
+        # Network unreachable / private repo / corp proxy block.
+        printf 'ℹ  Could not reach origin — running with local version.\n'
+    else
+        _LOCAL_SHA=$(git -C "$_UPDATE_SCRIPT_DIR" rev-parse HEAD 2>/dev/null || true)
+        _REMOTE_SHA=$(git -C "$_UPDATE_SCRIPT_DIR" rev-parse origin/main 2>/dev/null || true)
+        if [ -n "$_LOCAL_SHA" ] && [ -n "$_REMOTE_SHA" ] && [ "$_LOCAL_SHA" != "$_REMOTE_SHA" ]; then
+            _REMOTE_SHORT=$(git -C "$_UPDATE_SCRIPT_DIR" rev-parse --short origin/main 2>/dev/null)
+            printf '⬆  New version available (%s).\n' "$_REMOTE_SHORT"
+            printf '   Pulling latest changes...\n'
+            if git -C "$_UPDATE_SCRIPT_DIR" pull origin main --quiet; then
+                _NEW_SHORT=$(git -C "$_UPDATE_SCRIPT_DIR" rev-parse --short HEAD)
+                printf '✅  Updated to %s. Restarting...\n' "$_NEW_SHORT"
+                export AUDITLENS_UPDATED=1
+                exec "$0" "$@"
+            else
+                printf '⚠  Could not pull — running with current version.\n'
+            fi
+        fi
+    fi
+    unset _UPDATE_SCRIPT_DIR _LOCAL_SHA _REMOTE_SHA _REMOTE_SHORT _NEW_SHORT
+fi
+
 # ───────────────────────── Minimum versions ──────────────────────────────
 PYTHON=${PYTHON:-python3}
 PYTHON_MIN_MAJOR=3
@@ -174,6 +227,8 @@ manual_install_python() {
         amzn|rhel)     echo "    sudo dnf install -y python3.11 python3.11-pip" ;;
         ubuntu|debian) echo "    sudo apt-get install -y python3.11 python3.11-venv" ;;
         macos)         echo "    brew install python@3.11" ;;
+        windows)       echo "    Install Python 3.${PYTHON_MIN_MINOR}+ from https://python.org/downloads" ;
+                       echo "    (then re-run setup from a WSL2 Ubuntu terminal)" ;;
         *)             echo "    Install Python 3.${PYTHON_MIN_MINOR}+ for your OS." ;;
     esac
 }
@@ -430,6 +485,7 @@ check_python_dep_compat() {
         macos)         echo "  Install via: brew install python@3.13" ;;
         amzn|rhel)     echo "  Install via: sudo dnf install -y python3.13" ;;
         ubuntu|debian) echo "  Install via: sudo apt-get install -y python3.13 python3.13-venv" ;;
+        windows)       echo "  Install Python 3.13 from https://python.org/downloads (then re-run from WSL2)" ;;
         *)             echo "  Install Python 3.12 or 3.13 for your OS." ;;
     esac
     exit 1
@@ -437,13 +493,36 @@ check_python_dep_compat() {
 
 ensure_docker() {
     check_docker; local rc=$?
-    if [ "$rc" -eq 0 ]; then ok "Docker $DOCKER_VERSION_STR"; return 0; fi
+    if [ "$rc" -eq 0 ]; then
+        # Daemon is up — distinguish Docker Desktop (mac) vs Engine (linux)
+        # so the operator sees what they're actually running. `docker info`
+        # exposes "Operating System: Docker Desktop" on Desktop installs.
+        if [ "$OS" = "macos" ]; then
+            if docker info 2>/dev/null | grep -qi "docker desktop"; then
+                ok "Docker Desktop $DOCKER_VERSION_STR (running)"
+            else
+                ok "Docker $DOCKER_VERSION_STR (engine — Docker Desktop not detected)"
+            fi
+        else
+            # On Linux, verify systemd thinks the unit is active too. A
+            # `docker info` success with a non-active unit can happen with
+            # weird wrapper scripts; surface the inconsistency.
+            if command -v systemctl >/dev/null 2>&1 && \
+               ! systemctl is-active --quiet docker 2>/dev/null; then
+                warn "Docker daemon answered but systemd reports it inactive."
+                echo "  Try: sudo systemctl start docker"
+            fi
+            ok "Docker $DOCKER_VERSION_STR"
+        fi
+        return 0
+    fi
     if [ "$rc" -eq 2 ]; then
         # Installed but daemon not running.
         fail "Docker is installed (v$DOCKER_VERSION_STR) but the daemon is not running."
         case "$OS" in
-            macos)         echo "  Start Docker Desktop and re-run ./setup." ;;
-            amzn|rhel|ubuntu|debian) echo "  Try:  sudo systemctl start docker" ;;
+            macos)         echo "  Open Docker Desktop from Applications and wait for it to start," ;
+                           echo "  then re-run ./setup." ;;
+            amzn|rhel|ubuntu|debian|windows) echo "  Try:  sudo systemctl start docker" ;;
             *)             echo "  Start Docker for your OS and re-run ./setup." ;;
         esac
         exit 1
@@ -515,6 +594,33 @@ ensure_disk() {
         exit 1
     fi
     ok "Disk space ${avail_gb}GB available (need ${MIN_DISK_GB}GB)"
+}
+
+# ───────────────────────── Docker memory allocation (macOS) ──────────────
+# On macOS, Docker Desktop runs in a VM with a configured RAM cap. The
+# AuditLens stack (forwarder + api + postgres + grafana + prometheus)
+# does not fit comfortably below 2GB. This check is macOS-only; on Linux
+# `docker info` reports host RAM which is not user-configurable from the
+# Docker side, so warning the operator there isn't useful.
+ensure_docker_memory() {
+    [ "$OS" = "macos" ] || return 0
+    local mem_bytes
+    mem_bytes=$(docker info --format '{{.MemTotal}}' 2>/dev/null)
+    [[ "$mem_bytes" =~ ^[0-9]+$ ]] || return 0
+    if [ "$mem_bytes" -lt 1073741824 ]; then  # < 1 GB
+        fail "Docker has less than 1GB RAM allocated."
+        echo "  AuditLens needs at least 2GB for all containers."
+        echo "  Increase in Docker Desktop → Settings → Resources → Memory."
+        exit 1
+    elif [ "$mem_bytes" -lt 2147483648 ]; then  # < 2 GB
+        warn "Docker has less than 2GB RAM allocated."
+        echo "  AuditLens needs at least 2GB for all containers."
+        echo "  Increase in Docker Desktop → Settings → Resources → Memory."
+    else
+        local mem_gb
+        mem_gb=$(( mem_bytes / 1073741824 ))
+        ok "Docker memory ${mem_gb}GB allocated"
+    fi
 }
 
 # ───────────────────────── Port availability (soft, ask to continue) ─────
@@ -652,9 +758,28 @@ main() {
         echo "║        AuditLens Setup               ║"
         echo "╚══════════════════════════════════════╝"
         echo ""
-        fail "Windows is not supported. Use WSL2 (Ubuntu) instead:"
-        echo "    https://learn.microsoft.com/windows/wsl/install"
-        exit 1
+        warn "Windows detected (Git Bash)."
+        echo "    AuditLens setup requires WSL2 for full compatibility."
+        echo ""
+        echo "    Quick setup:"
+        echo "      1. Install WSL2: wsl --install (run in PowerShell as Admin)"
+        echo "      2. Open Ubuntu from Start Menu"
+        echo "      3. Clone and run:"
+        echo "         git clone https://github.com/jegan-confluent/auditlens"
+        echo "         cd auditlens && ./setup"
+        echo ""
+        echo "    Alternatively, Docker Desktop for Windows with WSL2 backend"
+        echo "    is required for containers to work correctly."
+        echo ""
+        echo "    Press Enter to attempt setup anyway (may fail), or Ctrl-C to exit."
+        # /dev/tty fallback for piped invocations; existing convention in
+        # prompt_yn earlier in this file.
+        if [ -r /dev/tty ]; then
+            read -r _windows_ack </dev/tty || exit 1
+        else
+            read -r _windows_ack || exit 1
+        fi
+        unset _windows_ack
     fi
     print_banner
 
@@ -663,6 +788,7 @@ main() {
     ensure_compose
     ensure_git
     ensure_disk
+    ensure_docker_memory
     ensure_ports
 
     echo ""
