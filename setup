@@ -19,11 +19,14 @@ set -uo pipefail
 PYTHON=${PYTHON:-python3}
 PYTHON_MIN_MAJOR=3
 PYTHON_MIN_MINOR=11
-# Highest minor version AuditLens is regularly exercised on. Newer Python
-# is allowed (we soft-warn, not block) — but historically some transitive
-# deps (e.g. psycopg-binary 3.1.x) didn't ship wheels for the bleeding-edge
-# minor on day one, leading to setup-time pip failures the operator can't
-# easily debug. The warning steers them toward a known-good interpreter.
+# Highest minor version AuditLens is regularly exercised on. Above this we
+# fall through to a *dynamic* compatibility check: a `pip install --dry-run`
+# inside the freshly-created venv tells us authoritatively whether every
+# pinned dep has a wheel for the current Python. Self-healing — when
+# pydantic-core ships 3.15 wheels next year, the bump happens automatically
+# with no code change. Historical context: psycopg-binary 3.1.x lacked 3.14
+# wheels on day one, which is exactly the class of failure the dry-run
+# catches up front instead of mid-`pip install`.
 PYTHON_MAX_TESTED_MINOR=13
 DOCKER_MIN_MAJOR=20
 DOCKER_MIN_MINOR=10
@@ -341,7 +344,6 @@ manual_install_compose() {
 ensure_python() {
     if check_python; then
         ok "Python $PYTHON_VERSION_STR"
-        warn_if_python_too_new
         return 0
     fi
     fail "Python ${PYTHON_MIN_MAJOR}.${PYTHON_MIN_MINOR}+ not found${PYTHON_VERSION_STR:+ (found $PYTHON_VERSION_STR)}."
@@ -357,23 +359,68 @@ ensure_python() {
         manual_install_python; exit 1
     fi
     ok "Python $PYTHON_VERSION_STR (installed)"
-    warn_if_python_too_new
 }
 
-# Soft-warn (never blocking) when the chosen interpreter is newer than the
-# tested ceiling. We continue to pip install with the bleeding-edge Python
-# because most of the dep set works there — but the operator deserves a
-# heads-up that a wheel-resolution failure later might be a Python-version
-# problem rather than a transient pypi issue.
-warn_if_python_too_new() {
+# Dynamic dep-compatibility check, called inside ensure_python_deps once the
+# venv exists. For Python ≤ PYTHON_MAX_TESTED_MINOR (3.13 today) this is a
+# silent no-op — the dep set is regularly exercised on those versions.
+#
+# For Python > PYTHON_MAX_TESTED_MINOR we run `pip install --dry-run -r
+# requirements.txt` against the *real* venv pip. If every package can be
+# resolved (i.e. wheels exist for this interpreter, or sources build
+# cleanly), we continue. If not, we list the unresolvable packages and exit
+# with a per-OS install hint pointing at a known-good interpreter.
+#
+# Args: $1 = venv directory (so we use the venv's pip, not the system one).
+#       $2 = path to requirements.txt
+#
+# This replaces the previous static soft-warn — same trigger point (Python
+# above the tested ceiling) but the verdict comes from pip's own resolver
+# rather than a hand-maintained version list.
+check_python_dep_compat() {
+    local venv_dir="$1" req="$2"
     local minor
     minor=$(printf '%s' "$PYTHON_VERSION_STR" | cut -d. -f2)
     [[ "$minor" =~ ^[0-9]+$ ]] || return 0
-    if [ "$minor" -gt "$PYTHON_MAX_TESTED_MINOR" ]; then
-        warn "Python ${PYTHON_VERSION_STR} detected. AuditLens is tested on Python 3.11–3.${PYTHON_MAX_TESTED_MINOR}."
-        echo "    Some dependencies may not yet support 3.${minor}."
-        echo "    Consider using Python 3.11, 3.12, or 3.13 for best compatibility."
+    if [ "$minor" -le "$PYTHON_MAX_TESTED_MINOR" ]; then
+        return 0
     fi
+    warn "Python ${PYTHON_VERSION_STR}+ detected. Checking dependency compatibility…"
+    # Upgrade pip first so its resolver understands the latest wheel formats.
+    # Failure here is non-fatal — the bundled pip is often new enough.
+    "$venv_dir/bin/pip" install --upgrade pip >/dev/null 2>&1 || true
+    local dry_run_output dry_run_rc
+    dry_run_output=$("$venv_dir/bin/pip" install --dry-run -r "$req" 2>&1)
+    dry_run_rc=$?
+    if [ "$dry_run_rc" -eq 0 ]; then
+        ok "Dependencies compatible with Python ${PYTHON_VERSION_STR}. Continuing."
+        return 0
+    fi
+    fail "One or more dependencies are not yet compatible with Python ${PYTHON_VERSION_STR}."
+    echo "  Incompatible packages:"
+    # pip emits either "No matching distribution found for X" or
+    # "Could not find a version that satisfies the requirement X" — capture
+    # both. Fall back to a generic note if neither pattern matched (e.g.
+    # pip surfaced a build error or a resolver conflict).
+    local failing
+    failing=$(printf '%s\n' "$dry_run_output" \
+        | grep -E "No matching distribution found for|Could not find a version that satisfies" \
+        | sed -E 's/.*(for|requirement) //' \
+        | sort -u)
+    if [ -n "$failing" ]; then
+        printf '%s\n' "$failing" | sed 's/^/    • /'
+    else
+        echo "    (pip did not surface specific packages — see full output below)"
+        printf '%s\n' "$dry_run_output" | tail -20 | sed 's/^/    /'
+    fi
+    echo "  Recommended: use Python 3.12 or 3.13."
+    case "$OS" in
+        macos)         echo "  Install via: brew install python@3.13" ;;
+        amzn|rhel)     echo "  Install via: sudo dnf install -y python3.13" ;;
+        ubuntu|debian) echo "  Install via: sudo apt-get install -y python3.13 python3.13-venv" ;;
+        *)             echo "  Install Python 3.12 or 3.13 for your OS." ;;
+    esac
+    exit 1
 }
 
 ensure_docker() {
@@ -536,8 +583,18 @@ ensure_python_deps() {
     # Switch the bootstrap interpreter to the venv copy so module-level
     # imports in scripts/bootstrap_auditlens.py resolve.
     PYTHON="$venv_dir/bin/python"
+
+    # Dynamic compatibility gate: for Python > PYTHON_MAX_TESTED_MINOR, run
+    # `pip install --dry-run` against the real requirements.txt and bail
+    # early with a clear "use Python 3.12 or 3.13" message if any wheel is
+    # missing. Below the ceiling this is a no-op. The dry-run shares its
+    # pip-upgrade step with the real install below, so we only pay the
+    # `pip install --upgrade pip` cost once.
+    check_python_dep_compat "$venv_dir" "$req"
+
     info "Installing Python dependencies (this can take a minute)…"
     # Best-effort pip upgrade — old pip can trip on modern wheel resolvers.
+    # Skipped automatically if check_python_dep_compat already upgraded it.
     if ! "$venv_dir/bin/pip" install -q --upgrade pip >/dev/null 2>&1; then
         warn "pip self-upgrade failed (non-fatal) — continuing with bundled pip."
     fi
