@@ -103,6 +103,7 @@ URL_HINT_BOOTSTRAP        = "https://confluent.cloud (Cluster → Settings → E
 URL_HINT_KAFKA_API_KEY    = "https://confluent.cloud (Cluster → API Keys)"
 URL_HINT_CLOUD_API_KEY    = "https://confluent.cloud/settings/api-keys"
 URL_HINT_SCHEMA_REGISTRY  = "https://confluent.cloud (Environment → Stream Governance API)"
+URL_HINT_AUDIT_LOG_PAGE   = "https://confluent.cloud/settings/audit_logs/cli"
 
 
 def ok_line(message: str) -> None:
@@ -413,28 +414,15 @@ def _validate_cc_credentials(api_key: str, api_secret: str, timeout_seconds: flo
         return 0
 
 
-def _fetch_audit_log_cluster(
+def _fetch_environments(
     api_key: str, api_secret: str, timeout_seconds: float = 10.0,
-) -> tuple[int, dict | None]:
-    """Hit GET /audit-log/v1/config. Returns (status_code, data | None).
+) -> tuple[int, list[dict] | None]:
+    """GET /org/v2/environments → list of {id, display_name}.
 
-    Successful response: (200, {bootstrap, cluster_id, env_id}).
-    HTTP failure (401/403/404/etc.): (status_code, None).
-    Network / parse failure: (0, None).
-
-    The caller uses the status code to pick a specific error message
-    (permissions vs. not-configured vs. transient).
-
-    Confluent auto-creates a system-managed audit-log cluster per org —
-    it is NOT visible via /cmk/v2/clusters and the operator's regular
-    clusters are NOT valid sources for the audit topic. This endpoint
-    is the only authoritative way to find the right cluster.
-
-    Response shape (Confluent docs):
-        {"destinations": {"bootstrap_servers": "pkc-xxx:9092", ...},
-         "metadata":     {"resource_id": "lkc-xxx",
-                          "environment_id": "env-xxx", ...}}
-    """
+    Returns (status_code, envs | None). HTTP / network failure surfaces
+    via the status code (0 on transport error). Pagination across very
+    large orgs is not handled — the eligible-cluster listing is purely
+    informational, so showing the first page is fine."""
     import base64
     from urllib.request import Request, urlopen
     from urllib.error import HTTPError
@@ -442,7 +430,7 @@ def _fetch_audit_log_cluster(
     auth = base64.b64encode(f"{api_key}:{api_secret}".encode()).decode()
     headers = {"Authorization": f"Basic {auth}", "Accept": "application/json"}
     try:
-        req = Request("https://api.confluent.cloud/audit-log/v1/config", headers=headers)
+        req = Request("https://api.confluent.cloud/org/v2/environments", headers=headers)
         with urlopen(req, timeout=timeout_seconds) as resp:
             status = resp.status
             data = json.loads(resp.read().decode("utf-8"))
@@ -453,61 +441,114 @@ def _fetch_audit_log_cluster(
 
     if status != 200:
         return status, None
-
-    destinations = data.get("destinations") or {}
-    metadata = data.get("metadata") or {}
-
-    bootstrap = destinations.get("bootstrap_servers") or ""
-    # Be lenient about shape — CC has historically returned both string
-    # and single-element list for this field on different surface versions.
-    if isinstance(bootstrap, list):
-        bootstrap = bootstrap[0] if bootstrap else ""
-    if not isinstance(bootstrap, str):
-        return status, None
-    if "://" in bootstrap:
-        bootstrap = bootstrap.split("://", 1)[1]
-    bootstrap = bootstrap.strip()
-    if not bootstrap:
-        return status, None
-
-    return status, {
-        "bootstrap": bootstrap,
-        "cluster_id": (metadata.get("resource_id") or "").strip(),
-        "env_id": (metadata.get("environment_id") or "").strip(),
-    }
+    envs: list[dict] = []
+    for item in (data.get("data") or []):
+        envs.append({
+            "id": (item.get("id") or "").strip(),
+            "display_name": (item.get("display_name") or "").strip(),
+        })
+    return status, envs
 
 
-def _try_autodetect_audit_log_cluster(inputs: BootstrapInputs) -> bool:
-    """Phase 1 source-cluster discovery — pure REST, no picker.
+def _fetch_clusters_for_env(
+    api_key: str, api_secret: str, env_id: str, timeout_seconds: float = 10.0,
+) -> list[dict]:
+    """GET /cmk/v2/clusters?environment=<env_id> → list of clusters.
 
-    Step 1: prompt for a Cloud-scoped CC API key (or use one already in
-        inputs from config-file mode). Pressing Enter skips to manual.
-    Step 2: validate the key (GET /org/v2/environments) and hit
-        GET /audit-log/v1/config to fetch the org's system-managed
-        audit-log cluster (lkc-xxx, env-xxx, pkc-xxx:9092).
+    Returns [{id, display_name, type, bootstrap}, ...] or an empty list
+    on any failure. The cluster listing is informational only, so a
+    per-env failure should just skip that env without blocking Phase 1.
+    Bootstrap servers are stripped of the SASL_SSL:// scheme prefix so
+    the display matches the form the operator pastes into .env."""
+    import base64
+    from urllib.request import Request, urlopen
+    from urllib.parse import quote
+    from urllib.error import HTTPError
 
-    On success: populates inputs.audit_bootstrap, inputs.audit_topic,
-    inputs.cloud_api_key, inputs.cloud_api_secret; returns True so the
-    caller skips the manual bootstrap + topic prompts.
+    auth = base64.b64encode(f"{api_key}:{api_secret}".encode()).decode()
+    headers = {"Authorization": f"Basic {auth}", "Accept": "application/json"}
+    url = f"https://api.confluent.cloud/cmk/v2/clusters?environment={quote(env_id)}"
+    try:
+        req = Request(url, headers=headers)
+        with urlopen(req, timeout=timeout_seconds) as resp:
+            if resp.status != 200:
+                return []
+            data = json.loads(resp.read().decode("utf-8"))
+    except HTTPError:
+        return []
+    except Exception:
+        return []
 
-    On failure / skip: returns False; caller falls through to manual
-    entry. Credentials are NEVER persisted until BOTH validation and
-    audit-log discovery succeed — an invalid or partial attempt leaves
-    no stray CC creds in inputs (and thus none in .secrets)."""
-    # Step 1: collect cloud-scoped CC API key + secret (or reuse one already
-    # populated from config-file mode). Skip the secret prompt when the key
-    # prompt was left blank — saves a keystroke.
+    clusters: list[dict] = []
+    for item in (data.get("data") or []):
+        spec = item.get("spec") or {}
+        config = spec.get("config") or {}
+        kind = (config.get("kind") or "").strip()
+        bootstrap = (spec.get("kafka_bootstrap_endpoint") or "").strip()
+        if "://" in bootstrap:
+            bootstrap = bootstrap.split("://", 1)[1]
+        clusters.append({
+            "id": (item.get("id") or "").strip(),
+            "display_name": (spec.get("display_name") or "").strip(),
+            "type": kind,
+            "bootstrap": bootstrap,
+        })
+    return clusters
+
+
+def _show_audit_log_directions() -> None:
+    """STEP 1 of Phase 1: directions banner pointing the operator at the
+    Confluent Cloud audit-logs CLI page where the bootstrap endpoint,
+    cluster id, environment id, and topic name are all surfaced together.
+
+    The audit-log cluster is system-managed and cannot be reliably
+    discovered via the public REST API, so the wizard sends the operator
+    to the UI for the authoritative values."""
+    bar = "━" * 60
+    print()
+    print(bold(cyan(bar)))
+    print(bold(cyan("  Finding your Audit Log cluster")))
+    print(bold(cyan(bar)))
+    print()
+    print("  Open this URL to find your audit log cluster details:")
+    print(f"  → {link(URL_HINT_AUDIT_LOG_PAGE)}")
+    print()
+    print("  You will see:")
+    print(dim("    Cluster    : lkc-xxxxx"))
+    print(dim("    Environment: env-xxxxx"))
+    print(dim("    Topic      : confluent-audit-log-events"))
+    print(dim("    Bootstrap  : pkc-xxxxx.region.aws.confluent.cloud:9092"))
+    print()
+    print("  Copy the bootstrap endpoint and create an API key when prompted below.")
+    print()
+
+
+def _show_eligible_clusters_for_reference(inputs: BootstrapInputs) -> None:
+    """STEP 2 of Phase 1: optional informational listing.
+
+    Prompts for a Cloud-scoped CC API key (key + secret). When provided
+    and valid, hits /org/v2/environments and /cmk/v2/clusters to display
+    the org's Standard/Dedicated clusters as reference — these are the
+    candidates eligible to back an audit-log cluster. The listing is
+    NOT a picker: the audit-log cluster bootstrap is separate from all
+    of these and must be sourced from the audit_logs/cli page.
+
+    Skip / invalid / transport failure all fall through silently to the
+    manual prompts so a missing or weak Cloud API key never blocks the
+    install. Cloud credentials are only persisted to inputs once the
+    envs call succeeds, so partial attempts leave no stray creds in
+    inputs (and therefore none in .secrets)."""
     api_key = inputs.cloud_api_key
     api_secret = inputs.cloud_api_secret
     if not api_key:
         api_key = prompt_text(
-            "Confluent Cloud API key (cloud-scoped)",
+            "Confluent Cloud API key (optional — to show your eligible clusters)",
             secret=True,
             required=False,
             help_text=(
-                "Used to discover your audit log cluster automatically. "
-                "Create at: https://confluent.cloud/settings/api-keys → "
-                "Cloud scope. This is NOT your Kafka API key."
+                "Cloud-scoped key from https://confluent.cloud/settings/api-keys. "
+                "Used only to display eligible clusters for reference. "
+                "Press Enter to skip."
             ),
             url_hint=URL_HINT_CLOUD_API_KEY,
         )
@@ -517,62 +558,65 @@ def _try_autodetect_audit_log_cluster(inputs: BootstrapInputs) -> bool:
             secret=True,
             required=False,
         )
-
-    # If EITHER key or secret is missing, bail with a single informational
-    # line — no API call, no error, just steer the operator to manual entry.
     if not (api_key and api_secret):
-        info_line("No Cloud API key provided — enter bootstrap endpoint manually.")
-        return False
+        return
 
-    # Step 2: validate credentials before touching the audit-log endpoint.
-    # Specific dispatch on the HTTP status code so operators can tell auth
-    # failures apart from permission gaps.
     val_status = _validate_cc_credentials(api_key, api_secret)
-    if val_status == 401:
-        err_line("Cloud API key invalid — wrong key or secret. Enter bootstrap manually.")
-        return False
-    if val_status == 403:
-        err_line("Cloud API key lacks permissions — needs org-level read access. Enter bootstrap manually.")
-        return False
     if val_status != 200:
-        err_line(
-            f"Cloud API key validation failed ({val_status or 'no response'}) — "
-            "enter bootstrap manually."
-        )
-        return False
+        # Silent skip — informational listing only, the manual prompts
+        # below still let the operator complete Phase 1.
+        return
 
-    # Step 3: discover the org's audit-log cluster. The status tells us
-    # whether the cred works *but* lacks the AuditLogViewer role (403),
-    # whether the org simply doesn't have audit logging (404), or whether
-    # something else broke. None of these block the wizard — they just
-    # short-circuit to manual entry with a specific message.
-    audit_status, config = _fetch_audit_log_cluster(api_key, api_secret)
-    if audit_status == 403:
-        err_line("Cloud API key cannot access audit log config — needs AuditLogViewer role.")
-        return False
-    if audit_status == 404:
-        err_line("No audit log cluster found — your org may not have Standard/Dedicated clusters yet.")
-        return False
-    if audit_status != 200 or not config:
-        err_line(
-            f"Audit log discovery failed ({audit_status or 'no response'}) — "
-            "enter bootstrap manually."
-        )
-        return False
+    env_status, envs = _fetch_environments(api_key, api_secret)
+    if env_status != 200 or not envs:
+        return
 
-    # Step 4: persist only after BOTH validation and discovery succeeded.
+    # Persist the validated cloud creds so resume + render_secrets reuse
+    # them, but only after the envs call has actually succeeded.
     inputs.cloud_api_key = api_key
     inputs.cloud_api_secret = api_secret
-    inputs.audit_bootstrap = config["bootstrap"]
-    inputs.audit_topic = SOURCE_AUDIT_TOPIC  # confluent-audit-log-events
 
+    eligible_rows: list[tuple[str, str, str, str, str]] = []
+    basic_excluded = 0
+    for env in envs:
+        env_id = env["id"]
+        env_name = env["display_name"]
+        for cluster in _fetch_clusters_for_env(api_key, api_secret, env_id):
+            kind = cluster["type"]
+            if kind.lower() == "basic":
+                basic_excluded += 1
+                continue
+            eligible_rows.append((
+                env_id, env_name, cluster["display_name"], kind, cluster["bootstrap"],
+            ))
+
+    if not eligible_rows:
+        if basic_excluded:
+            print()
+            info_line(
+                f"({basic_excluded} Basic clusters excluded — audit logs not supported)"
+            )
+        return
+
+    # Width-align env-id / cluster-name / type for a readable column layout.
+    env_width  = max(len(f"{r[0]} / {r[1]}") for r in eligible_rows)
+    name_width = max(len(r[2]) for r in eligible_rows)
     print()
-    ok_line("Audit log cluster auto-detected:")
-    print(dim(f"      Cluster  : {config['cluster_id'] or '(unknown)'}"))
-    print(dim(f"      Env      : {config['env_id'] or '(unknown)'}"))
-    print(dim(f"      Bootstrap: {config['bootstrap']}"))
-    print(dim(f"      Topic    : {SOURCE_AUDIT_TOPIC}"))
-    return True
+    info_line("Clusters eligible for audit logs in your org:")
+    for env_id, env_name, name, kind, bootstrap in eligible_rows:
+        env_label = f"{env_id} / {env_name}".ljust(env_width)
+        n_label   = name.ljust(name_width)
+        k_label   = f"[{kind}]"
+        print(dim(f"     {env_label}   {n_label}  {k_label} — {bootstrap}"))
+    if basic_excluded:
+        print(dim(
+            f"     ({basic_excluded} Basic clusters excluded — "
+            "audit logs not supported)"
+        ))
+    print()
+    info_line("Your audit log cluster bootstrap is separate from these.")
+    print(dim(f"     Find it at: {link(URL_HINT_AUDIT_LOG_PAGE)}"))
+    print()
 
 
 def _prompt_for_missing_from_config(inputs: BootstrapInputs, load_result: ConfigLoadResult) -> tuple[BootstrapInputs, str | None]:
@@ -755,34 +799,41 @@ def collect_interactive_inputs(
         ):
             print_source_cluster_help()
 
+        # STEP 1 — directions banner.
+        # The audit-log cluster is system-managed and cannot be
+        # auto-discovered via the public REST API, so point the operator
+        # at the audit_logs/cli page where the bootstrap, cluster id,
+        # env id, and topic name are all shown together.
+        _show_audit_log_directions()
+
+        # STEP 2 — optional reference listing of eligible (Standard /
+        # Dedicated) clusters in the operator's org. This is NOT a picker
+        # — the audit-log cluster bootstrap is separate from all of them.
+        # The function handles its own skip/failure case silently so a
+        # missing or weak Cloud API key never blocks the install.
+        _show_eligible_clusters_for_reference(inputs)
+
+        # STEP 3 — manual source-cluster prompts.
         inputs.source_display_name = prompt_text(
             "Source cluster display name",
             default="Confluent Cloud Audit Logs",
             help_text="Display-only label used in installer summaries. This is not a Confluent technical ID and is safe to leave as the default.",
         )
-
-        # Discovery path: hit /audit-log/v1/config with a cloud-scoped CC
-        # API key. On success the wizard auto-populates audit_bootstrap +
-        # audit_topic and skips the manual prompts; on skip/failure it
-        # falls through to manual entry. The org's audit-log cluster is
-        # not visible via /cmk/v2/clusters, so there is no picker fallback.
-        autodetected = _try_autodetect_audit_log_cluster(inputs)
-        if not autodetected:
-            inputs.audit_bootstrap = prompt_text(
-                "Source bootstrap endpoint",
-                help_text=(
-                    "Run `confluent audit-log describe` to find it. "
-                    "It is NOT one of your regular Kafka clusters."
-                ),
-                url_hint=URL_HINT_BOOTSTRAP,
-            )
+        inputs.audit_bootstrap = prompt_text(
+            "Source bootstrap endpoint",
+            help_text=(
+                f"From {URL_HINT_AUDIT_LOG_PAGE}. "
+                "Example: pkc-xxxxx.us-west-2.aws.confluent.cloud:9092."
+            ),
+            url_hint=URL_HINT_AUDIT_LOG_PAGE,
+        )
         inputs.audit_api_key = prompt_text(
             "Audit log Kafka API key",
             secret=True,
             help_text=(
                 "Scoped to the audit log cluster only. "
-                "Create: confluent api-key create --service-account <sa-id> --resource <cluster-id>. "
-                "List existing: confluent api-key list --resource <cluster-id>."
+                "Create one on the audit logs page or via "
+                "`confluent api-key create --service-account <sa-id> --resource <cluster-id>`."
             ),
             url_hint=URL_HINT_KAFKA_API_KEY,
         )
@@ -791,15 +842,11 @@ def collect_interactive_inputs(
             secret=True,
             help_text="Required secret for the audit log Kafka API key. Kept masked and never echoed back.",
         )
-        # Only prompt for audit_topic when auto-detection didn't already
-        # set it. The audit-log endpoint always points at the canonical
-        # confluent-audit-log-events topic, so re-asking is noise.
-        if not autodetected:
-            inputs.audit_topic = prompt_text(
-                "Source audit topic",
-                default=SOURCE_AUDIT_TOPIC,
-                help_text="Required technical value. Use the topic name from `confluent audit-log describe`. Confluent Cloud audit logs usually use confluent-audit-log-events.",
-            )
+        inputs.audit_topic = prompt_text(
+            "Source audit topic",
+            default=SOURCE_AUDIT_TOPIC,
+            help_text="Confluent Cloud audit logs use confluent-audit-log-events by default.",
+        )
         inputs.group_id = prompt_text(
             "Consumer group",
             default="auditlens-forwarder-v1",
@@ -811,6 +858,8 @@ def collect_interactive_inputs(
             "earliest",
             help_text="Use earliest for first-time installs if you want to inspect retained audit history. Use latest if you only want new events.",
         )
+
+        # STEP 4 — existing source validation (unchanged).
         source_result = validate_source_access(inputs)
         ok_line(
             f"Source validated — topic={source_result.topic}, partitions={source_result.partitions}, "
