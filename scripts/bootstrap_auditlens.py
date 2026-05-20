@@ -1191,7 +1191,14 @@ def _ensure_secret_file(path: Path, *, env_var: str, label: str) -> None:
     value = _read_env_value(REPO_ROOT / ".env", env_var) or make_admin_password()
     try:
         path.write_text(value + "\n")
-        path.chmod(0o600)
+        # 0444 (not 0600): Docker `file:` secrets bind-mount the host file
+        # with its native owner/perm intact. Grafana runs as uid 472 and
+        # postgres as uid 999 — neither can read a file owned by ec2-user
+        # (uid 1000) with mode 0600. World-readable inside the container is
+        # fine because the file is host-gitignored and the host filesystem
+        # is already in the trust boundary (the threat model is `docker
+        # inspect`, not "anyone with a shell on the host").
+        path.chmod(0o444)
         ok_line(f"Generated {label} → secrets/{path.name}")
     except OSError as exc:
         warn_line(f"Could not write {path} ({exc.__class__.__name__}). Continuing.")
