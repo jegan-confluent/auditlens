@@ -409,9 +409,47 @@ def _validate_cc_credentials(api_key: str, api_secret: str, timeout_seconds: flo
         return False
 
 
+def _fetch_audit_log_cluster(api_key: str, api_secret: str, timeout_seconds: float = 10.0) -> str | None:
+    """Hit the org's dedicated audit-log config endpoint. Returns the
+    bootstrap as host:port (scheme stripped), or None on any failure.
+
+    Confluent auto-creates an `_confluent_audit_log_cluster` for each org —
+    it is NOT visible via /cmk/v2/clusters and shouldn't be mixed in with
+    the operator's regular clusters in a picker. Calling this endpoint
+    first lets the wizard skip the picker entirely on accounts that have
+    audit logging configured."""
+    import base64
+    from urllib.request import Request, urlopen
+
+    auth = base64.b64encode(f"{api_key}:{api_secret}".encode()).decode()
+    headers = {"Authorization": f"Basic {auth}", "Accept": "application/json"}
+    try:
+        req = Request("https://api.confluent.cloud/audit-log/v1/config", headers=headers)
+        with urlopen(req, timeout=timeout_seconds) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return None
+
+    # Confluent has shipped this field as both a single string and a list.
+    # Some surface versions use `kafka_bootstrap_endpoint` instead. Be lenient.
+    bootstrap = data.get("bootstrap_servers")
+    if bootstrap in (None, ""):
+        bootstrap = data.get("kafka_bootstrap_endpoint", "")
+    if isinstance(bootstrap, list):
+        bootstrap = bootstrap[0] if bootstrap else ""
+    if not isinstance(bootstrap, str):
+        return None
+    if "://" in bootstrap:
+        bootstrap = bootstrap.split("://", 1)[1]
+    return bootstrap.strip() or None
+
+
 def _fetch_cc_clusters(api_key: str, api_secret: str, timeout_seconds: float = 10.0) -> list[dict]:
     """List every (env, cluster) the CC API key can see. Raises on HTTP /
-    JSON / auth failure; caller swallows and falls back to manual entry."""
+    JSON / auth failure; caller swallows and falls back to manual entry.
+    Each dict carries `kind` (Basic / Standard / Dedicated / Enterprise /
+    Freight) so callers can label or filter the list — the source-cluster
+    picker drops Basic, since Basic doesn't support audit logging."""
     import base64
     from urllib.request import Request, urlopen
 
@@ -440,10 +478,12 @@ def _fetch_cc_clusters(api_key: str, api_secret: str, timeout_seconds: float = 1
             # value matches the host:port the wizard writes into .env.
             if "://" in bootstrap:
                 bootstrap = bootstrap.split("://", 1)[1]
+            kind = ((spec.get("config") or {}).get("kind") or "").strip()
             out.append({
                 "env_id": env_id,
                 "cluster_name": spec.get("display_name") or cluster.get("id", ""),
                 "bootstrap": bootstrap,
+                "kind": kind,
             })
     return out
 
@@ -498,6 +538,20 @@ def _try_pick_source_cluster(inputs: BootstrapInputs) -> str | None:
     inputs.cloud_api_key = api_key
     inputs.cloud_api_secret = api_secret
 
+    # Step 1: try the dedicated audit-log endpoint first. The org's
+    # `_confluent_audit_log_cluster` is Confluent-managed and won't appear
+    # in /cmk/v2/clusters, so the picker can never expose it. If this
+    # endpoint returns a bootstrap, skip the picker entirely.
+    audit_bootstrap = _fetch_audit_log_cluster(api_key, api_secret)
+    if audit_bootstrap:
+        ok_line(f"Audit log cluster auto-detected: {audit_bootstrap}")
+        print(dim("      Topic: confluent-audit-log-events"))
+        return audit_bootstrap
+
+    # Step 2: fall back to a filtered picker. Basic clusters do not support
+    # audit logging, so we exclude them from the source-cluster picker (the
+    # destination prompt in Phase 2 keeps no filter — any cluster type is a
+    # valid AuditLens destination).
     try:
         clusters = _fetch_cc_clusters(api_key, api_secret)
     except Exception as exc:
@@ -507,15 +561,28 @@ def _try_pick_source_cluster(inputs: BootstrapInputs) -> str | None:
         )
         return None
 
-    if not clusters:
-        info_line("No clusters visible to that CC API key. Falling back to manual entry.")
+    filtered = [c for c in clusters if (c.get("kind") or "").lower() != "basic"]
+    excluded = len(clusters) - len(filtered)
+
+    if not filtered:
+        if excluded:
+            info_line(
+                f"Only Basic clusters visible to that CC API key "
+                f"({excluded} excluded — audit logs not supported). "
+                "Falling back to manual entry."
+            )
+        else:
+            info_line("No clusters visible to that CC API key. Falling back to manual entry.")
         return None
 
     print()
     print(cyan("  Available Confluent environments and clusters:"))
-    for i, c in enumerate(clusters, start=1):
+    if excluded:
+        print(dim(f"  ({excluded} Basic cluster(s) excluded — audit logs not supported)"))
+    for i, c in enumerate(filtered, start=1):
         name = (c["cluster_name"] or "?").ljust(20)
-        print(f"  [{i}] {c['env_id']} / {name} — {c['bootstrap']}")
+        kind = c.get("kind") or "?"
+        print(f"  [{i}] {c['env_id']} / {name} [{kind}] — {c['bootstrap']}")
     print()
     try:
         raw = input("  → Select source cluster number (or press Enter to enter manually): ").strip()
@@ -529,11 +596,11 @@ def _try_pick_source_cluster(inputs: BootstrapInputs) -> str | None:
     except ValueError:
         warn_line(f"Invalid selection {raw!r}. Falling back to manual entry.")
         return None
-    if not (1 <= idx <= len(clusters)):
+    if not (1 <= idx <= len(filtered)):
         warn_line(f"Selection {idx} out of range. Falling back to manual entry.")
         return None
-    chosen = clusters[idx - 1]
-    ok_line(f"Picked: {chosen['env_id']} / {chosen['cluster_name']} — {chosen['bootstrap']}")
+    chosen = filtered[idx - 1]
+    ok_line(f"Picked: {chosen['env_id']} / {chosen['cluster_name']} [{chosen.get('kind') or '?'}] — {chosen['bootstrap']}")
     return chosen["bootstrap"]
 
 
