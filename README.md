@@ -56,7 +56,8 @@ No data leaves your deployment. No telemetry. No phone-home.
 
 ### E. Alerting & Notifications
 
-- Slack, Teams, and custom webhook notifications (opt-in) — configured via `notifications.yml`
+- Slack, Teams, PagerDuty, and custom webhook destinations (opt-in) — configured via `notifications.yml` or the Settings UI
+- Per-destination digest mode (daily summary) and per-destination rate limiting with burst suppression
 - Per-signal-type and per-action-category filter rules
 - Alert deduplication and retry on transient failures
 - Test notification button in Settings UI
@@ -93,7 +94,8 @@ No data leaves your deployment. No telemetry. No phone-home.
 
 ### I. Setup & Configuration
 
-- Interactive `./setup` wizard — collects credentials, validates Kafka connectivity, generates `.env` and `.secrets`, starts services
+- Interactive `./setup` wizard with checkpoint / resume — collects credentials, validates Kafka connectivity, generates `.env` and `.secrets`, starts services
+- Optional Confluent Cloud API key step auto-discovers your environments and clusters so you pick the audit-log cluster from a list instead of pasting a bootstrap endpoint
 - `make start / stop / restart / status / deploy / migrate / test / help`
 - SQLite demo mode with seeded sample events — no Kafka credentials required (opt-in)
 - Profile-based Docker Compose — `postgres`, `observability`, `dev` profiles for optional services
@@ -103,14 +105,14 @@ No data leaves your deployment. No telemetry. No phone-home.
 ### J. Integrations
 
 - Schema Registry — endpoint and credentials configurable in Settings with live status check (opt-in)
-- Tableflow — enable/disable integration and enrich Tableflow audit events (opt-in)
-- Confluent Cloud Admin API for IAM lookups (opt-in, requires `CONFLUENT_CLOUD_API_KEY`)
+- Tableflow — Iceberg / Delta Lake export with in-UI prerequisite checking; AWS + Azure clusters (Dedicated, Enterprise, or Freight) with Schema Registry enabled
+- Confluent Cloud Admin API for IAM lookups and cluster discovery (opt-in, requires `CONFLUENT_CLOUD_API_KEY`)
 
 ---
 
 ## Architecture
 
-The forwarder (`auditlens-forwarder`) consumes the Confluent Cloud audit log topic, runs each event through signal classification and actor enrichment, then writes to PostgreSQL. The FastAPI backend (`auditlens-api`, port 8080) serves `/events`, `/summary`, `/filters`, `/system`, `/settings`, and admin endpoints from that database. The Next.js frontend (`auditlens-frontend`, port 3000) renders the dashboard, events, and settings pages.
+The forwarder (`auditlens-forwarder`, port 8003) consumes the Confluent Cloud audit log topic, runs each event through signal classification and actor enrichment, then writes to PostgreSQL. The FastAPI backend (`auditlens-api`, port 8080) serves `/events`, `/summary`, `/filters`, `/system`, `/settings`, and admin endpoints from that database. The Next.js frontend (`auditlens-frontend`, port 3000) renders the dashboard, events, and settings pages.
 
 Signal classification assigns every event a `signal_type` (`noise` → `informational` → `attention` → `action_required`) and a `signal_reason` code. The dashboard and events page filter and surface events by these signals; `noise` events are stored separately and hidden by default.
 
@@ -119,10 +121,12 @@ Signal classification assigns every event a `signal_type` (`noise` → `informat
 ## Quick Start
 
 **Prerequisites:**
+
 - Python 3.11 or higher
-- Docker Desktop with at least 6 GB RAM allocated
-- A Confluent Cloud account with access to the audit log topic
-- Kafka API Key + Secret with read access to the audit log topic
+- Docker Desktop (or Docker Engine + Compose v2) with ≥ 6 GB RAM
+- Free local ports: **8003** (forwarder), **8080** (API), **3000** (frontend); plus **9090** Prometheus, **3001** Grafana, **5432** Postgres in the default profile
+- A Confluent Cloud account with access to your audit log topic
+- Kafka API key + secret with read access to the audit log topic
 
 **Step 1 — Clone:**
 
@@ -131,75 +135,143 @@ git clone <repo-url>
 cd AuditLens
 ```
 
-**Step 2 — Run the setup wizard:**
+**Step 2 — Run the wizard:**
 
 ```bash
 ./setup
 ```
 
-The wizard prompts for your Kafka bootstrap endpoint, API key, and secret; validates connectivity; generates `.env` and `.secrets`; then starts all services.
+That's it. **You do not need to edit `.env` by hand.** The wizard collects every credential interactively, validates Kafka connectivity, writes `.env` + `.secrets` for you, and starts the stack. Phase 7 ends with a service-status panel and clickable links for the dashboard, API, and metrics.
 
 **Step 3 — Open the dashboard:**
 
 ```
-http://localhost:3000  (local dev only)
+http://localhost:3000
 ```
 
-You will see the Dashboard page with signal counts, top actors, and the event volume chart. Tables are empty until the forwarder has consumed events from your audit topic.
+You'll see the Dashboard with signal counts, top actors, and the event volume chart. Tables stay empty until the forwarder has consumed events from your audit topic.
 
 **No Kafka? SQLite demo mode:**
 
 ```bash
 scripts/run_sqlite_demo.sh
-# Open http://127.0.0.1:3000  (local dev only)
+# Open http://127.0.0.1:3000
 ```
 
-See [INSTALL.md](INSTALL.md) for every configuration variable, manual setup steps, and EC2 deployment instructions.
+---
+
+## What the Setup Wizard Does
+
+`./setup` runs through seven phases. On any failure it saves a checkpoint to `~/.auditlens_setup_checkpoint.json` so a re-run resumes from the last completed phase.
+
+1. **Local prerequisites** — checks Python ≥ 3.11, Docker daemon reachable, Compose v2 available, disk space, required ports free. Offers to install missing tooling on Amazon Linux / Ubuntu / Debian / macOS.
+2. **Source cluster** — *(optional first step)* if you provide a cloud-scoped Confluent Cloud API key (`https://confluent.cloud/settings/api-keys → Add key → Cloud scope`), the wizard validates it against `GET /org/v2/environments` and lists every environment + cluster you have access to so you can pick the audit-log cluster from a numbered menu. Then collects Kafka API key + secret for that cluster and validates connectivity by reading the audit topic.
+3. **Destination cluster** — Kafka endpoint + credentials for the cluster that will hold the enriched / signal / DLQ topics. Topics are created if missing.
+4. **Schema Registry** *(optional)* — URL + API key + secret; live `GET /subjects` validation.
+5. **Product / API settings** — admin token (auto-generated or provided), API port, optional Slack webhook.
+6. **Persistence** — SQLite path defaults match the deployment mode (`/app/data/auditlens.db` for Docker, the bind-mount path `./data/forwarder` is pre-created with current-user ownership).
+7. **Startup** — `docker compose up -d --build`, then progress-ticked health checks against the forwarder, API, and frontend with a `Still waiting... (Ns elapsed)` heartbeat every 10 seconds. On success the wizard prints a status panel with both `localhost:*` links (for tunnel users) and EC2 public-IP links (IMDSv2-aware, falls back to localhost off-EC2). Successful runs clear the checkpoint.
+
+Secrets generated for you: API admin token, `POSTGRES_PASSWORD`, `GRAFANA_ADMIN_PASSWORD` — all written to `.env` / `.secrets` and on subsequent resumes restored from the checkpoint so the postgres data volume keeps working.
+
+---
+
+## Services & Ports
+
+`docker compose -f docker-compose.prod.yml up -d` brings up:
+
+| Service | Container | Host port | Role |
+|---|---|---|---|
+| Forwarder | `auditlens-forwarder` | **8003** | Kafka consumer → classification → enrichment → DB writer; serves `/health`, `/metrics` |
+| API | `auditlens-api` | **8080** | FastAPI backend; serves `/events`, `/summary`, `/system`, `/settings`, `/health` |
+| Frontend | `auditlens-frontend` | **3000** | Next.js dashboard, events, settings |
+| Postgres | `auditlens-postgres` | 5432 | Event store + per-tenant settings |
+| Caddy | `auditlens-caddy` | 80, 443 | Reverse proxy + automatic TLS (production) |
+| Prometheus | `audit-prometheus` | 9090 | Metric scraping |
+| Grafana | `audit-grafana` | 3001 | Pre-provisioned dashboards (login: admin / generated `GRAFANA_ADMIN_PASSWORD`) |
+| AlertManager | `audit-alertmanager` | 9093 | Metric-based alert routing |
+| Postgres exporter | `auditlens-postgres-exporter` | 9187 | Postgres metrics for Prometheus |
+
+All host ports bind to `127.0.0.1` by default. The legacy Streamlit dashboard (formerly 8503) and the standalone landing page (formerly 8088) were removed — the Next.js frontend on 3000 is the only UI.
+
+---
+
+## Updating an Existing Checkout
+
+You don't need to re-run the wizard to pick up changes. Existing `.env` / `.secrets` are preserved across `git pull`.
+
+```bash
+# Workstation
+git pull origin main
+docker compose -f docker-compose.prod.yml up -d --build
+
+# EC2 (or any remote deploy target) — one-liner
+git pull origin main && docker compose -f docker-compose.prod.yml up -d --build
+```
+
+`make deploy` does the same flow remotely (rsync + rebuild) — see [docs/Deployment_Guide.md](docs/Deployment_Guide.md).
 
 ---
 
 ## Configuration
 
-The most important variables in `.env` (generated by `./setup`). Full reference in [INSTALL.md](INSTALL.md) and `.env.example`.
+The most important variables in `.env`. The wizard writes all of these for you; this table is for operators who want to tune after the fact. Full reference in [INSTALL.md](INSTALL.md) and `.env.example`.
 
 | Variable | Default | What it controls |
 |----------|---------|-----------------|
-| `AUDIT_BOOTSTRAP` | — | Confluent Cloud audit-log Kafka bootstrap server (required) |
-| `AUDIT_API_KEY` | — | Kafka API key with read access to the audit log topic (required) |
-| `AUDIT_API_SECRET` | — | Kafka API secret (required, stored in `.secrets`) |
+| `AUDIT_BOOTSTRAP` | — | Confluent Cloud audit-log Kafka bootstrap (required) |
+| `AUDIT_API_KEY` / `AUDIT_API_SECRET` | — | Kafka API credentials for the audit topic (secret lives in `.secrets`) |
 | `AUDIT_TOPIC` | `confluent-audit-log-events` | Audit log topic name |
 | `GROUP_ID` | `auditlens-forwarder-v1` | Kafka consumer group ID |
 | `AUTO_OFFSET_RESET` | `earliest` | `earliest` to replay retained history; `latest` to start from now |
-| `DEST_BOOTSTRAP` | — | Destination Kafka cluster for enriched event topics |
-| `DEST_API_KEY` | — | API key with write access to destination topics |
-| `DATABASE_URL` | SQLite (demo) | Connection string; set to `postgresql+psycopg://...` for product mode |
-| `POSTGRES_PASSWORD` | — | PostgreSQL password (required when using `postgres` profile) |
-| `NEXT_PUBLIC_API_BASE_URL` | `http://127.0.0.1:8080` | URL the browser uses to reach the API |
-| `API_AUTH_ENABLED` | `true` | Enable bearer token authentication on all API endpoints |
-| `EVENT_RETENTION_DAYS` | `7` | Days of signal events to keep in the database |
+| `DEST_BOOTSTRAP` / `DEST_API_KEY` / `DEST_API_SECRET` | — | Destination Kafka cluster + credentials for enriched / signal / DLQ topics |
+| `DATABASE_URL` | `postgresql+psycopg://auditlens:…@postgres:5432/auditlens` | Postgres connection string; SQLite for demo mode only |
+| `POSTGRES_PASSWORD` | auto-generated | Postgres admin password (kept stable across resumes) |
+| `GRAFANA_ADMIN_PASSWORD` | auto-generated | Grafana login password |
+| `API_AUTH_ENABLED` | `true` | Bearer token auth on every API endpoint |
+| `EVENT_RETENTION_DAYS` | `7` | Days of signal events to keep |
 | `NOISE_RETENTION_DAYS` | `3` | Days of noise events to keep |
-| `IAM_ENRICHMENT_ENABLED` | `false` | Enable actor name resolution via Confluent Cloud IAM API |
-| `CONFLUENT_CLOUD_API_KEY` | — | Cloud API key for IAM lookups (required when `IAM_ENRICHMENT_ENABLED=true`) |
-| `NOTIFICATIONS_CONFIG` | `notifications.yml` | Path to webhook notification destinations file |
-| `ENABLE_NOISE_SHORT_CIRCUIT` | `true` | Bypass full pipeline for bulk-noise events (recommended: keep true) |
-| `GRAFANA_ADMIN_PASSWORD` | `changeme` | Grafana admin password — change before any network exposure |
+| `IAM_ENRICHMENT_ENABLED` | `false` | Resolve actor display names via the Confluent Cloud IAM API |
+| `CONFLUENT_CLOUD_API_KEY` / `_SECRET` | — | Cloud-scoped key for IAM lookups + Tableflow + the wizard's cluster picker |
+| `SCHEMA_REGISTRY_URL` / `_API_KEY` / `_API_SECRET` | — | Schema Registry endpoint + credentials (required for Tableflow) |
+
+---
+
+## Tableflow
+
+Settings → Tableflow shows a live prerequisite checklist before exposing the enable form. Tableflow has hard requirements on the Confluent side:
+
+- **Cluster type** must be Dedicated, Enterprise, or Freight. Basic and Standard are not supported.
+- **Cloud provider** must be AWS or Azure. GCP is not supported.
+- **Schema Registry** must be configured — Tableflow does not support schemaless topics.
+- **Region** eligibility follows the cloud provider (AWS = all Flink-supported regions, Azure GA).
+
+The UI calls `GET /cmk/v2/clusters/{cluster_id}` with your `CONFLUENT_CLOUD_API_KEY`, evaluates each prerequisite, and only shows the enable form when all four pass. If the cloud API key isn't set, the UI shows a one-line hint and degrades to the form with a banner (the operator can still try, just without verification).
+
+---
+
+## Kubernetes
+
+The interactive setup wizard supports Docker only. If `deployment_mode: kubernetes` is set via `--config-file` the wizard prints a clear "not yet supported" notice and exits cleanly — no half-installed state.
+
+Manual Kubernetes deployment uses the templates in [`deploy/kubernetes/`](deploy/kubernetes/README.md). The README there covers apply order, secret management policy (sealed-secrets / external-secrets / cloud-managed identity), NetworkPolicy notes, and a production checklist. Wizard-driven Kubernetes is on the roadmap; the current templates need registry-push handling, full-stack (api / postgres / frontend / caddy) coverage, and prereq gating in Phase 0 before they're production-ready.
 
 ---
 
 ## Deployment
 
-For production deployment, use `docker-compose.prod.yml` which adds Caddy as an HTTPS reverse proxy with automatic certificate management and removes the localhost port bindings. See [docs/Deployment_Guide.md](docs/Deployment_Guide.md) for a complete step-by-step guide including EC2 setup and the `make deploy` workflow.
+For production deployment use `docker-compose.prod.yml`, which adds Caddy as an HTTPS reverse proxy with automatic certificate management and explicitly binds api / frontend to `127.0.0.1:8080` / `127.0.0.1:3000` so health checks work without going through caddy. See [docs/Deployment_Guide.md](docs/Deployment_Guide.md) for the complete EC2 setup and `make deploy` workflow.
 
-Terraform configurations for AWS, GCP, and Kubernetes are in `deploy/`. These are provided as starting points and have not been tested in production by the maintainers.
+Terraform configurations for AWS and GCP are in `deploy/`. They're provided as starting points and have not been tested in production by the maintainers.
 
 ---
 
 ## Security
 
 - All container ports are bound to `127.0.0.1` by default — no traffic is reachable from other machines without explicit configuration.
-- API authentication (`API_AUTH_ENABLED=true`) is required before any external exposure. The setup wizard enables it by default and generates an admin token. See [SECURITY.md](SECURITY.md) for role definitions and token setup.
-- `.env` and `.secrets` are gitignored and never committed. Credentials stay on the host where AuditLens is deployed.
-- AuditLens has no telemetry and no phone-home. The only outbound connections are to your Confluent Kafka endpoint and to `api.confluent.cloud` when `IAM_ENRICHMENT_ENABLED=true`.
+- API authentication (`API_AUTH_ENABLED=true`) is required before any external exposure. The wizard enables it by default and generates an admin token.
+- `.env` and `.secrets` are gitignored and never committed. Credentials stay on the host where AuditLens is deployed. The wizard refuses to overwrite `.env` if required credentials are empty, so a partial run can't clobber a working config.
+- AuditLens has no telemetry and no phone-home. The only outbound connections are to your Confluent Kafka endpoint and (when explicitly enabled) `api.confluent.cloud`.
 
 See [SECURITY.md](SECURITY.md) for the full hardening guide, including reverse-proxy configuration, network firewall rules, secrets management, and container hardening notes.
 
