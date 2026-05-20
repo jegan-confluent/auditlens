@@ -1000,12 +1000,15 @@ def render_secrets_env(inputs: BootstrapInputs) -> str:
         f"AUDIT_API_SECRET={inputs.audit_api_secret}",
         f"DEST_API_KEY={inputs.dest_api_key}",
         f"DEST_API_SECRET={inputs.dest_api_secret}",
-        f"CONFLUENT_CLOUD_API_KEY={inputs.cloud_api_key}",
-        f"CONFLUENT_CLOUD_API_SECRET={inputs.cloud_api_secret}",
-        f"SLACK_WEBHOOK={inputs.slack_webhook}",
-        f"ALERTING_WEBHOOK={inputs.alerting_webhook}",
-        "",
     ]
+    # CC creds are only written when the wizard validated them — never emit
+    # empty lines that would later confuse compose's substitution context.
+    if inputs.cloud_api_key and inputs.cloud_api_secret:
+        lines.append(f"CONFLUENT_CLOUD_API_KEY={inputs.cloud_api_key}")
+        lines.append(f"CONFLUENT_CLOUD_API_SECRET={inputs.cloud_api_secret}")
+    lines.append(f"SLACK_WEBHOOK={inputs.slack_webhook}")
+    lines.append(f"ALERTING_WEBHOOK={inputs.alerting_webhook}")
+    lines.append("")
     return "\n".join(lines)
 
 

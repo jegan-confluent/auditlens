@@ -394,41 +394,21 @@ def prompt_missing_int(current: int, label: str, default: int, help_text: str | 
     return prompt_int(label, default, help_text=help_text)
 
 
-def _read_env_file_vars(env_path: Path) -> dict[str, str]:
-    """Parse simple KEY=value lines from a .env file. Returns {} on any
-    failure. Doesn't handle quoting / escapes — sufficient for the limited
-    job of fishing out CONFLUENT_CLOUD_API_KEY / SECRET from an existing
-    .env or .secrets before write_local_config has overwritten it."""
-    out: dict[str, str] = {}
+def _validate_cc_credentials(api_key: str, api_secret: str, timeout_seconds: float = 10.0) -> bool:
+    """Quick auth probe against GET /org/v2/environments. Returns True iff
+    the API responds 200 — any HTTP, network, or auth failure is treated
+    as invalid so the wizard falls back to manual entry."""
+    import base64
+    from urllib.request import Request, urlopen
+
+    auth = base64.b64encode(f"{api_key}:{api_secret}".encode()).decode()
+    headers = {"Authorization": f"Basic {auth}", "Accept": "application/json"}
     try:
-        if not env_path.exists():
-            return out
-        for raw in env_path.read_text(encoding="utf-8").splitlines():
-            line = raw.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            k, v = line.split("=", 1)
-            out[k.strip()] = v.strip()
+        req = Request("https://api.confluent.cloud/org/v2/environments", headers=headers)
+        with urlopen(req, timeout=timeout_seconds) as resp:
+            return resp.status == 200
     except Exception:
-        pass
-    return out
-
-
-def _resolve_cc_credentials(inputs: BootstrapInputs) -> tuple[str, str]:
-    """Find CC creds from any plausible source so the environment picker
-    can skip the prompt when creds are already on disk or in the shell env.
-    Order: inputs (config-file) → shell env → .env → .secrets."""
-    key = inputs.cloud_api_key or os.environ.get("CONFLUENT_CLOUD_API_KEY", "")
-    secret = inputs.cloud_api_secret or os.environ.get("CONFLUENT_CLOUD_API_SECRET", "")
-    if key and secret:
-        return key, secret
-    for fname in (".env", ".secrets"):
-        file_vars = _read_env_file_vars(REPO_ROOT / fname)
-        key = key or file_vars.get("CONFLUENT_CLOUD_API_KEY", "")
-        secret = secret or file_vars.get("CONFLUENT_CLOUD_API_SECRET", "")
-        if key and secret:
-            break
-    return key, secret
+        return False
 
 
 def _fetch_cc_clusters(api_key: str, api_secret: str, timeout_seconds: float = 10.0) -> list[dict]:
@@ -472,41 +452,59 @@ def _fetch_cc_clusters(api_key: str, api_secret: str, timeout_seconds: float = 1
 
 def _try_pick_source_cluster(inputs: BootstrapInputs) -> str | None:
     """Optional Confluent Cloud picker for the source bootstrap endpoint.
-    Returns the chosen endpoint or None to fall through to manual entry.
-    Best-effort — never raises, never blocks setup."""
-    api_key, api_secret = _resolve_cc_credentials(inputs)
+    EC2 hosts can't run `confluent login` (no browser session), so the
+    wizard takes a pure-REST path: prompt for a cloud-scoped API key,
+    validate against GET /org/v2/environments, then list clusters.
+
+    Returns the chosen bootstrap endpoint, or None to fall through to
+    manual entry. Best-effort — never raises, never blocks setup. CC
+    credentials are written to inputs (and hence .secrets via
+    render_secrets_env) ONLY after validation succeeds, so an invalid or
+    skipped attempt leaves no stray creds behind."""
+    # If config-file mode already populated cloud creds, use them. Otherwise
+    # prompt directly — the help text steers the operator to the *cloud*
+    # API key, which is different from the Kafka API key collected later.
+    api_key = inputs.cloud_api_key
+    api_secret = inputs.cloud_api_secret
     if not (api_key and api_secret):
-        if not prompt_bool(
-            "Have a Confluent Cloud API key handy to list environments and clusters",
-            default=False,
-            help_text="Optional. With a CC API key (Cloud → Settings → API keys) the wizard can fetch your environments and clusters so you can pick the audit-log cluster from a list instead of typing the bootstrap endpoint.",
-        ):
-            return None
-        picked_key = prompt_text(
-            "Confluent Cloud API key",
+        api_key = prompt_text(
+            "Confluent Cloud API key (cloud-scoped, optional — for cluster discovery)",
             secret=True,
             required=False,
-            help_text="Optional. Leave blank to enter the bootstrap endpoint manually.",
+            help_text=(
+                "This is NOT your Kafka API key. Find or create one at: "
+                "https://confluent.cloud/settings/api-keys → Add key → "
+                "Cloud scope. Press Enter to skip and enter the bootstrap "
+                "endpoint manually."
+            ),
             url_hint=URL_HINT_CLOUD_API_KEY,
         )
-        if not picked_key:
+        if not api_key:
             return None
-        picked_secret = prompt_text(
+        api_secret = prompt_text(
             "Confluent Cloud API secret",
             secret=True,
             required=False,
         )
-        if not picked_secret:
+        if not api_secret:
             return None
-        api_key, api_secret = picked_key, picked_secret
-        inputs.cloud_api_key = api_key
-        inputs.cloud_api_secret = api_secret
+
+    # Validate immediately. /org/v2/environments is the lightest endpoint
+    # that exercises auth — a 200 means the cloud-scoped key is real.
+    if not _validate_cc_credentials(api_key, api_secret):
+        warn_line("Cloud API key invalid — falling back to manual entry")
+        return None
+
+    # Persist creds AFTER validation succeeds — render_secrets_env now
+    # writes CONFLUENT_CLOUD_API_KEY/SECRET only when both are non-empty.
+    inputs.cloud_api_key = api_key
+    inputs.cloud_api_secret = api_secret
 
     try:
         clusters = _fetch_cc_clusters(api_key, api_secret)
     except Exception as exc:
         warn_line(
-            f"Confluent Cloud lookup failed ({exc.__class__.__name__}). "
+            f"Confluent Cloud cluster lookup failed ({exc.__class__.__name__}). "
             "Falling back to manual entry."
         )
         return None
