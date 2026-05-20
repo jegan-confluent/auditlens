@@ -394,6 +394,153 @@ def prompt_missing_int(current: int, label: str, default: int, help_text: str | 
     return prompt_int(label, default, help_text=help_text)
 
 
+def _read_env_file_vars(env_path: Path) -> dict[str, str]:
+    """Parse simple KEY=value lines from a .env file. Returns {} on any
+    failure. Doesn't handle quoting / escapes — sufficient for the limited
+    job of fishing out CONFLUENT_CLOUD_API_KEY / SECRET from an existing
+    .env or .secrets before write_local_config has overwritten it."""
+    out: dict[str, str] = {}
+    try:
+        if not env_path.exists():
+            return out
+        for raw in env_path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            out[k.strip()] = v.strip()
+    except Exception:
+        pass
+    return out
+
+
+def _resolve_cc_credentials(inputs: BootstrapInputs) -> tuple[str, str]:
+    """Find CC creds from any plausible source so the environment picker
+    can skip the prompt when creds are already on disk or in the shell env.
+    Order: inputs (config-file) → shell env → .env → .secrets."""
+    key = inputs.cloud_api_key or os.environ.get("CONFLUENT_CLOUD_API_KEY", "")
+    secret = inputs.cloud_api_secret or os.environ.get("CONFLUENT_CLOUD_API_SECRET", "")
+    if key and secret:
+        return key, secret
+    for fname in (".env", ".secrets"):
+        file_vars = _read_env_file_vars(REPO_ROOT / fname)
+        key = key or file_vars.get("CONFLUENT_CLOUD_API_KEY", "")
+        secret = secret or file_vars.get("CONFLUENT_CLOUD_API_SECRET", "")
+        if key and secret:
+            break
+    return key, secret
+
+
+def _fetch_cc_clusters(api_key: str, api_secret: str, timeout_seconds: float = 10.0) -> list[dict]:
+    """List every (env, cluster) the CC API key can see. Raises on HTTP /
+    JSON / auth failure; caller swallows and falls back to manual entry."""
+    import base64
+    from urllib.request import Request, urlopen
+
+    auth = base64.b64encode(f"{api_key}:{api_secret}".encode()).decode()
+    headers = {"Authorization": f"Basic {auth}", "Accept": "application/json"}
+
+    def _get(url: str) -> dict:
+        req = Request(url, headers=headers)
+        with urlopen(req, timeout=timeout_seconds) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+
+    envs = (_get("https://api.confluent.cloud/org/v2/environments").get("data") or [])
+    out: list[dict] = []
+    for env in envs:
+        env_id = env.get("id", "")
+        if not env_id:
+            continue
+        clusters = (
+            _get(f"https://api.confluent.cloud/cmk/v2/clusters?environment={env_id}").get("data")
+            or []
+        )
+        for cluster in clusters:
+            spec = cluster.get("spec", {}) or {}
+            bootstrap = spec.get("kafka_bootstrap_endpoint", "")
+            # CC returns "SASL_SSL://pkc-xxx:9092" — strip the scheme so the
+            # value matches the host:port the wizard writes into .env.
+            if "://" in bootstrap:
+                bootstrap = bootstrap.split("://", 1)[1]
+            out.append({
+                "env_id": env_id,
+                "cluster_name": spec.get("display_name") or cluster.get("id", ""),
+                "bootstrap": bootstrap,
+            })
+    return out
+
+
+def _try_pick_source_cluster(inputs: BootstrapInputs) -> str | None:
+    """Optional Confluent Cloud picker for the source bootstrap endpoint.
+    Returns the chosen endpoint or None to fall through to manual entry.
+    Best-effort — never raises, never blocks setup."""
+    api_key, api_secret = _resolve_cc_credentials(inputs)
+    if not (api_key and api_secret):
+        if not prompt_bool(
+            "Have a Confluent Cloud API key handy to list environments and clusters",
+            default=False,
+            help_text="Optional. With a CC API key (Cloud → Settings → API keys) the wizard can fetch your environments and clusters so you can pick the audit-log cluster from a list instead of typing the bootstrap endpoint.",
+        ):
+            return None
+        picked_key = prompt_text(
+            "Confluent Cloud API key",
+            secret=True,
+            required=False,
+            help_text="Optional. Leave blank to enter the bootstrap endpoint manually.",
+            url_hint=URL_HINT_CLOUD_API_KEY,
+        )
+        if not picked_key:
+            return None
+        picked_secret = prompt_text(
+            "Confluent Cloud API secret",
+            secret=True,
+            required=False,
+        )
+        if not picked_secret:
+            return None
+        api_key, api_secret = picked_key, picked_secret
+        inputs.cloud_api_key = api_key
+        inputs.cloud_api_secret = api_secret
+
+    try:
+        clusters = _fetch_cc_clusters(api_key, api_secret)
+    except Exception as exc:
+        warn_line(
+            f"Confluent Cloud lookup failed ({exc.__class__.__name__}). "
+            "Falling back to manual entry."
+        )
+        return None
+
+    if not clusters:
+        info_line("No clusters visible to that CC API key. Falling back to manual entry.")
+        return None
+
+    print()
+    print(cyan("  Available Confluent environments and clusters:"))
+    for i, c in enumerate(clusters, start=1):
+        name = (c["cluster_name"] or "?").ljust(20)
+        print(f"  [{i}] {c['env_id']} / {name} — {c['bootstrap']}")
+    print()
+    try:
+        raw = input("  → Select source cluster number (or press Enter to enter manually): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return None
+    if not raw:
+        return None
+    try:
+        idx = int(raw)
+    except ValueError:
+        warn_line(f"Invalid selection {raw!r}. Falling back to manual entry.")
+        return None
+    if not (1 <= idx <= len(clusters)):
+        warn_line(f"Selection {idx} out of range. Falling back to manual entry.")
+        return None
+    chosen = clusters[idx - 1]
+    ok_line(f"Picked: {chosen['env_id']} / {chosen['cluster_name']} — {chosen['bootstrap']}")
+    return chosen["bootstrap"]
+
+
 def _prompt_for_missing_from_config(inputs: BootstrapInputs, load_result: ConfigLoadResult) -> tuple[BootstrapInputs, str | None]:
     if load_result.placeholder_fields and not stdin_is_interactive():
         raise BootstrapError(
@@ -573,11 +720,20 @@ def collect_interactive_inputs(
             default="Confluent Cloud Audit Logs",
             help_text="Display-only label used in installer summaries. This is not a Confluent technical ID and is safe to leave as the default.",
         )
-        inputs.audit_bootstrap = prompt_text(
-            "Source bootstrap endpoint",
-            help_text="Example: pkc-xxxxx.us-west-2.aws.confluent.cloud:9092. Get it from the Kafka cluster settings for the audit-log cluster. It does not come from `confluent audit-log describe`.",
-            url_hint=URL_HINT_BOOTSTRAP,
-        )
+
+        # Optional Confluent Cloud picker — if CC API creds are reachable
+        # (config / env / .env / .secrets / prompt), list every env+cluster
+        # the org can see so the operator can pick the audit-log cluster
+        # instead of pasting a bootstrap endpoint. Falls through silently.
+        picked_bootstrap = _try_pick_source_cluster(inputs)
+        if picked_bootstrap:
+            inputs.audit_bootstrap = picked_bootstrap
+        else:
+            inputs.audit_bootstrap = prompt_text(
+                "Source bootstrap endpoint",
+                help_text="Example: pkc-xxxxx.us-west-2.aws.confluent.cloud:9092. Get it from the Kafka cluster settings for the audit-log cluster. It does not come from `confluent audit-log describe`.",
+                url_hint=URL_HINT_BOOTSTRAP,
+            )
         inputs.audit_api_key = prompt_text(
             "Source Kafka API key",
             secret=True,
@@ -1022,6 +1178,56 @@ def validate_flow(inputs: BootstrapInputs) -> bool:
     )
 
 
+def get_ec2_public_ip(timeout_seconds: float = 1.5) -> str | None:
+    """Fetch the EC2 public IPv4 from the IMDS endpoint. Returns None on
+    any failure — non-EC2 hosts time out quickly and silently fall back to
+    the caller's localhost default."""
+    try:
+        from urllib.request import Request, urlopen
+        req = Request("http://169.254.169.254/latest/meta-data/public-ipv4")
+        with urlopen(req, timeout=timeout_seconds) as resp:
+            ip = resp.read().decode("ascii").strip()
+            return ip or None
+    except Exception:
+        return None
+
+
+def print_service_status_panel(inputs: BootstrapInputs) -> None:
+    """Service status + quick-link panel printed after Phase 7 health
+    checks pass. localhost links are useful when port-forwarding from the
+    operator's laptop; the EC2 public-IP links are useful when ./setup ran
+    directly on the instance and the operator is hitting it from elsewhere.
+    On non-EC2 hosts the IMDS call times out and we fall back to localhost.
+    """
+    metrics_port = inputs.metrics_port
+    dashboard_port = inputs.dashboard_port
+    landing_port = inputs.landing_port
+    public_ip = get_ec2_public_ip() or "localhost"
+
+    print()
+    print(bold(cyan("  SERVICE STATUS")))
+    status_rows = [
+        ("Forwarder",    f"http://localhost:{metrics_port}/health"),
+        ("API",          f"http://localhost:{metrics_port}"),
+        ("Dashboard",    f"http://localhost:{dashboard_port}"),
+        ("Landing page", f"http://localhost:{landing_port}"),
+    ]
+    for label, url in status_rows:
+        print(green(f"  ✅ {label.ljust(13)} — healthy  ({url})"))
+
+    print()
+    print(bold(cyan("  QUICK LINKS")))
+    quick_rows = [
+        ("🔍", "Dashboard",    f"http://{public_ip}:{dashboard_port}"),
+        ("📡", "API health",   f"http://{public_ip}:{metrics_port}/health"),
+        ("📊", "Metrics",      f"http://{public_ip}:{metrics_port}/metrics"),
+        ("🏠", "Landing page", f"http://{public_ip}:{landing_port}"),
+    ]
+    for icon, label, url in quick_rows:
+        print(f"  {icon} {label.ljust(13)} : {link(url)}")
+    print()
+
+
 def _row(label: str, value: str, width: int = 41) -> str:
     """Render `│  label:    value <padding>│` so the box right edge lines up
     regardless of value length. Width is the inner box width (chars between
@@ -1293,6 +1499,10 @@ def main() -> int:
         finally:
             for proc in port_forward_processes:
                 proc.terminate()
+
+        # Health checks passed — show the service status + quick-link panel
+        # before the legacy "ready to launch" summary.
+        print_service_status_panel(inputs)
 
         # Compose up + runtime validation made it here — clear the checkpoint
         # so the next invocation starts fresh rather than offering to resume
