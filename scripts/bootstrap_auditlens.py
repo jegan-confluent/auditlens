@@ -689,11 +689,17 @@ def collect_interactive_inputs(
         ok_line("Local prerequisites validated.")
         print()
 
+        # Kubernetes path is currently vestigial (no dashboard/Dockerfile, no
+        # api/postgres/frontend/caddy in the rendered manifests, no registry
+        # push for real clusters). Restrict the interactive prompt to docker
+        # so operators don't burn five phases of prompts before hitting a
+        # crash. A separate guard in main() catches the same case for
+        # --config-file mode and exits cleanly with a doc pointer.
         inputs.deployment_mode = prompt_choice(
             "Deployment mode",
-            ["docker", "kubernetes"],
+            ["docker"],
             "docker",
-            help_text="Choose Docker for local first-time installation. Use Kubernetes only if you already have kubectl access and image delivery handled.",
+            help_text="Docker is the only supported mode in this release. Kubernetes support is on the roadmap (manual install: deploy/kubernetes/README.md).",
         )
         completed.append(0)
         save_checkpoint(completed, inputs)
@@ -1513,6 +1519,25 @@ def main() -> int:
             inputs, token_json = _prompt_for_missing_from_config(load_result.inputs, load_result)
         else:
             inputs, token_json = collect_interactive_inputs(completed, saved_inputs)
+
+        # Kubernetes deployment is unsupported in this release. The interactive
+        # prompt no longer offers it, but config-file mode and any restored
+        # checkpoint can still set deployment_mode="kubernetes". Catch that
+        # here and exit cleanly before the wizard burns time on validation
+        # that would crash at Phase 7 (no dashboard/Dockerfile, no full stack
+        # in the rendered K8s manifests, no registry push for real clusters).
+        if inputs.deployment_mode == "kubernetes":
+            print()
+            print(bold(yellow(
+                "  ⚠️  Kubernetes deployment is not yet supported in this version of the setup wizard."
+            )))
+            print()
+            print("      The Docker deployment path is fully tested and production-ready.")
+            print("      Kubernetes support is on the roadmap.")
+            print()
+            print(f"      To deploy on Kubernetes manually, see: {link('deploy/kubernetes/README.md')}")
+            print()
+            sys.exit(0)
 
         validate_port_choices(
             inputs.metrics_port,
