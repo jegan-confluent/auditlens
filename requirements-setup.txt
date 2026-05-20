@@ -1,0 +1,19 @@
+# Host-venv requirements for the AuditLens setup wizard.
+#
+# The wizard (./setup → scripts/bootstrap_auditlens.py → src/product/bootstrap.py)
+# only does credential collection, Kafka connectivity validation, and config
+# file rendering. It does NOT run the production app — that lives in Docker
+# (see requirements.txt, used by the forwarder/api/frontend images).
+#
+# Keep this list as small as possible: every package here has to install
+# successfully on whatever Python version the operator's host happens to
+# ship with. Heavier deps (pandas, numpy, pyarrow, fastapi, SQLAlchemy,
+# pydantic-core, ...) used to live here too, which made first-time setup
+# fail on Python 3.14 because those wheels weren't published yet. They
+# don't belong on the host at all.
+#
+# Floor pins (>=) for native-extension packages so pip can resolve a wheel
+# for the current Python without forcing a sdist build that would need a
+# C toolchain on the host.
+confluent-kafka>=2.13.2
+PyYAML>=6.0.2

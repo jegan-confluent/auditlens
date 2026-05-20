@@ -366,31 +366,35 @@ ensure_python() {
 # silent no-op — the dep set is regularly exercised on those versions.
 #
 # For Python > PYTHON_MAX_TESTED_MINOR we run `pip install --dry-run
-# --only-binary=:all: -r requirements.txt` against the *real* venv pip.
-# `--only-binary=:all:` is critical: without it, pip's dry-run reports
+# --only-binary=:all: -r requirements-setup.txt` against the *real* venv
+# pip. `--only-binary=:all:` is critical: without it, pip's dry-run reports
 # success whenever an sdist (.tar.gz) exists on PyPI — even if no wheel
 # is available for the current Python, which then crashes the real
-# install at C/C++ build time (e.g. pandas 2.2.3 has no cp314 wheel and
-# fails on `pip install` without a compiler toolchain). Forcing
-# binary-only resolution makes the dry-run fail fast on exactly the
-# class of error we are gating against, and the operator gets a clean
-# "use Python 3.12 or 3.13" exit instead of a stack-trace from gcc.
+# install at C/C++ build time. Forcing binary-only resolution makes the
+# dry-run fail fast on exactly the class of error we are gating against,
+# and the operator gets a clean "use Python 3.12 or 3.13" exit instead of
+# a stack-trace from gcc.
 #
 # Args: $1 = venv directory (so we use the venv's pip, not the system one).
-#       $2 = path to requirements.txt
+#       $2 = path to requirements-setup.txt (the wizard-only dep list).
+#       $3 = venv Python version string (e.g. "3.14.0") — passed in by the
+#            caller so we gate on the *venv* Python, not whatever the system
+#            `python3` happens to point at. The two can diverge when a
+#            pre-existing .venv was created with a different interpreter.
+#       $4 = venv Python minor version as an integer (e.g. "14") — derived
+#            from `sys.version_info.minor` on the venv interpreter, again so
+#            the gate matches the actual pip target, not the system Python.
 #
 # This replaces the previous static soft-warn — same trigger point (Python
 # above the tested ceiling) but the verdict comes from pip's own resolver
 # rather than a hand-maintained version list.
 check_python_dep_compat() {
-    local venv_dir="$1" req="$2"
-    local minor
-    minor=$(printf '%s' "$PYTHON_VERSION_STR" | cut -d. -f2)
-    [[ "$minor" =~ ^[0-9]+$ ]] || return 0
-    if [ "$minor" -le "$PYTHON_MAX_TESTED_MINOR" ]; then
+    local venv_dir="$1" req="$2" venv_python_version="$3" venv_minor="$4"
+    [[ "$venv_minor" =~ ^[0-9]+$ ]] || return 0
+    if [ "$venv_minor" -le "$PYTHON_MAX_TESTED_MINOR" ]; then
         return 0
     fi
-    warn "Python ${PYTHON_VERSION_STR}+ detected. Checking dependency compatibility…"
+    warn "Python ${venv_python_version}+ detected (venv). Checking dependency compatibility…"
     # Upgrade pip first so its resolver understands the latest wheel formats.
     # Failure here is non-fatal — the bundled pip is often new enough.
     "$venv_dir/bin/pip" install --upgrade pip >/dev/null 2>&1 || true
@@ -401,10 +405,10 @@ check_python_dep_compat() {
     dry_run_output=$("$venv_dir/bin/pip" install --dry-run --only-binary=:all: -r "$req" 2>&1)
     dry_run_rc=$?
     if [ "$dry_run_rc" -eq 0 ]; then
-        ok "Dependencies compatible with Python ${PYTHON_VERSION_STR}. Continuing."
+        ok "Dependencies compatible with Python ${venv_python_version}. Continuing."
         return 0
     fi
-    fail "One or more dependencies are not yet compatible with Python ${PYTHON_VERSION_STR}."
+    fail "One or more dependencies are not yet compatible with Python ${venv_python_version}."
     echo "  Incompatible packages:"
     # pip emits either "No matching distribution found for X" or
     # "Could not find a version that satisfies the requirement X" — capture
@@ -564,14 +568,19 @@ ensure_env_file() {
 
 # ───────────────────────── Python dependencies (FIX 1) ───────────────────
 # Create a virtualenv with the verified python3.11+ interpreter and install
-# requirements.txt before handing off to the bootstrap installer. Without
-# this, a fresh clone fails on the first `from src.product.bootstrap import …`
-# with ModuleNotFoundError: No module named 'orjson'.
+# requirements-setup.txt before handing off to the bootstrap installer.
+#
+# IMPORTANT: the host venv installs ONLY the wizard's direct deps
+# (confluent-kafka for Kafka validation, PyYAML for --config-file mode).
+# The production app (forwarder/api/frontend) runs inside Docker and uses
+# requirements.txt — that heavier dep set never touches the host. This
+# split keeps `./setup` fast and lets it succeed on bleeding-edge Pythons
+# (3.14+) where pandas/numpy/pyarrow haven't shipped wheels yet.
 ensure_python_deps() {
     local venv_dir="$SCRIPT_DIR/.venv"
-    local req="$SCRIPT_DIR/requirements.txt"
+    local req="$SCRIPT_DIR/requirements-setup.txt"
     if [ ! -f "$req" ]; then
-        warn "requirements.txt not found at $req — skipping dep install; bootstrap may fail."
+        warn "requirements-setup.txt not found at $req — skipping dep install; bootstrap may fail."
         return 0
     fi
     if [ ! -x "$venv_dir/bin/python" ]; then
@@ -592,13 +601,32 @@ ensure_python_deps() {
     # imports in scripts/bootstrap_auditlens.py resolve.
     PYTHON="$venv_dir/bin/python"
 
-    # Dynamic compatibility gate: for Python > PYTHON_MAX_TESTED_MINOR, run
-    # `pip install --dry-run` against the real requirements.txt and bail
-    # early with a clear "use Python 3.12 or 3.13" message if any wheel is
-    # missing. Below the ceiling this is a no-op. The dry-run shares its
-    # pip-upgrade step with the real install below, so we only pay the
-    # `pip install --upgrade pip` cost once.
-    check_python_dep_compat "$venv_dir" "$req"
+    # Re-read the Python version from the *venv* binary, not from the system
+    # interpreter that check_python originally probed. They can diverge when
+    # a previous run created the venv with python3.14 and the current shell's
+    # `python3` is 3.13 (or vice-versa) — in that case PYTHON_VERSION_STR
+    # reflects the system Python and would make the dep-compat gate test the
+    # wrong wheel set. The venv binary is the only honest source of truth
+    # for which interpreter pip is about to use.
+    local VENV_PYTHON="$venv_dir/bin/python3"
+    local VENV_PYTHON_VERSION VENV_MINOR
+    VENV_PYTHON_VERSION=$("$VENV_PYTHON" --version 2>&1 | awk '{print $2}')
+    VENV_MINOR=$("$VENV_PYTHON" -c "import sys; print(sys.version_info.minor)" 2>/dev/null)
+    if [ -z "$VENV_PYTHON_VERSION" ] || [ -z "$VENV_MINOR" ]; then
+        fail "Could not determine Python version from $VENV_PYTHON."
+        exit 1
+    fi
+    if [ "$VENV_PYTHON_VERSION" != "$PYTHON_VERSION_STR" ]; then
+        info "Venv Python ${VENV_PYTHON_VERSION} differs from system Python ${PYTHON_VERSION_STR} — gating on the venv interpreter."
+    fi
+
+    # Dynamic compatibility gate: for Python minor > PYTHON_MAX_TESTED_MINOR,
+    # run `pip install --dry-run --only-binary=:all:` against
+    # requirements-setup.txt and bail early with a clear "use Python 3.12 or
+    # 3.13" message if any wheel is missing. Below the ceiling this is a
+    # no-op. The dry-run shares its pip-upgrade step with the real install
+    # below, so we only pay the `pip install --upgrade pip` cost once.
+    check_python_dep_compat "$venv_dir" "$req" "$VENV_PYTHON_VERSION" "$VENV_MINOR"
 
     info "Installing Python dependencies (this can take a minute)…"
     # Best-effort pip upgrade — old pip can trip on modern wheel resolvers.
@@ -607,7 +635,7 @@ ensure_python_deps() {
         warn "pip self-upgrade failed (non-fatal) — continuing with bundled pip."
     fi
     if ! "$venv_dir/bin/pip" install -q -r "$req"; then
-        fail "pip install -r requirements.txt failed."
+        fail "pip install -r requirements-setup.txt failed."
         echo "  Re-run with verbose output for details:"
         echo "    $venv_dir/bin/pip install -r $req"
         exit 1
