@@ -365,11 +365,16 @@ ensure_python() {
 # venv exists. For Python ≤ PYTHON_MAX_TESTED_MINOR (3.13 today) this is a
 # silent no-op — the dep set is regularly exercised on those versions.
 #
-# For Python > PYTHON_MAX_TESTED_MINOR we run `pip install --dry-run -r
-# requirements.txt` against the *real* venv pip. If every package can be
-# resolved (i.e. wheels exist for this interpreter, or sources build
-# cleanly), we continue. If not, we list the unresolvable packages and exit
-# with a per-OS install hint pointing at a known-good interpreter.
+# For Python > PYTHON_MAX_TESTED_MINOR we run `pip install --dry-run
+# --only-binary=:all: -r requirements.txt` against the *real* venv pip.
+# `--only-binary=:all:` is critical: without it, pip's dry-run reports
+# success whenever an sdist (.tar.gz) exists on PyPI — even if no wheel
+# is available for the current Python, which then crashes the real
+# install at C/C++ build time (e.g. pandas 2.2.3 has no cp314 wheel and
+# fails on `pip install` without a compiler toolchain). Forcing
+# binary-only resolution makes the dry-run fail fast on exactly the
+# class of error we are gating against, and the operator gets a clean
+# "use Python 3.12 or 3.13" exit instead of a stack-trace from gcc.
 #
 # Args: $1 = venv directory (so we use the venv's pip, not the system one).
 #       $2 = path to requirements.txt
@@ -390,7 +395,10 @@ check_python_dep_compat() {
     # Failure here is non-fatal — the bundled pip is often new enough.
     "$venv_dir/bin/pip" install --upgrade pip >/dev/null 2>&1 || true
     local dry_run_output dry_run_rc
-    dry_run_output=$("$venv_dir/bin/pip" install --dry-run -r "$req" 2>&1)
+    # --only-binary=:all: refuses sdist fallback so the dry-run actually
+    # gates on wheel availability instead of waving through packages that
+    # only ship a source distribution.
+    dry_run_output=$("$venv_dir/bin/pip" install --dry-run --only-binary=:all: -r "$req" 2>&1)
     dry_run_rc=$?
     if [ "$dry_run_rc" -eq 0 ]; then
         ok "Dependencies compatible with Python ${PYTHON_VERSION_STR}. Continuing."
