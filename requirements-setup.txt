@@ -15,5 +15,19 @@
 # Floor pins (>=) for native-extension packages so pip can resolve a wheel
 # for the current Python without forcing a sdist build that would need a
 # C toolchain on the host.
+#
+# Direct imports made by scripts/bootstrap_auditlens.py:
+#   • src.product.bootstrap     → PyYAML, confluent_kafka
+#
+# Transitive imports loaded eagerly by src/product/__init__.py before the
+# lazy bootstrap getattr fires:
+#   • src.product.auth           → orjson
+#   • src.product.persistence    → orjson
+#
+# If you add an import to any module that __init__.py loads at top level,
+# update this file too. The setup wizard runs `python -c "import
+# scripts.bootstrap_auditlens"` semantics; a fresh ModuleNotFoundError on
+# any first-time install means a transitive dep is missing here.
 confluent-kafka>=2.13.2
+orjson>=3.11.9
 PyYAML>=6.0.2
