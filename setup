@@ -19,6 +19,12 @@ set -uo pipefail
 PYTHON=${PYTHON:-python3}
 PYTHON_MIN_MAJOR=3
 PYTHON_MIN_MINOR=11
+# Highest minor version AuditLens is regularly exercised on. Newer Python
+# is allowed (we soft-warn, not block) — but historically some transitive
+# deps (e.g. psycopg-binary 3.1.x) didn't ship wheels for the bleeding-edge
+# minor on day one, leading to setup-time pip failures the operator can't
+# easily debug. The warning steers them toward a known-good interpreter.
+PYTHON_MAX_TESTED_MINOR=13
 DOCKER_MIN_MAJOR=20
 DOCKER_MIN_MINOR=10
 COMPOSE_MIN_MAJOR=2
@@ -333,7 +339,11 @@ manual_install_compose() {
 # ───────────────────────── ensure_* drivers ──────────────────────────────
 # Each driver: check → if missing, ask → install → re-check → fail with manual cmd.
 ensure_python() {
-    if check_python; then ok "Python $PYTHON_VERSION_STR"; return 0; fi
+    if check_python; then
+        ok "Python $PYTHON_VERSION_STR"
+        warn_if_python_too_new
+        return 0
+    fi
     fail "Python ${PYTHON_MIN_MAJOR}.${PYTHON_MIN_MINOR}+ not found${PYTHON_VERSION_STR:+ (found $PYTHON_VERSION_STR)}."
     if [ "$(prompt_yn "Install it automatically?" Y)" != "Y" ]; then
         manual_install_python; exit 1
@@ -347,6 +357,23 @@ ensure_python() {
         manual_install_python; exit 1
     fi
     ok "Python $PYTHON_VERSION_STR (installed)"
+    warn_if_python_too_new
+}
+
+# Soft-warn (never blocking) when the chosen interpreter is newer than the
+# tested ceiling. We continue to pip install with the bleeding-edge Python
+# because most of the dep set works there — but the operator deserves a
+# heads-up that a wheel-resolution failure later might be a Python-version
+# problem rather than a transient pypi issue.
+warn_if_python_too_new() {
+    local minor
+    minor=$(printf '%s' "$PYTHON_VERSION_STR" | cut -d. -f2)
+    [[ "$minor" =~ ^[0-9]+$ ]] || return 0
+    if [ "$minor" -gt "$PYTHON_MAX_TESTED_MINOR" ]; then
+        warn "Python ${PYTHON_VERSION_STR} detected. AuditLens is tested on Python 3.11–3.${PYTHON_MAX_TESTED_MINOR}."
+        echo "    Some dependencies may not yet support 3.${minor}."
+        echo "    Consider using Python 3.11, 3.12, or 3.13 for best compatibility."
+    fi
 }
 
 ensure_docker() {
