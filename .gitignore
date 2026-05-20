@@ -15,6 +15,7 @@ install.local.yaml
 install.*.local.yaml
 *.install.local.yaml
 secrets/
+backups/
 deploy/kubernetes/generated/
 *.pem
 *.key

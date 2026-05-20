@@ -1,16 +1,19 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { getSystemStatus, isAbortError } from "../lib/api";
-import type { PipelineLag, PipelineStatus, SystemStatus } from "../lib/types";
+import { useSystemStatus } from "../lib/hooks/useSystemStatus";
+import type { PipelineLag, PipelineStatus } from "../lib/types";
 
 // Phase 2 Fix 3: surface DB-vs-Kafka pipeline health at the top of the
 // System page. Detect / surface / inform — no auto-replay button. The
 // command shown is informational only and uses --hours N (computed from
 // db_behind_seconds) since the existing CLI does not support a
 // --from-timestamp flag.
-
-const POLL_INTERVAL_MS = 30_000;
+//
+// Polling: shared 30-s heartbeat via useSystemStatus() so this banner
+// no longer spawns its own setInterval. The hook collapses every
+// /system/status subscriber on the page (events page included) into
+// one request per 30 s.
 // Severity ordering so a worsening status reappears even after dismiss.
 const STATUS_RANK: Record<PipelineStatus, number> = {
   healthy: 0,
@@ -80,45 +83,11 @@ function writeDismissedRank(rank: number): void {
 }
 
 export default function PipelineLagBanner() {
-  const [status, setStatus] = useState<SystemStatus | null>(null);
+  const { status } = useSystemStatus();
   const [dismissedRank, setDismissedRank] = useState<number>(-1);
 
   useEffect(() => {
     setDismissedRank(readDismissedRank());
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    let timer: ReturnType<typeof setInterval> | null = null;
-
-    async function poll(signal: AbortSignal) {
-      try {
-        const fresh = await getSystemStatus(signal);
-        if (!cancelled) setStatus(fresh);
-      } catch (err) {
-        if (isAbortError(err)) return;
-        // Treat as unknown rather than throwing — the banner should
-        // never break the host page.
-        if (!cancelled) setStatus(null);
-      }
-    }
-
-    let currentTickController: AbortController | null = null;
-
-    const initialController = new AbortController();
-    poll(initialController.signal);
-    timer = setInterval(() => {
-      const c = new AbortController();
-      currentTickController = c;
-      poll(c.signal);
-    }, POLL_INTERVAL_MS);
-
-    return () => {
-      cancelled = true;
-      initialController.abort();
-      currentTickController?.abort();
-      if (timer !== null) clearInterval(timer);
-    };
   }, []);
 
   if (!status) return null;

@@ -18,7 +18,6 @@ import {
   getFilterHierarchy,
   getFilters,
   getSummary,
-  getSystemStatus,
   isAbortError,
   updateEventTriage
 } from "../../lib/api";
@@ -32,6 +31,7 @@ import {
   type EventFilters
 } from "../../lib/eventFilters";
 import type { AuditEvent, EventListResponse, FilterHierarchy, FilterOptions, SummaryResponse, SystemStatus } from "../../lib/types";
+import { useSystemStatus } from "../../lib/hooks/useSystemStatus";
 
 // String-typed filter keys (everything except `mode`, which is a literal
 // union we narrow separately below).
@@ -256,7 +256,11 @@ function EventsPageInner() {
   const [summaryError, setSummaryError] = useState<string | null>(null);
   const [offset, setOffset] = useState(0);
   const [error, setError] = useState<string | null>(null);
-  const [system, setSystem] = useState<SystemStatus | null>(null);
+  // Shared 30-s poll via module-level subscriber set — collapses the
+  // dual poll loops this page used to run (initial fetch + heartbeat
+  // useEffect, plus PipelineLagBanner's independent timer) into one
+  // request every 30 s no matter how many components are mounted.
+  const { status: system } = useSystemStatus();
 
   const [selectedEvent, setSelectedEvent] = useState<AuditEvent | null>(null);
   const [downloading, setDownloading] = useState<"csv" | "json" | null>(null);
@@ -298,12 +302,10 @@ function EventsPageInner() {
       .catch((err: Error) => {
         if (isAbortError(err)) return;
         setError(err.message);
-        getSystemStatus(controller.signal)
-          .then(setSystem)
-          .catch((sysErr) => {
-            if (isAbortError(sysErr)) return;
-            setSystem(null);
-          });
+        // System state is already kept current by useSystemStatus()'s
+        // 30 s heartbeat — the previous inline getSystemStatus refresh
+        // here is now redundant. The error UI reads the same `system`
+        // value the rest of the page does.
       });
     return () => controller.abort();
   }, [filters, offset]);
@@ -323,39 +325,6 @@ function EventsPageInner() {
       });
     return () => controller.abort();
   }, [filters]);
-
-  // Phase 2 Fix 4: keep `system` fresh on a 30 s heartbeat so the
-  // "Last event: …" line at the top of the page reflects ingest health
-  // even when the user isn't changing filters. Best-effort — fetch
-  // failures are silently ignored; the existing error path on
-  // getEvents() owns the top-level error UX.
-  useEffect(() => {
-    let cancelled = false;
-    let timer: ReturnType<typeof setInterval> | null = null;
-
-    async function fetchOnce(signal: AbortSignal) {
-      try {
-        const fresh = await getSystemStatus(signal);
-        if (!cancelled) setSystem(fresh);
-      } catch (err) {
-        if (isAbortError(err)) return;
-        // Silent: do not overwrite system on a transient miss.
-      }
-    }
-
-    const initial = new AbortController();
-    fetchOnce(initial.signal);
-    timer = setInterval(() => {
-      const c = new AbortController();
-      fetchOnce(c.signal);
-    }, 30_000);
-
-    return () => {
-      cancelled = true;
-      initial.abort();
-      if (timer !== null) clearInterval(timer);
-    };
-  }, []);
 
   const onToggleExpand = (event: AuditEvent) => {
     if (expandedId === event.id) {

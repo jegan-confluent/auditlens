@@ -45,12 +45,15 @@ services:
       - KAFKA_PRODUCER_QUEUE_MAX_KBYTES=${KAFKA_PRODUCER_QUEUE_MAX_KBYTES:-65536}
       - ENABLE_DB_WRITER=${ENABLE_DB_WRITER:-true}
       - DATABASE_URL=${FORWARDER_DATABASE_URL:-sqlite:////app/data/auditlens_api.db}
-      - DB_WRITE_BATCH_SIZE=${DB_WRITE_BATCH_SIZE:-500}
+      - DB_WRITE_BATCH_SIZE=${DB_WRITE_BATCH_SIZE:-100}
       - DB_WRITE_FLUSH_INTERVAL_SECONDS=${DB_WRITE_FLUSH_INTERVAL_SECONDS:-2}
       - DB_WRITE_BACKOFF_MAX_SECONDS=${DB_WRITE_BACKOFF_MAX_SECONDS:-60}
       - EVENT_RETENTION_DAYS=${EVENT_RETENTION_DAYS:-7}
       - DB_RETENTION_CLEANUP_INTERVAL_SECONDS=${DB_RETENTION_CLEANUP_INTERVAL_SECONDS:-3600}
-      - API_AUTH_ENABLED=${API_AUTH_ENABLED:-false}
+      # Fail-secure default: a missing .env should NOT silently open the
+      # API to anonymous viewers. Set API_AUTH_ENABLED=false explicitly
+      # in .env only for short-lived local-only test runs.
+      - API_AUTH_ENABLED=${API_AUTH_ENABLED:-true}
       - API_AUTH_TOKEN_FILE=${API_AUTH_TOKEN_FILE:-/run/secrets/auditlens-api-tokens.json}
       - API_MAX_SEARCH_RESULTS=${API_MAX_SEARCH_RESULTS:-500}
       - API_EXPORT_MAX_ROWS=${API_EXPORT_MAX_ROWS:-5000}
@@ -128,7 +131,10 @@ services:
       - CONFLUENT_CLOUD_API_SECRET=${CONFLUENT_CLOUD_API_SECRET:-}
     volumes:
       - auditlens_data:/var/lib/auditlens
-      - ./notifications.yml:/app/notifications.yml
+      # Read-only: notifications.yml is operator-edited on the host and
+      # hot-reloaded by the api process; the api never writes back to it.
+      # `grep -r notifications.yml backend/app/` confirms no write paths.
+      - ./notifications.yml:/app/notifications.yml:ro
     ports:
       # Host-bound so the install wizard can poll /health directly. Caddy
       # at :80 still reverse-proxies /api/* and /health for normal traffic.
@@ -136,6 +142,16 @@ services:
     networks:
       - kafka-network
       - frontend-network
+    # Drop root — the backend/Dockerfile chowns /app and /var/lib/auditlens
+    # to 1000:1000 at build time, but there's no USER directive. Without
+    # this line the container ran as root, which was inconsistent with
+    # the forwarder (already 1000:1000) and unnecessary for the workload.
+    user: "1000:1000"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8080/health', timeout=2).read()\" || exit 1"]
       interval: 30s
@@ -183,6 +199,11 @@ services:
       - frontend-network
     depends_on:
       - api
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
     healthcheck:
       test: ["CMD-SHELL", "node -e \"fetch('http://localhost:3000/dashboard').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
       interval: 30s
@@ -205,7 +226,7 @@ services:
       - ALL
 
   caddy:
-    image: caddy:2-alpine
+    image: caddy:2-alpine@sha256:86deaf5e3d3408a6ccec08fbb79989783dd26e206ae10bcf78a801dc8c9ab794
     container_name: auditlens-caddy
     restart: always
     ports:
@@ -219,6 +240,21 @@ services:
     depends_on:
       - frontend
       - api
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
+    healthcheck:
+      # Caddyfile proxies /health to the api container — exercising the
+      # whole request path catches both a stuck caddy AND a broken
+      # upstream wiring. caddy:2-alpine doesn't ship curl, but wget is
+      # available via busybox.
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:80/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
 
   postgres:
     image: postgres:16-alpine@sha256:4e6e670bb069649261c9c18031f0aded7bb249a5b6664ddec29c013a89310d50
@@ -240,6 +276,11 @@ services:
       - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     networks:
       - kafka-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-auditlens} -d $${POSTGRES_DB:-auditlens}"]
       interval: 30s
@@ -281,6 +322,17 @@ services:
     networks:
       - monitoring
       - frontend-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
     deploy:
       resources:
         limits:
@@ -300,7 +352,7 @@ services:
       - ALL
 
   grafana:
-    image: grafana/grafana:11.6.0
+    image: grafana/grafana:11.6.0@sha256:62d2b9d20a19714ebfe48d1bb405086081bc602aa053e28cf6d73c7537640dfb
     container_name: audit-grafana
     restart: always
     user: "472:472"
@@ -330,6 +382,17 @@ services:
       - frontend-network
     depends_on:
       - prometheus
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
     deploy:
       resources:
         limits:
@@ -351,7 +414,7 @@ services:
       - NET_BIND_SERVICE
 
   alertmanager:
-    image: prom/alertmanager:v0.27.0
+    image: prom/alertmanager:v0.27.0@sha256:e13b6ed5cb929eeaee733479dce55e10eb3bc2e9c4586c705a4e8da41e5eacf5
     container_name: audit-alertmanager
     restart: unless-stopped
     volumes:
@@ -360,6 +423,11 @@ services:
       - "127.0.0.1:9093:9093"
     networks:
       - monitoring
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     mem_limit: 64m
     cpus: "0.1"
     security_opt:
@@ -371,7 +439,7 @@ services:
 
   loki:
     profiles: ["observability"]
-    image: grafana/loki:3.3.2
+    image: grafana/loki:3.3.2@sha256:8af2de1abbdd7aa92b27c9bcc96f0f4140c9096b507c77921ffddf1c6ad6c48f
     container_name: loki
     user: "10001:10001"
     ports:
@@ -383,6 +451,11 @@ services:
     networks:
       - monitoring
     restart: always
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     deploy:
       resources:
         limits:
@@ -405,7 +478,7 @@ services:
 
   promtail:
     profiles: ["observability"]
-    image: grafana/promtail:3.3.2
+    image: grafana/promtail:3.3.2@sha256:cb4990801ec58975c5e231057c2bcf204c85fac428eec65ad66e0016c64b9608
     container_name: promtail
     user: "10001:10001"
     volumes:
@@ -417,6 +490,11 @@ services:
     restart: always
     depends_on:
       - loki
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     deploy:
       resources:
         limits:
@@ -453,6 +531,11 @@ services:
       - monitoring
     depends_on:
       - postgres
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     security_opt:
       - no-new-privileges:true
 

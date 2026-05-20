@@ -22,7 +22,7 @@ from backend.app.services.noise_service import (
 )
 from backend.app.services.triage_service import upsert_triage
 from src.product.auth import AuthConfig, Authenticator, Role
-from backend.app.api.routes.patterns import _require_responder, _require_viewer
+from backend.app.api.routes.patterns import _require_exporter, _require_responder, _require_viewer
 
 # /events list + detail are the most expensive routes; cap them tighter than
 # the global default. The limiter instance is shared across routes via
@@ -230,7 +230,7 @@ _EXPORT_COLUMNS = (
 @limiter.limit("10/minute")
 def events_export(
     request: Request,
-    _auth: None = Depends(_require_viewer),
+    _auth: None = Depends(_require_exporter),
     format: str = Query(default="json", pattern="^(csv|json)$"),
     limit: int = Query(default=1000, ge=1, le=10000),
     time_window: str | None = Query(default=None, pattern=r"^[1-9][0-9]*[mh]$"),

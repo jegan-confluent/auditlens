@@ -70,6 +70,27 @@ def _require_admin(request: Request) -> None:
     raise HTTPException(status_code=403, detail="admin role required")
 
 
+def _require_exporter(request: Request) -> None:
+    """Gate routes that emit PII-bearing data (CSV/JSON export of audit
+    events). Mirrors the viewer/responder/admin pattern but checks the
+    EXPORTER role specifically — admins still pass because they bypass
+    everything by definition. Previously /events/export was gated only
+    by _require_viewer, which let any read-only token exfiltrate up to
+    10 000 rows of source-IP + actor + resource_name data."""
+    try:
+        config = AuthConfig.from_env()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Auth configuration error") from exc
+    if not config.enabled:
+        return
+    result = _authenticate(request)
+    if not result.ok:
+        raise HTTPException(status_code=result.status_code, detail=result.error)
+    if result.actor and result.actor.can_export():
+        return
+    raise HTTPException(status_code=403, detail="exporter role required")
+
+
 def _actor_id(request: Request) -> str:
     try:
         config = AuthConfig.from_env()

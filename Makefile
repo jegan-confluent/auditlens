@@ -1,7 +1,7 @@
 # Makefile for Audit Forwarder
 # Production-ready build, test, and deployment tasks
 
-.PHONY: help build build-alpine build-distroless test scan clean deploy deploy-check migrate setup start stop restart status monitoring logs health ps sync
+.PHONY: help build build-alpine build-distroless test scan clean deploy deploy-check migrate setup start stop restart status monitoring logs health ps sync backup backup-list backup-restore
 
 ##############################################################################
 # Quickstart Lifecycle (Phase 3 — single-command install + service control)
@@ -43,6 +43,43 @@ monitoring: ## Show monitoring URLs
 	@echo "Grafana:    http://localhost:3001 (admin/admin)"
 	@echo "Prometheus: http://localhost:9090"
 	@echo ""
+
+##############################################################################
+# Postgres backup / restore
+#   - `make backup` writes a gzipped pg_dump to backups/auditlens-<ts>.sql.gz
+#   - `make backup-list` shows the most recent backups (newest first)
+#   - `make backup-restore FILE=backups/auditlens-…sql.gz` pipes the dump
+#     back into the running postgres container. NEVER runs without an
+#     explicit FILE= to avoid an accidental restore from the wrong dump.
+#
+# The backup target reuses the running auditlens-postgres container so it
+# works against the live deployment without needing direct DB credentials
+# on the host — Postgres credentials stay inside the container.
+##############################################################################
+
+backup: ## Snapshot the AuditLens Postgres database to backups/
+	@echo "Backing up AuditLens Postgres database..."
+	@mkdir -p backups
+	@ts=$$(date +%Y%m%d-%H%M%S); \
+	  out="backups/auditlens-$${ts}.sql.gz"; \
+	  docker exec auditlens-postgres pg_dump \
+	    -U $${POSTGRES_USER:-auditlens} \
+	    -d $${POSTGRES_DB:-auditlens} \
+	    --no-owner --no-acl \
+	  | gzip > "$$out" \
+	  && echo "✅  Backup saved to $$out"
+
+backup-list: ## List existing Postgres backups (newest first)
+	@ls -lth backups/*.sql.gz 2>/dev/null || echo "No backups found."
+
+backup-restore: ## Restore a Postgres backup: make backup-restore FILE=backups/<file>.sql.gz
+	@test -n "$${FILE}" || (echo "❌  FILE is required, e.g. make backup-restore FILE=backups/auditlens-YYYYMMDD-HHMMSS.sql.gz" && exit 1)
+	@test -f "$${FILE}" || (echo "❌  $${FILE} does not exist" && exit 1)
+	@echo "Restoring $${FILE} into auditlens-postgres..."
+	@gunzip -c $${FILE} | docker exec -i auditlens-postgres psql \
+	  -U $${POSTGRES_USER:-auditlens} \
+	  -d $${POSTGRES_DB:-auditlens}
+	@echo "✅  Restore complete."
 
 # Default target
 .DEFAULT_GOAL := help
