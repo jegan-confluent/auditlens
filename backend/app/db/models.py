@@ -3,7 +3,7 @@ import logging
 from datetime import datetime, timezone
 
 import sqlalchemy as sa
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, select
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, object_session
 
 from src.product.actor_enrichment import enrich_actor
@@ -614,28 +614,22 @@ Index("idx_resource_catalog_environment_id", ResourceCatalog.environment_id)
 Index("idx_resource_catalog_last_seen_at", ResourceCatalog.last_seen_at)
 
 
+# NOTE: indexes dropped by Alembic 0025_deduplicate_audit_events_indexes
+# have been removed from this list as well, otherwise init_db() would
+# silently re-create them on every API startup. Kept here: the indexes
+# with non-zero idx_scan in production telemetry, plus the unique
+# constraint backing event_fingerprint (handled by __table_args__).
 Index("idx_audit_events_timestamp", AuditEvent.timestamp)
-Index("idx_audit_events_event_fingerprint", AuditEvent.event_fingerprint)
 Index("idx_audit_events_actor", AuditEvent.actor)
 Index("idx_audit_events_actor_id", AuditEvent.actor_id)
-Index("idx_audit_events_resource_type", AuditEvent.resource_type)
 Index("idx_audit_events_resource_name", AuditEvent.resource_name)
-Index("idx_audit_events_source_ip", AuditEvent.source_ip)
-Index("idx_audit_events_environment_id", AuditEvent.environment_id)
 Index("idx_audit_events_action_category", AuditEvent.action_category)
 Index("idx_audit_events_result", AuditEvent.result)
 Index("idx_audit_events_signal_type", AuditEvent._signal_type)
-Index("idx_audit_events_impact_type", AuditEvent._impact_type)
 Index("idx_audit_events_risk_level", AuditEvent._risk_level)
-Index("idx_audit_events_change_type", AuditEvent._change_type)
 Index("idx_audit_events_resource_family", AuditEvent._resource_family)
-Index("idx_audit_events_timestamp_desc", AuditEvent.timestamp.desc())
 Index("idx_audit_events_timestamp_signal_type", AuditEvent.timestamp.desc(), AuditEvent._signal_type)
-Index("idx_audit_events_timestamp_impact_type", AuditEvent.timestamp.desc(), AuditEvent._impact_type)
 Index("idx_audit_events_timestamp_risk_level", AuditEvent.timestamp.desc(), AuditEvent._risk_level)
-Index("idx_audit_events_resource_lookup", AuditEvent.resource_type, AuditEvent.resource_name, AuditEvent.timestamp.desc())
-Index("idx_audit_events_resource_type_action_category_time", AuditEvent.resource_type, AuditEvent.action_category, AuditEvent.timestamp.desc())
-Index("idx_audit_events_resource_name_time", AuditEvent.resource_name, AuditEvent.timestamp.desc())
 Index("idx_audit_events_action_category_time", AuditEvent.action_category, AuditEvent.timestamp.desc())
 Index("idx_audit_events_actor_time", AuditEvent.actor, AuditEvent.timestamp.desc())
 Index("idx_audit_events_result_time", AuditEvent.result, AuditEvent.timestamp.desc())
@@ -709,3 +703,35 @@ Index(
     postgresql_where=AuditEvent.is_routine_noise.is_(False),
     sqlite_where=AuditEvent.is_routine_noise.is_(False),
 )
+
+
+class AdminAuditLog(Base):
+    """Self-audit row for privileged AuditLens actions.
+
+    Written by the auth-gate dependencies in patterns.py / admin.py and by
+    explicit calls from PII-bearing routes (e.g. /events/export). Mirrors
+    Alembic revision 0024_add_admin_audit_log so ``init_db()`` can create
+    the same table in SQLite test/demo databases."""
+
+    __tablename__ = "admin_audit_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    timestamp: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    actor: Mapped[str] = mapped_column(Text, nullable=False)
+    role: Mapped[str] = mapped_column(Text, nullable=False)
+    action: Mapped[str] = mapped_column(Text, nullable=False)
+    target_type: Mapped[str | None] = mapped_column(Text, nullable=True)
+    target_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # JSON works on both dialects — SQLAlchemy maps to JSONB on Postgres
+    # automatically when the column is declared as JSON on a Postgres bind.
+    detail: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    request_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+Index("idx_admin_audit_log_timestamp", AdminAuditLog.timestamp.desc())
+Index("idx_admin_audit_log_actor", AdminAuditLog.actor)
+Index("idx_admin_audit_log_action", AdminAuditLog.action)

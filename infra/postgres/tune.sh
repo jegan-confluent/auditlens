@@ -56,12 +56,13 @@ exec docker-entrypoint.sh postgres \
   -c work_mem=${WORK_MEM_MB}MB \
   -c maintenance_work_mem=${MAINT_MEM_MB}MB \
   -c wal_buffers=${WAL_BUFFERS_MB}MB \
-  -c max_connections=50 \
+  -c max_connections=200 \
   -c max_parallel_workers_per_gather=0 \
   -c random_page_cost=1.1 \
   -c synchronous_commit=off \
   -c checkpoint_completion_target=0.9 \
   -c max_wal_size=512MB \
+  -c default_statistics_target=100 \
   -c autovacuum_vacuum_scale_factor=0.01 \
   -c autovacuum_analyze_scale_factor=0.005 \
   -c autovacuum_vacuum_cost_delay=2ms \

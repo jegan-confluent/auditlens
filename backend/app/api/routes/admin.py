@@ -6,8 +6,10 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from backend.app.api.routes.patterns import _derive_action_and_target
 from backend.app.core.config import get_settings
 from backend.app.db.database import get_db
+from backend.app.services.admin_audit_service import list_admin_actions, log_admin_action
 from backend.app.services.settings_service import get_effective_retention
 from backend.app.services.backfill_service import (
     backfill_normalize_actor_prefixes,
@@ -59,6 +61,20 @@ def require_admin(request: Request) -> None:
     if not result.ok:
         raise HTTPException(status_code=result.status_code, detail=result.error)
     if result.actor and result.actor.role == Role.ADMIN:
+        # Self-audit: every privileged admin write gets a row in
+        # admin_audit_log. GET is exempt — admin reads of /admin/audit-log
+        # itself, /admin/backfill/*/status, etc. shouldn't pollute the
+        # table with browsing noise.
+        if request.method != "GET":
+            action, target_type, target_id = _derive_action_and_target(request.url.path)
+            log_admin_action(
+                actor=result.actor.actor_id,
+                role=result.actor.role.value,
+                action=action,
+                target_type=target_type,
+                target_id=target_id,
+                request_id=request.headers.get("X-Request-ID"),
+            )
         return
     raise HTTPException(status_code=403, detail="admin role required")
 
@@ -124,3 +140,26 @@ def normalize_actor_prefixes_endpoint(
     to avoid table locks.  Safe to re-run: rows already normalized are
     unaffected (LIKE 'User:u-%' no longer matches)."""
     return backfill_normalize_actor_prefixes(db, dry_run=payload.dry_run)
+
+
+@router.get("/admin/audit-log")
+def admin_audit_log_list(
+    _: None = Depends(require_admin),
+    db: Session = Depends(get_db),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    actor: str | None = Query(default=None),
+    action: str | None = Query(default=None),
+) -> dict:
+    """Paginated newest-first read of admin_audit_log. Admin-only.
+
+    GET method is exempt from auto-logging in require_admin, so reading
+    the audit log doesn't pollute it with self-referential entries."""
+    rows = list_admin_actions(
+        db,
+        limit=limit,
+        offset=offset,
+        actor=actor,
+        action=action,
+    )
+    return {"items": rows, "limit": limit, "offset": offset, "count": len(rows)}

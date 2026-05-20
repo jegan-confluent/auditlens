@@ -1157,6 +1157,67 @@ def _ensure_host_directories() -> None:
         mode="755",
     )
 
+    # Docker secrets backing the postgres + grafana _FILE indirections in
+    # compose. The wizard prefers the EXISTING password value from .env so
+    # a deploy with a pre-baked postgres data volume keeps authenticating
+    # correctly. Only when .env is empty (fresh install) do we generate a
+    # 32-char alphanumeric value.
+    _ensure_secret_file(
+        REPO_ROOT / "secrets" / "postgres_password.txt",
+        env_var="POSTGRES_PASSWORD",
+        label="Postgres password",
+    )
+    _ensure_secret_file(
+        REPO_ROOT / "secrets" / "grafana_admin_password.txt",
+        env_var="GRAFANA_ADMIN_PASSWORD",
+        label="Grafana password",
+    )
+
+
+def _ensure_secret_file(path: Path, *, env_var: str, label: str) -> None:
+    """Backfill a Docker-secret file from .env, or generate fresh.
+
+    Priority order:
+      1. If the file already exists and is non-empty → keep it (idempotent).
+      2. Else if .env has a non-empty value for env_var → write that.
+      3. Else generate a 32-char alphanumeric value and write it.
+
+    chmod 600 in all cases. Failures are warn-not-fatal so a chmod
+    refusal on macOS (where the file may have been created by Docker
+    Desktop as a different uid) doesn't break the wizard."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() and path.read_text().strip():
+        return
+    value = _read_env_value(REPO_ROOT / ".env", env_var) or make_admin_password()
+    try:
+        path.write_text(value + "\n")
+        path.chmod(0o600)
+        ok_line(f"Generated {label} → secrets/{path.name}")
+    except OSError as exc:
+        warn_line(f"Could not write {path} ({exc.__class__.__name__}). Continuing.")
+
+
+def _read_env_value(env_path: Path, key: str) -> str | None:
+    """Return the value of ``key`` from an existing .env file, or None.
+
+    Tolerates the usual .env quirks: missing file, comments, blank lines,
+    quoted values. Does NOT use python-dotenv to avoid pulling in another
+    dependency for one lookup."""
+    if not env_path.exists():
+        return None
+    try:
+        for raw in env_path.read_text().splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            name, _, val = line.partition("=")
+            if name.strip() == key:
+                val = val.strip().strip('"').strip("'")
+                return val or None
+    except OSError:
+        return None
+    return None
+
 
 def _ensure_named_volume_perms(
     *, volume_name: str, mount_path: str, uid_gid: str, mode: str,

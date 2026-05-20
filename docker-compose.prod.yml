@@ -264,10 +264,18 @@ services:
     environment:
       - POSTGRES_DB=${POSTGRES_DB:-auditlens}
       - POSTGRES_USER=${POSTGRES_USER:-auditlens}
-      # Default is a placeholder so `docker compose down` and other lifecycle
-      # commands work even when .env is mid-setup or missing. The wizard
-      # writes a real generated value into .env before `up` is run.
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-changeme_set_in_env}
+      # Read the password from /run/secrets instead of an env var so it
+      # is not visible to `docker inspect auditlens-postgres`. The wizard
+      # writes the same value to .env so the api and postgres-exporter
+      # (which still read DATABASE_URL / DATA_SOURCE_NAME from env) keep
+      # working — that's the migration trade-off in this step. Note that
+      # POSTGRES_PASSWORD_FILE only takes effect at initdb (i.e. fresh
+      # data volume); on existing deploys the previously-baked password
+      # is preserved by setup, which writes the existing value into the
+      # secret file.
+      - POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password
+    secrets:
+      - postgres_password
     entrypoint: ["/bin/bash", "/usr/local/bin/tune.sh"]
     volumes:
       - postgres_data:/var/lib/postgresql/data
@@ -365,9 +373,13 @@ services:
       - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
     environment:
       - GF_SECURITY_ADMIN_USER=${GF_ADMIN_USER:-admin}
-      # Default placeholder keeps compose lifecycle working when .env is
-      # mid-setup; wizard writes a real generated value before `up`.
-      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-changeme_set_in_env}
+      # Grafana supports the __FILE suffix for any env-var as a secret
+      # indirection. The wizard writes the same value to .env so existing
+      # deploys (where the volume already has an admin password baked in)
+      # keep working through restarts — Grafana ignores _FILE on subsequent
+      # boots once admin exists, but the secret file becomes the source of
+      # truth for any future credential rotation.
+      - GF_SECURITY_ADMIN_PASSWORD__FILE=/run/secrets/grafana_admin_password
       - GF_USERS_ALLOW_SIGN_UP=false
       - GF_SERVER_ROOT_URL=http://localhost:3001
       - GF_ANALYTICS_REPORTING_ENABLED=false
@@ -382,6 +394,8 @@ services:
       - frontend-network
     depends_on:
       - prometheus
+    secrets:
+      - grafana_admin_password
     logging:
       driver: "json-file"
       options:
@@ -626,3 +640,14 @@ volumes:
   loki_data:
   postgres_data:
   caddy_data:
+
+# Docker secrets backing the postgres and grafana _FILE indirections.
+# The wizard's _ensure_host_directories() preserves the existing
+# POSTGRES_PASSWORD / GRAFANA_ADMIN_PASSWORD values (from .env) into
+# these files, or generates fresh 32-char alphanumeric values on a clean
+# install. Files are chmod 600 and host-gitignored.
+secrets:
+  postgres_password:
+    file: ./secrets/postgres_password.txt
+  grafana_admin_password:
+    file: ./secrets/grafana_admin_password.txt
