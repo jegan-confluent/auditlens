@@ -68,6 +68,28 @@ else
     unset _UPDATE_SCRIPT_DIR _LOCAL_SHA _REMOTE_SHA _REMOTE_SHORT _NEW_SHORT
 fi
 
+# ───────────────────────── .env compatibility migrations ─────────────────
+# Backfill required keys that newer compose files expect but older wizard
+# runs may not have written. Each block is idempotent — checks before
+# appending — so re-running ./setup is safe.
+#
+# API_AUTH_ENABLED:
+#   docker-compose.prod.yml now defaults API_AUTH_ENABLED=true (fail-secure).
+#   Older .env files generated before that change don't have the key at all,
+#   which means the value falls through to the compose default. That works,
+#   but it leaves operators surprised when the dashboard suddenly requires
+#   a bearer token. Make the value explicit so `cat .env` shows the truth.
+_ENV_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/.env"
+if [ -f "$_ENV_PATH" ]; then
+    if ! grep -q "^API_AUTH_ENABLED=" "$_ENV_PATH" 2>/dev/null; then
+        # Use a leading newline so we never accidentally concatenate onto
+        # the last line of a file that wasn't newline-terminated.
+        printf '\nAPI_AUTH_ENABLED=true\n' >> "$_ENV_PATH"
+        printf 'ℹ  Added API_AUTH_ENABLED=true to your .env (new required field).\n'
+    fi
+fi
+unset _ENV_PATH
+
 # ───────────────────────── Minimum versions ──────────────────────────────
 PYTHON=${PYTHON:-python3}
 PYTHON_MIN_MAJOR=3

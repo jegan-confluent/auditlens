@@ -1474,6 +1474,61 @@ def _validate_runtime_with_progress(inputs: BootstrapInputs) -> None:
         timeout_seconds=90.0,
     )
 
+    # Single unauthenticated probe to confirm the api's auth configuration
+    # matches what .env says. /health is exempt from auth (see main.py's
+    # _EXEMPT_PATHS) so probing it can't surface an auth misconfiguration —
+    # we hit an authenticated route instead (/events?limit=1) and dispatch
+    # on the status code:
+    #   503  → AuthConfig.from_env() raised (e.g. API_AUTH_ENABLED=true but
+    #          the token file at API_AUTH_TOKEN_FILE is missing).
+    #   200  + api_auth_enabled=True in inputs → silent mismatch, auth is
+    #          OFF in the api container despite .env saying ON.
+    #   401  + api_auth_enabled=False                 → mismatch the other way.
+    #   401  + api_auth_enabled=True                  → expected; silent.
+    #   403  → token role mismatch (we sent no token, so unusual; warn).
+    # Never blocks startup — this is observability, not a gate.
+    _check_auth_configuration(inputs)
+
+
+def _check_auth_configuration(inputs: BootstrapInputs) -> None:
+    """Detect API-auth misconfiguration without failing the install."""
+    from urllib.error import HTTPError, URLError
+    from urllib.request import Request, urlopen
+
+    try:
+        req = Request("http://localhost:8080/events?limit=1")
+        with urlopen(req, timeout=5.0) as resp:
+            status = resp.status
+    except HTTPError as exc:
+        status = exc.code
+    except (URLError, Exception):  # noqa: BLE001 — best-effort probe
+        # No response at all — the earlier /health probe already raised on
+        # timeout, so getting here means a transient blip. Skip silently.
+        return
+
+    expects_auth = inputs.api_auth_enabled
+    mismatch = False
+    if status == 503:
+        mismatch = True
+    elif status == 200 and expects_auth:
+        # Auth is supposed to be ON but the api let us through unauth.
+        mismatch = True
+    elif status == 401 and not expects_auth:
+        # Auth is supposed to be OFF but the api rejected an unauth call.
+        mismatch = True
+    elif status == 403:
+        mismatch = True
+
+    if not mismatch:
+        return
+
+    warn_line(
+        f"API returned {status} — authentication may be misconfigured."
+    )
+    print(dim("      Ensure API_AUTH_ENABLED is set correctly in .env"))
+    print(dim("      and that your token file exists at:"))
+    print(dim(f"      {inputs.api_auth_token_file}"))
+
 
 def validate_flow(inputs: BootstrapInputs) -> bool:
     return wait_for_topic_message(
