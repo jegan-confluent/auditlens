@@ -1168,6 +1168,92 @@ def validate_runtime(inputs: BootstrapInputs) -> tuple[dict, dict]:
     return probe_health.payload, api_health.payload
 
 
+def _wait_for_http_with_progress(
+    url: str,
+    timeout_seconds: float,
+    *,
+    headers: dict[str, str] | None = None,
+    expect_json: bool = False,
+    progress_interval_seconds: float = 10.0,
+) -> tuple[int, dict | None]:
+    """Like wait_for_http_status / wait_for_http_json from bootstrap.py but
+    prints a friendly `Still waiting... (Ns elapsed)` line every
+    progress_interval_seconds so the operator doesn't think Phase 7 is
+    frozen. Returns (status_code, payload | None); raises BootstrapError on
+    timeout. Progress prints are throttled — never faster than the
+    interval, even when the inner HTTP request returns quickly."""
+    from urllib.error import HTTPError, URLError
+    from urllib.request import Request, urlopen
+
+    start = time.time()
+    deadline = start + timeout_seconds
+    next_progress = start + progress_interval_seconds
+    last_error = "unknown error"
+    while time.time() < deadline:
+        try:
+            req = Request(url, headers=headers or {})
+            with urlopen(req, timeout=5.0) as resp:
+                if expect_json:
+                    body = resp.read().decode("utf-8")
+                    return resp.status, json.loads(body) if body else {}
+                return resp.status, None
+        except HTTPError as exc:
+            last_error = f"HTTP {exc.code}"
+        except URLError as exc:
+            last_error = f"URLError: {exc.reason}"
+        except Exception as exc:  # noqa: BLE001 — best-effort polling
+            last_error = f"{exc.__class__.__name__}: {exc}"
+        now = time.time()
+        if now >= next_progress:
+            elapsed = int(now - start)
+            info_line(f"Still waiting... ({elapsed}s elapsed)")
+            next_progress = now + progress_interval_seconds
+        time.sleep(1.0)
+    raise BootstrapError(
+        f"Timed out waiting for {url} after {int(time.time() - start)}s. "
+        f"Last observed: {last_error}"
+    )
+
+
+def _validate_runtime_with_progress(inputs: BootstrapInputs) -> None:
+    """Progress-aware health checks for the docker deployment. Replaces the
+    silent validate_runtime() for docker mode. Drops the legacy Streamlit
+    (8503) and landing-page (8088) checks because those containers no
+    longer exist in docker-compose.prod.yml; routes the api + frontend
+    probes through caddy on port 80 per Caddyfile (/health → api:8080,
+    / → frontend:3000)."""
+    metrics_port = inputs.metrics_port
+
+    info_line("Waiting for forwarder health endpoint...")
+    _, probe_health = _wait_for_http_with_progress(
+        f"http://localhost:{metrics_port}/health",
+        timeout_seconds=90.0,
+        expect_json=True,
+    )
+    if not probe_health or not probe_health.get("recovery"):
+        raise BootstrapError("/health did not expose recovery status after startup.")
+    if probe_health["recovery"].get("replay_in_progress"):
+        raise BootstrapError("Replay is unexpectedly running immediately after install.")
+
+    info_line("Waiting for forwarder metrics endpoint...")
+    _wait_for_http_with_progress(
+        f"http://localhost:{metrics_port}/metrics",
+        timeout_seconds=30.0,
+    )
+
+    info_line("Waiting for API via caddy (http://localhost/health)...")
+    _wait_for_http_with_progress(
+        "http://localhost/health",
+        timeout_seconds=90.0,
+    )
+
+    info_line("Waiting for frontend via caddy (http://localhost/)...")
+    _wait_for_http_with_progress(
+        "http://localhost/",
+        timeout_seconds=90.0,
+    )
+
+
 def validate_flow(inputs: BootstrapInputs) -> bool:
     return wait_for_topic_message(
         inputs.dest_bootstrap,
@@ -1487,14 +1573,21 @@ def main() -> int:
             print_phase_header(7, "Startup")
             if inputs.deployment_mode == "docker":
                 _ensure_host_directories()
+                info_line("Starting containers...")
                 deploy_docker()
             else:
                 pf_forwarder, pf_dashboard = deploy_kubernetes(inputs, token_json)
                 port_forward_processes.extend([pf_forwarder, pf_dashboard])
             services_started = True
 
-            info_line("Waiting for forwarder, persistence, metrics, dashboard, and API health…")
-            validate_runtime(inputs)
+            if inputs.deployment_mode == "docker":
+                _validate_runtime_with_progress(inputs)
+            else:
+                # Kubernetes path keeps the existing in-cluster health
+                # contract; port-forwards above expose the same forwarder
+                # endpoints validate_runtime expects.
+                info_line("Waiting for forwarder, persistence, metrics, dashboard, and API health…")
+                validate_runtime(inputs)
             flow_visible = validate_flow(inputs)
         finally:
             for proc in port_forward_processes:
