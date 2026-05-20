@@ -472,8 +472,12 @@ ensure_env_file() {
         return 0
     fi
     cp "$source" "$target"
-    ok "Created .env from .env.example"
-    warn "Edit $target with your Confluent credentials before starting AuditLens."
+    # Normal-flow message: the wizard owns credential entry from here on.
+    # The skip-setup banner (printed by bootstrap_auditlens.py) tells operators
+    # who want to bypass the wizard which fields to edit by hand — duplicating
+    # that warning here is what made first-time users think they had to edit
+    # the file before the wizard would proceed.
+    ok "Created .env — the wizard will fill in your credentials."
 }
 
 # ───────────────────────── Python dependencies (FIX 1) ───────────────────
