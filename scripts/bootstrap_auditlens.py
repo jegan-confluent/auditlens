@@ -1261,13 +1261,34 @@ def validate_flow(inputs: BootstrapInputs) -> bool:
 
 
 def get_ec2_public_ip(timeout_seconds: float = 1.5) -> str | None:
-    """Fetch the EC2 public IPv4 from the IMDS endpoint. Returns None on
-    any failure — non-EC2 hosts time out quickly and silently fall back to
-    the caller's localhost default."""
+    """Fetch the EC2 public IPv4 from the IMDS endpoint. Tries IMDSv2 first
+    (Amazon Linux 2023 + most modern AMIs default to IMDSv2-required which
+    returns 401 to bare GETs); falls back to IMDSv1 for older instances.
+    Returns None on any failure — non-EC2 hosts time out quickly and the
+    caller silently falls back to its localhost default."""
+    from urllib.request import Request, urlopen
     try:
-        from urllib.request import Request, urlopen
-        req = Request("http://169.254.169.254/latest/meta-data/public-ipv4")
-        with urlopen(req, timeout=timeout_seconds) as resp:
+        # IMDSv2: PUT a short-TTL token, then GET with the X-aws header.
+        token: str | None = None
+        try:
+            token_req = Request(
+                "http://169.254.169.254/latest/api/token",
+                method="PUT",
+                headers={"X-aws-ec2-metadata-token-ttl-seconds": "60"},
+            )
+            with urlopen(token_req, timeout=timeout_seconds) as token_resp:
+                token = token_resp.read().decode("ascii").strip()
+        except Exception:
+            token = None  # token endpoint refused — try v1 path below.
+
+        headers: dict[str, str] = {}
+        if token:
+            headers["X-aws-ec2-metadata-token"] = token
+        ip_req = Request(
+            "http://169.254.169.254/latest/meta-data/public-ipv4",
+            headers=headers,
+        )
+        with urlopen(ip_req, timeout=timeout_seconds) as resp:
             ip = resp.read().decode("ascii").strip()
             return ip or None
     except Exception:
@@ -1361,17 +1382,19 @@ def print_final_summary(
     print()
 
     # ── Access URLs ──
+    # Match the SERVICE STATUS panel above: forwarder /metrics on 8003,
+    # api /health on 8080, frontend on 3000. Dashboard:8503 (Streamlit)
+    # and Landing:8088 are gone — those containers were removed from
+    # docker-compose.prod.yml, so don't print dead links.
     if services_started and inputs.deployment_mode == "docker":
-        dashboard_url = f"http://localhost:{inputs.dashboard_port}"
-        api_url       = f"http://localhost:{inputs.metrics_port}/api/v1/health"
-        metrics_url   = f"http://localhost:{inputs.metrics_port}/metrics"
-        landing_url   = f"http://localhost:{inputs.landing_port}"
+        frontend_url = "http://localhost:3000"
+        api_url      = "http://localhost:8080/health"
+        metrics_url  = f"http://localhost:{inputs.metrics_port}/metrics"
         print(bold(green("  AuditLens is running!")))
         print()
-        print(f"  Dashboard:  {link(dashboard_url)}")
-        print(f"  API:        {link(api_url)}")
-        print(f"  Metrics:    {link(metrics_url)}")
-        print(f"  Landing:    {link(landing_url)}")
+        print(f"  Frontend:  {link(frontend_url)}")
+        print(f"  API:       {link(api_url)}")
+        print(f"  Metrics:   {link(metrics_url)}")
         print()
         if inputs.api_auth_enabled and inputs.generated_admin_token:
             token_file = REPO_ROOT / "secrets" / "auditlens-bootstrap-admin.token"
