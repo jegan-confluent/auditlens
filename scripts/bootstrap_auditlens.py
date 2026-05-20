@@ -366,8 +366,8 @@ def ensure_python_deps() -> None:
         import yaml  # noqa: F401
     except Exception as exc:
         raise BootstrapError(
-            "Installer helpers require local Python dependencies from requirements.txt. "
-            "Install them first with `pip install -r requirements.txt`."
+            "Installer helpers require local Python dependencies from requirements-setup.txt. "
+            "Install them first with `pip install -r requirements-setup.txt`."
         ) from exc
 
 
@@ -1143,6 +1143,60 @@ def _ensure_host_directories() -> None:
             # continue. The operator can `sudo chown -R $USER:$USER data/`
             # manually if compose still complains about permissions.
             warn_line(f"Could not chown {path} ({exc.__class__.__name__}). Continuing.")
+
+    # Named volume used by the api container at /var/lib/auditlens. Docker
+    # creates new named volumes root-owned, which means the api process
+    # (uid 1000) can't write to /var/lib/auditlens on first boot. Pre-create
+    # the volume and chown it before `docker compose up` runs. Silent on
+    # success; warns (does not exit) on failure so the wizard still gives
+    # the api container a chance to come up.
+    _ensure_named_volume_perms(
+        volume_name="auditlens_auditlens_data",
+        mount_path="/var/lib/auditlens",
+        uid_gid="1000:1000",
+        mode="755",
+    )
+
+
+def _ensure_named_volume_perms(
+    *, volume_name: str, mount_path: str, uid_gid: str, mode: str,
+) -> None:
+    """Create the named docker volume if missing, then chown + chmod its
+    backing directory by running a throwaway alpine container with the
+    volume mounted. Equivalent to the manual recovery command we used to
+    print as a warning — just done automatically up-front. Failures here
+    are non-fatal: compose will still try to start the container, and if
+    the volume is already correctly owned the chown is idempotent."""
+    # `docker volume create` is idempotent — exits 0 whether the volume
+    # already existed or was just created. capture_output=True so we don't
+    # leak noise into the wizard's own progress lines.
+    subprocess.run(
+        ["docker", "volume", "create", volume_name],
+        capture_output=True, check=False, timeout=15,
+    )
+    chown_cmd = f"chown -R {uid_gid} {mount_path} && chmod {mode} {mount_path}"
+    try:
+        result = subprocess.run(
+            [
+                "docker", "run", "--rm",
+                "-v", f"{volume_name}:{mount_path}",
+                "alpine",
+                "sh", "-c", chown_cmd,
+            ],
+            capture_output=True, check=False, timeout=60,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        warn_line(
+            f"Could not set permissions on volume {volume_name} "
+            f"({exc.__class__.__name__}) — startup may fail. "
+            f"Manual fix: docker run --rm -v {volume_name}:{mount_path} alpine sh -c '{chown_cmd}'"
+        )
+        return
+    if result.returncode != 0:
+        warn_line(
+            f"Could not set permissions on volume {volume_name} — startup may fail. "
+            f"Manual fix: docker run --rm -v {volume_name}:{mount_path} alpine sh -c '{chown_cmd}'"
+        )
 
 
 def deploy_docker() -> None:

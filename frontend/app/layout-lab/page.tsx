@@ -1,4 +1,5 @@
 import type React from "react";
+import { notFound } from "next/navigation";
 
 const mockEvents = [
   { time: "10:28", decision: "Action Needed", who: "u-75rw9o", action: "Topic deleted", resource: "jegan-testing", source: "10.10.0.11" },
@@ -48,6 +49,13 @@ function LabBadge({ children }: { children: React.ReactNode }) {
 }
 
 export default function LayoutLabPage() {
+  // Designer sandbox with hand-coded mock data — useful in local dev but
+  // there is no reason for production users to discover /layout-lab. The
+  // Docker frontend image builds with NODE_ENV=production, so this hides
+  // the route in prod while leaving it fully functional under `next dev`.
+  if (process.env.NODE_ENV === "production") {
+    notFound();
+  }
   return (
     <main className="page layout-lab">
       <div className="lab-intro">
