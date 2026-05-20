@@ -489,7 +489,7 @@ ensure_python_deps() {
         return 0
     fi
     if [ ! -x "$venv_dir/bin/python" ]; then
-        info "Creating virtualenv at $venv_dir using $PYTHON…"
+        info "Creating virtualenv at $venv_dir using ${PYTHON}…"
         if ! "$PYTHON" -m venv "$venv_dir"; then
             fail "Failed to create virtualenv. The python-venv package may be missing."
             case "$OS" in
