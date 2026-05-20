@@ -1,5 +1,48 @@
 # Installing AuditLens
 
+## What you need before starting
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  What you need before running ./setup                           │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  1. Audit Log Cluster credentials (SOURCE)                      │
+│     These are NOT your regular Kafka cluster credentials.       │
+│     Confluent Cloud routes all org audit events to a special    │
+│     system cluster that is separate from any cluster you        │
+│     created yourself.                                           │
+│                                                                 │
+│     Find your audit log cluster:                                │
+│       → https://confluent.cloud/settings/audit_logs/cli         │
+│     You will see:                                               │
+│       Cluster   : lkc-xxxxx  (special system cluster)           │
+│       Bootstrap : pkc-xxxxx.region.aws.confluent.cloud:9092     │
+│       Topic     : confluent-audit-log-events                    │
+│                                                                 │
+│     Create a Kafka API key scoped to this cluster:              │
+│       → Confluent Cloud → Cluster → API Keys → + Add key        │
+│       Or: confluent api-key create --resource <lkc-xxxxx>       │
+│                                                                 │
+│  2. Destination Cluster credentials (where AuditLens writes)    │
+│     This is a Standard or Dedicated Confluent Cloud cluster     │
+│     you own or create — AuditLens writes processed events here. │
+│     Bootstrap : pkc-yyyyy.region.aws.confluent.cloud:9092       │
+│     Kafka API key + secret scoped to this cluster               │
+│                                                                 │
+│  3. Confluent Cloud API key (optional — for reference only)     │
+│     A Cloud-scoped key (not a Kafka key) used only to display   │
+│     eligible clusters in your org during setup.                 │
+│     Create at: https://confluent.cloud/settings/api-keys        │
+│     → Select "Cloud" scope (not a specific cluster)             │
+│     You can skip this — it is purely informational.             │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+The wizard explains each of these in turn during Phase 1 (source cluster) and Phase 2 (destination cluster). The optional Cloud API key, if provided, is used solely to print the list of Standard / Dedicated clusters in your org for reference — it is not a picker, and your audit-log cluster bootstrap still comes from the audit-logs page in the Confluent Cloud UI.
+
+---
+
 ## Prerequisites
 
 **On your machine:**
@@ -10,10 +53,10 @@
 
 **From Confluent Cloud:**
 - Access to a Confluent Cloud organisation
-- The audit log topic name (usually `confluent-audit-log-events` — confirm with `confluent audit-log describe`)
+- The audit log topic name (usually `confluent-audit-log-events` — visible on `https://confluent.cloud/settings/audit_logs/cli`)
 - A Kafka API Key + Secret with read access to the audit log topic on the audit-log cluster
 - A Destination Kafka cluster bootstrap + API Key + Secret (for routing enriched events)
-- A Cloud API Key + Secret (`CONFLUENT_CLOUD_API_KEY` / `CONFLUENT_CLOUD_API_SECRET`) — optional but recommended for actor display name enrichment via IAM lookup
+- A Cloud API Key + Secret (`CONFLUENT_CLOUD_API_KEY` / `CONFLUENT_CLOUD_API_SECRET`) — optional. Used in Phase 1 to list eligible clusters for reference, and optionally at runtime by IAM display-name enrichment.
 
 ---
 

@@ -95,7 +95,7 @@ No data leaves your deployment. No telemetry. No phone-home.
 ### I. Setup & Configuration
 
 - Interactive `./setup` wizard with checkpoint / resume — collects credentials, validates Kafka connectivity, generates `.env` and `.secrets`, starts services
-- Optional Confluent Cloud API key step auto-discovers your environments and clusters so you pick the audit-log cluster from a list instead of pasting a bootstrap endpoint
+- Optional Confluent Cloud API key step lists the Standard / Dedicated clusters in your org for reference (Basic clusters are filtered out) — informational only; the audit-log cluster bootstrap is sourced from the Confluent Cloud audit-logs page
 - `make start / stop / restart / status / deploy / migrate / test / help`
 - SQLite demo mode with seeded sample events — no Kafka credentials required (opt-in)
 - Profile-based Docker Compose — `postgres`, `observability`, `dev` profiles for optional services
@@ -120,13 +120,52 @@ Signal classification assigns every event a `signal_type` (`noise` → `informat
 
 ## Quick Start
 
-**Prerequisites:**
+**Host prerequisites:**
 
 - Python 3.11 or higher
 - Docker Desktop (or Docker Engine + Compose v2) with ≥ 6 GB RAM
 - Free local ports: **8003** (forwarder), **8080** (API), **3000** (frontend); plus **9090** Prometheus, **3001** Grafana, **5432** Postgres in the default profile
-- A Confluent Cloud account with access to your audit log topic
-- Kafka API key + secret with read access to the audit log topic
+
+**What you need before running `./setup`:**
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  What you need before running ./setup                           │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  1. Audit Log Cluster credentials (SOURCE)                      │
+│     These are NOT your regular Kafka cluster credentials.       │
+│     Confluent Cloud routes all org audit events to a special    │
+│     system cluster that is separate from any cluster you        │
+│     created yourself.                                           │
+│                                                                 │
+│     Find your audit log cluster:                                │
+│       → https://confluent.cloud/settings/audit_logs/cli         │
+│     You will see:                                               │
+│       Cluster   : lkc-xxxxx  (special system cluster)           │
+│       Bootstrap : pkc-xxxxx.region.aws.confluent.cloud:9092     │
+│       Topic     : confluent-audit-log-events                    │
+│                                                                 │
+│     Create a Kafka API key scoped to this cluster:              │
+│       → Confluent Cloud → Cluster → API Keys → + Add key        │
+│       Or: confluent api-key create --resource <lkc-xxxxx>       │
+│                                                                 │
+│  2. Destination Cluster credentials (where AuditLens writes)    │
+│     This is a Standard or Dedicated Confluent Cloud cluster     │
+│     you own or create — AuditLens writes processed events here. │
+│     Bootstrap : pkc-yyyyy.region.aws.confluent.cloud:9092       │
+│     Kafka API key + secret scoped to this cluster               │
+│                                                                 │
+│  3. Confluent Cloud API key (optional — for reference only)     │
+│     A Cloud-scoped key (not a Kafka key) used only to display   │
+│     eligible clusters in your org during setup.                 │
+│     Create at: https://confluent.cloud/settings/api-keys        │
+│     → Select "Cloud" scope (not a specific cluster)             │
+│     You can skip this — it is purely informational.             │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+The wizard explains each of these in turn and validates the source and destination credentials before writing `.env` / `.secrets`.
 
 **Step 1 — Clone:**
 
@@ -165,7 +204,7 @@ scripts/run_sqlite_demo.sh
 `./setup` runs through seven phases. On any failure it saves a checkpoint to `~/.auditlens_setup_checkpoint.json` so a re-run resumes from the last completed phase.
 
 1. **Local prerequisites** — checks Python ≥ 3.11, Docker daemon reachable, Compose v2 available, disk space, required ports free. Offers to install missing tooling on Amazon Linux / Ubuntu / Debian / macOS.
-2. **Source cluster** — *(optional first step)* if you provide a cloud-scoped Confluent Cloud API key (`https://confluent.cloud/settings/api-keys → Add key → Cloud scope`), the wizard validates it against `GET /org/v2/environments` and lists every environment + cluster you have access to so you can pick the audit-log cluster from a numbered menu. Then collects Kafka API key + secret for that cluster and validates connectivity by reading the audit topic.
+2. **Source cluster** — points you at `https://confluent.cloud/settings/audit_logs/cli` (the only authoritative source for your org's audit-log cluster bootstrap, cluster id, env id, and topic name — the audit-log cluster is system-managed and not auto-discoverable via the public REST API). *(Optional)* If you provide a cloud-scoped Confluent Cloud API key (`https://confluent.cloud/settings/api-keys → Add key → Cloud scope`), the wizard validates it against `GET /org/v2/environments` and prints the Standard / Dedicated clusters in your org for reference — Basic clusters are filtered out because they cannot back audit logs. This listing is **informational only**, not a picker; the audit-log cluster bootstrap still comes from the audit-logs page above. Then collects the Kafka API key + secret for the audit-log cluster and validates connectivity by reading the audit topic.
 3. **Destination cluster** — Kafka endpoint + credentials for the cluster that will hold the enriched / signal / DLQ topics. Topics are created if missing.
 4. **Schema Registry** *(optional)* — URL + API key + secret; live `GET /subjects` validation.
 5. **Product / API settings** — admin token (auto-generated or provided), API port, optional Slack webhook.
