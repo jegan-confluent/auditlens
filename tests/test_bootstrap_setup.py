@@ -59,7 +59,13 @@ def test_render_env_file_sets_first_run_defaults():
     assert "AUDIT_TOPIC=confluent-audit-log-events" in env_text
     assert "AUTO_OFFSET_RESET=earliest" in env_text
     assert "AUDIT_ENRICHED_TOPIC=audit.enriched.v1" in env_text
-    assert "API_AUTH_ENABLED=true" in env_text
+    # Behavioral assertion change (not a regression): render_env_file now
+    # hardcodes API_AUTH_ENABLED=false until the frontend has a login /
+    # session mechanism. The token-file generation still runs when the
+    # wizard's api_auth_enabled flag is true, so programmatic consumers
+    # can flip this back to true in .env after wiring an Authorization
+    # header. See src/product/bootstrap.py::render_env_file.
+    assert "API_AUTH_ENABLED=false" in env_text
     assert "LANDING_PORT=8088" in env_text
     assert "DASHBOARD_PORT=8503" in env_text
     assert "MCP_PORT=8080" in env_text

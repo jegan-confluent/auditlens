@@ -979,8 +979,18 @@ def collect_interactive_inputs(
         print_phase_header(4, "Product / API settings")
         inputs.api_auth_enabled = prompt_bool(
             "Enable API authentication",
-            default=True,
-            help_text="Recommended. The installer can generate a secure local admin token file for first-time use.",
+            # default=False until the frontend ships a login / session
+            # mechanism — enabling Bearer auth today breaks every dashboard
+            # view because the Next.js app has no Authorization header to
+            # send. The wizard still generates the token files when this
+            # is set to True, so programmatic consumers (curl, MCP) can
+            # opt in later by flipping API_AUTH_ENABLED in .env.
+            default=False,
+            help_text=(
+                "Enables Bearer token auth on all API endpoints. "
+                "Keep disabled unless you have a frontend login mechanism — "
+                "enabling this breaks the dashboard UI."
+            ),
         )
         if inputs.api_auth_enabled:
             inputs.api_token_mode = prompt_choice(
