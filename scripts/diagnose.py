@@ -635,15 +635,33 @@ def detect_llm_provider() -> dict[str, str] | None:
 
 
 SYSTEM_PROMPT = (
-    "You are an expert AuditLens deployment engineer. "
-    "AuditLens runs on Docker Compose with: postgres, FastAPI backend, "
-    "Kafka consumer (forwarder), Next.js frontend, Caddy proxy. "
-    "Analyze the diagnostic context. Respond in this exact format:\n\n"
-    "DIAGNOSIS: <one sentence what is wrong>\n"
-    "ROOT CAUSE: <one sentence why>\n"
+    "You are an expert AuditLens deployment engineer.\n"
+    "AuditLens runs on Docker Compose with: postgres (database),\n"
+    "api (FastAPI backend), forwarder (Kafka consumer),\n"
+    "frontend (Next.js), caddy (reverse proxy).\n"
+    "\n"
+    "You will be given real logs and service status from a live deployment.\n"
+    "YOUR RULES:\n"
+    "1. ONLY diagnose problems you can see explicit evidence for in the logs.\n"
+    "2. For every claim in DIAGNOSIS and ROOT CAUSE, you MUST quote the\n"
+    "   exact log line that proves it (e.g. 'as shown by: <log line>').\n"
+    "3. If logs show no errors and all services are running, you MUST respond:\n"
+    "   DIAGNOSIS: All services are healthy — no issues detected.\n"
+    "   ROOT CAUSE: N/A\n"
+    "   FIX: No action required.\n"
+    "   PREVENTION: N/A\n"
+    "4. NEVER invent problems not present in the logs.\n"
+    "5. NEVER suggest generic fixes like 'docker compose down/up'\n"
+    "   unless you can cite a specific error that requires it.\n"
+    "\n"
+    "Respond in this exact format:\n"
+    "DIAGNOSIS: <one sentence, cite log evidence>\n"
+    "ROOT CAUSE: <one sentence, cite log evidence>\n"
     "FIX:\n"
-    "<exact bash commands, one per line>\n"
-    "PREVENTION: <one sentence>"
+    "<exact bash commands, one per line — or 'No action required'>\n"
+    "PREVENTION: <one sentence>\n"
+    "EVIDENCE:\n"
+    "<paste the 1-3 specific log lines that led to your diagnosis>"
 )
 
 
@@ -966,6 +984,17 @@ def main() -> int:
     render_basic_report(ctx, issues)
 
     if args.basic:
+        return 0
+
+    # Early exit: healthy stack + no explicit AI request. Saves the API
+    # round-trip AND avoids the class of hallucination where an LLM
+    # given a clean log will invent a problem to look useful. Operators
+    # who explicitly want a deep read on a quiet stack still get it via
+    # `make diagnose-ai` (which passes --ai → ai_explicit=True below).
+    ai_explicit = args.ai or args.fix
+    if not issues and not ai_explicit:
+        print(cyan("ℹ  All services healthy — skipping AI diagnosis (no issues to analyze)."))
+        print(dim("     Run 'make diagnose-ai' to force AI analysis."))
         return 0
 
     provider = detect_llm_provider()
