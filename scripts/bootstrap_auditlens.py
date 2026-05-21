@@ -1598,7 +1598,10 @@ def _service_failure_message(service: str, underlying: str) -> str:
 
     Called by the central failure handler in main() — keeping it as a
     pure string-builder lets us route every service timeout through the
-    same render path."""
+    same render path. The closing two lines point the operator at the
+    standalone diagnose tool, which can run offline (basic pattern
+    matching) or call an LLM if a key is configured.
+    """
     container, cause = _SERVICE_DIAGNOSIS.get(
         service, (f"auditlens-{service.lower()}", "see logs"),
     )
@@ -1606,7 +1609,9 @@ def _service_failure_message(service: str, underlying: str) -> str:
         f"{service} failed to start\n"
         f"      Check: docker logs {container} --tail=30\n"
         f"      Common cause: {cause}\n"
-        f"      Underlying: {underlying}"
+        f"      Underlying: {underlying}\n"
+        f"      Run: make diagnose      (basic pattern analysis)\n"
+        f"           make diagnose-ai   (AI-powered — requires LLM API key)"
     )
 
 

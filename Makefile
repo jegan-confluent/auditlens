@@ -1,7 +1,7 @@
 # Makefile for Audit Forwarder
 # Production-ready build, test, and deployment tasks
 
-.PHONY: help build build-alpine build-distroless test scan clean deploy deploy-check migrate setup start stop restart status monitoring logs health ps sync backup backup-list backup-list-remote backup-restore update update-check repair
+.PHONY: help build build-alpine build-distroless test scan clean deploy deploy-check migrate setup start stop restart status monitoring logs health ps sync backup backup-list backup-list-remote backup-restore update update-check repair diagnose diagnose-ai
 
 ##############################################################################
 # Quickstart Lifecycle (Phase 3 — single-command install + service control)
@@ -43,6 +43,29 @@ monitoring: ## Show monitoring URLs
 	@echo "Grafana:    http://localhost:3001 (admin/admin)"
 	@echo "Prometheus: http://localhost:9090"
 	@echo ""
+
+##############################################################################
+# Diagnostics — basic pattern analysis + optional AI deep-dive
+#   - `make diagnose`     : structured report from compose state + log
+#                            pattern matching. Runs offline. If an LLM key
+#                            is present, also calls the AI for deeper
+#                            diagnosis. Safe to run on a partially broken
+#                            install.
+#   - `make diagnose-ai`  : --ai flag; require an LLM key, error out if
+#                            none is configured. Same data, deeper analysis.
+#
+# Supported LLM providers (auto-detected, first wins):
+#   ANTHROPIC_API_KEY → Claude Haiku 4.5
+#   OPENAI_API_KEY    → gpt-4o-mini (or LLM_MODEL override)
+#   OPENAI_API_BASE   → custom OpenAI-compatible endpoint (Ollama, Azure)
+# Or drop the key in secrets/anthropic_api_key.txt / openai_api_key.txt.
+##############################################################################
+
+diagnose: ## Diagnose deployment issues (basic + AI if a key is found)
+	@.venv/bin/python scripts/diagnose.py
+
+diagnose-ai: ## Force AI-powered diagnosis (requires an LLM API key)
+	@.venv/bin/python scripts/diagnose.py --ai
 
 ##############################################################################
 # Update flow for an already-running deployment
