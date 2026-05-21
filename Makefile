@@ -79,14 +79,26 @@ update-check: ## Check if a remote update exists (no changes)
 
 repair: ## Heal a broken install — pull, patch .env, rebuild, migrate (no credential re-entry)
 	@echo "🔧  Repairing AuditLens install..."
-	@echo "ℹ  Step 1/4 — Pulling latest code..."
+	@echo "ℹ  Step 1/6 — Pulling latest code..."
 	@git pull origin main --quiet
-	@echo "ℹ  Step 2/4 — Patching .env with any missing config..."
+	@echo "ℹ  Step 2/6 — Patching .env with any missing config..."
 	@AUDITLENS_NO_UPDATE=1 AUDITLENS_REPAIR_ONLY=1 ./setup --migrate-env-only
-	@echo "ℹ  Step 3/4 — Rebuilding containers..."
+	@echo "ℹ  Step 3/6 — Generating Docker secret files + syncing .env passwords..."
+	@AUDITLENS_NO_UPDATE=1 ./setup --ensure-secrets-only
+	@echo "ℹ  Step 4/6 — Cleaning up any conflicting volumes..."
+	@# Stop everything so volume locks are released before we try to remove
+	@# the named volume. `down --remove-orphans` drops orphaned containers
+	@# from prior compose versions. `volume rm` purges the
+	@# auditlens_auditlens_data volume that may have been created outside
+	@# compose's project labels — the subsequent `up` recreates it cleanly.
+	@# Safe in repair flow: this volume only holds api-side state (SQLite
+	@# hot cache), NOT the postgres database (that's postgres_data, untouched).
+	@docker compose -f docker-compose.prod.yml down --remove-orphans 2>/dev/null || true
+	@docker volume rm auditlens_auditlens_data 2>/dev/null || true
+	@echo "ℹ  Step 5/6 — Rebuilding containers..."
 	@docker compose -f docker-compose.prod.yml pull --quiet 2>/dev/null || true
 	@docker compose -f docker-compose.prod.yml up -d --build --quiet-pull
-	@echo "ℹ  Step 4/4 — Running migrations..."
+	@echo "ℹ  Step 6/6 — Running migrations..."
 	@docker exec auditlens-api bash -c \
 	  "cd /app/backend && python -m alembic upgrade head" 2>/dev/null || \
 	  echo "⚠  Migration step skipped"

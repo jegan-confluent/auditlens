@@ -245,6 +245,140 @@ migrate_env() {
     done < "$env_example_path"
 }
 
+# ───────── Docker secret files + .env password sync (--ensure-secrets-only) ──────────
+# Pure-bash implementation of secret-file generation, mirroring the Python
+# _ensure_secret_file() in scripts/bootstrap_auditlens.py but standalone so
+# it runs on a fresh clone BEFORE the venv exists (the wizard's Python deps
+# include yaml + confluent_kafka, neither of which is available pre-pip).
+#
+# Why this exists: `make repair` skips the wizard, so the postgres + grafana
+# secret files never get created and compose fails to start with
+# "bind source path does not exist". The Docker-secret indirection on the
+# postgres and grafana containers requires these files to exist on the
+# host before `docker compose up` even reads the compose file.
+#
+# FIX 3 also lives here: after writing the secret files we sync the
+# POSTGRES_PASSWORD line (and the password segment of DATABASE_URL, if it
+# is a postgresql URL) in .env back to the secret-file value. Without
+# this, the postgres container reads its password from /run/secrets but
+# the api container + postgres-exporter read POSTGRES_PASSWORD from env
+# (via .env) → silent mismatch → 503 on every /events query.
+_random_password_24() {
+    # 24-char alphanumeric. /dev/urandom + tr is portable across macOS
+    # and Linux; LC_ALL=C avoids tr complaining on multi-byte locales.
+    LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 24
+}
+
+# _read_env_value <env_path> <key> → echoes value or empty string.
+# Mirrors the Python helper of the same name: tolerates comments, blank
+# lines, quoted values. Strips inline `# ...` comments and trims.
+_read_env_value() {
+    local env_path="$1" key="$2"
+    [ -f "$env_path" ] || { echo ""; return 0; }
+    grep -E "^${key}=" "$env_path" 2>/dev/null \
+        | head -1 \
+        | sed -E "s/^${key}=//; s/[[:space:]]*#.*$//; s/^[[:space:]]*//; s/[[:space:]]*$//; s/^[\"']//; s/[\"']$//"
+}
+
+# _generate_secret_file <path> <env_var> <label>
+#   Priority: file exists & non-empty  →  keep it.
+#             .env has env_var value   →  write that to file.
+#             else                      →  generate fresh 24-char value.
+#   chmod 0444 so Docker containers running as non-root uids (postgres=999,
+#   grafana=472) can read the bind-mounted secret. The host filesystem
+#   is already inside the trust boundary; threat model is `docker inspect`,
+#   not "shell on the host".
+_generate_secret_file() {
+    local path="$1" env_var="$2" label="$3"
+    local env_path="$SCRIPT_DIR/.env"
+    mkdir -p "$(dirname "$path")"
+    if [ -f "$path" ] && [ -s "$path" ]; then
+        return 0
+    fi
+    local value
+    value=$(_read_env_value "$env_path" "$env_var")
+    # Treat known placeholder defaults as "no value" — these came from
+    # .env.example's template and must NOT become the real secret. Empty
+    # string is already handled by the fall-through to _random_password_24.
+    case "$value" in
+        changeme|changeme_set_in_env) value="" ;;
+    esac
+    [ -n "$value" ] || value=$(_random_password_24)
+    printf '%s\n' "$value" >"$path"
+    chmod 0444 "$path" 2>/dev/null || true
+    printf 'ℹ  Generated %s → secrets/%s\n' "$label" "$(basename "$path")"
+}
+
+# _sync_env_key <env_path> <key> <value>
+#   Replace the existing KEY=… line if present; otherwise append.
+_sync_env_key() {
+    local env_path="$1" key="$2" value="$3"
+    if grep -qE "^${key}=" "$env_path" 2>/dev/null; then
+        # Use | as sed delimiter — alphanumeric password can't contain |.
+        # The .bak suffix is required for BSD sed (macOS) compatibility.
+        sed -i.bak -E "s|^${key}=.*|${key}=${value}|" "$env_path"
+        rm -f "$env_path.bak"
+    else
+        printf '%s=%s\n' "$key" "$value" >>"$env_path"
+    fi
+}
+
+# Rewrite the password segment of DATABASE_URL only if it is a postgresql
+# URL. Sqlite URLs are left alone (no password to sync). Captures
+# scheme://user: + replaces middle + keeps @host:port/db tail.
+_sync_database_url_password() {
+    local env_path="$1" pg_pw="$2"
+    local current
+    current=$(_read_env_value "$env_path" DATABASE_URL)
+    case "$current" in
+        postgresql*://*:*@*)
+            sed -i.bak -E \
+                "s|^(DATABASE_URL=postgresql(\\+[a-z]+)?://[^:]+:)[^@]*(@.+)|\\1${pg_pw}\\3|" \
+                "$env_path"
+            rm -f "$env_path.bak"
+            printf 'ℹ  Synced POSTGRES_PASSWORD with generated secret in DATABASE_URL\n'
+            ;;
+    esac
+}
+
+# Write back the secret-file values into .env so api + postgres-exporter
+# (which still read POSTGRES_PASSWORD / GRAFANA_ADMIN_PASSWORD from env)
+# match what the postgres + grafana containers read via _FILE indirection.
+_sync_env_with_secrets() {
+    local env_path="$SCRIPT_DIR/.env"
+    [ -f "$env_path" ] || return 0
+    local pg_pw gf_pw
+    pg_pw=$(cat "$SCRIPT_DIR/secrets/postgres_password.txt" 2>/dev/null | tr -d '\n')
+    gf_pw=$(cat "$SCRIPT_DIR/secrets/grafana_admin_password.txt" 2>/dev/null | tr -d '\n')
+    [ -n "$pg_pw" ] || return 0  # Nothing to sync yet.
+    _sync_env_key "$env_path" POSTGRES_PASSWORD "$pg_pw"
+    if [ -n "$gf_pw" ]; then
+        _sync_env_key "$env_path" GRAFANA_ADMIN_PASSWORD "$gf_pw"
+    fi
+    _sync_database_url_password "$env_path" "$pg_pw"
+}
+
+# Top-level orchestrator for --ensure-secrets-only. Idempotent: each
+# sub-step is a no-op if its work is already done. Safe to call from
+# `make repair` before every `docker compose up`.
+ensure_secrets_only() {
+    detect_platform
+    migrate_env
+    mkdir -p "$SCRIPT_DIR/secrets" \
+             "$SCRIPT_DIR/data/forwarder" \
+             "$SCRIPT_DIR/data/postgres" \
+             "$SCRIPT_DIR/data/grafana"
+    _generate_secret_file \
+        "$SCRIPT_DIR/secrets/postgres_password.txt" \
+        POSTGRES_PASSWORD \
+        "Postgres password"
+    _generate_secret_file \
+        "$SCRIPT_DIR/secrets/grafana_admin_password.txt" \
+        GRAFANA_ADMIN_PASSWORD \
+        "Grafana password"
+    _sync_env_with_secrets
+}
+
 # ───────────────────────── OS detection ──────────────────────────────────
 OS=unknown; PKG_MGR=""; OS_PRETTY="unknown"
 detect_os() {
@@ -937,6 +1071,15 @@ main() {
     PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}" \
         exec "$PYTHON" "$SCRIPT_DIR/scripts/bootstrap_auditlens.py" "$@"
 }
+
+# --ensure-secrets-only short-circuit. Used by `make repair` BEFORE
+# `docker compose up` so the postgres + grafana secret-file bind mounts
+# exist and the .env password fields match. Skips every prereq check
+# (this runs on fresh clones with no venv, no docker daemon, etc.).
+if [ "${1:-}" = "--ensure-secrets-only" ]; then
+    ensure_secrets_only
+    exit 0
+fi
 
 # --migrate-env-only short-circuit. Used by `make repair` to patch .env
 # without running the full wizard. detect_platform() must run first so
