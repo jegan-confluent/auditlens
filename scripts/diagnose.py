@@ -534,8 +534,11 @@ def _smart_default_model_for_openai_compatible(base_url: str) -> str:
     base_lower = base_url.lower()
     if "openrouter.ai" in base_lower:
         # Cheapest reliable model on OpenRouter (~$0.075/M input tokens).
-        # google/gemini-flash-1.5 has free-tier credit for new accounts.
-        return "google/gemini-flash-1.5"
+        # `google/gemini-flash-1.5` was previously listed but OpenRouter
+        # deprecated the slug and now 404s — the supported successor is
+        # `google/gemini-2.0-flash-001`, which retains the free-tier
+        # credit window for new accounts.
+        return "google/gemini-2.0-flash-001"
     if "localhost" in base_lower or "127.0.0.1" in base_lower or "ollama" in base_lower:
         # Ollama's default tag once `ollama pull llama3` has run.
         return "llama3"
@@ -982,7 +985,7 @@ def main() -> int:
         print(dim("       GEMINI_API_KEY     → Google Gemini (free tier available)"))
         print(dim("       OPENAI_API_KEY + OPENAI_API_BASE=http://localhost:11434/v1"))
         print(dim("                          → Ollama (fully local, free)"))
-        print(dim("     Cheapest cloud option: OpenRouter gemini-flash at ~$0.00007/diagnosis"))
+        print(dim("     Cheapest cloud option: OpenRouter google/gemini-2.0-flash-001 at ~$0.00007/diagnosis"))
         print(dim("     Keys can also live in secrets/<provider>_api_key.txt files."))
         return 2 if (args.ai or args.fix) else 0
 
