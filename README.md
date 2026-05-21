@@ -235,12 +235,26 @@ All host ports bind to `127.0.0.1` by default. The legacy Streamlit dashboard (f
 
 ---
 
-## Updating an Existing Checkout
+## Updating or Repairing an Existing Install
 
-You don't need to re-run the wizard to pick up changes. Existing `.env` / `.secrets` are preserved across `git pull`.
+If your install is broken after a code update (503 errors, missing config, containers not starting) — or you just want to pick up the latest code without re-entering credentials:
 
 ```bash
-# Workstation — full lifecycle (pull + rebuild + migrations) in one target
+make repair
+```
+
+This pulls the latest code, patches any missing `.env` keys against the current `.env.example`, rebuilds containers, and runs migrations — never asks for credentials, never overwrites operator-set values, and is fully idempotent.
+
+If `make repair` fails, run the full wizard:
+
+```bash
+./setup
+```
+
+You don't need to re-run the wizard to pick up code changes either. Existing `.env` / `.secrets` are preserved across `git pull`. Other lifecycle targets:
+
+```bash
+# Pull + rebuild + migrate (same flow as make repair but no .env patch)
 make update
 
 # Just check if an update exists, without applying it
@@ -254,7 +268,7 @@ docker compose -f docker-compose.prod.yml up -d --build
 git pull origin main && docker compose -f docker-compose.prod.yml up -d --build
 ```
 
-`./setup` itself also self-updates on launch: if the local clone is behind `origin/main`, it pulls and re-execs before the wizard starts. Disable with `--no-update` (or `AUDITLENS_NO_UPDATE=1`) for offline / CI runs.
+`./setup` itself also self-updates on launch: if the local clone is behind `origin/main`, it pulls and re-execs before the wizard starts. Disable with `--no-update` (or `AUDITLENS_NO_UPDATE=1`) for offline / CI runs. The wizard also runs the same `.env` migration as `make repair` on every invocation, so a re-run is a strict superset of a repair.
 
 A `watchtower` service in `docker-compose.prod.yml` polls every 5 minutes for newer images of any container that isn't digest-pinned (configurable via `WATCHTOWER_POLL_INTERVAL`). Today most images are pinned by `@sha256:` so watchtower is mostly a no-op; the service exists so future un-pinned dependencies pick up security patches automatically.
 

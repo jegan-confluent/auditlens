@@ -1702,6 +1702,8 @@ def print_final_summary(
             info_line(f"Bootstrap admin token: {mask_secret(inputs.generated_admin_token)}")
             info_line(f"Token file: {token_file}")
             print()
+        print(dim("  To update:  make repair"))
+        print(dim("              (pulls latest, patches config, restarts — no credential re-entry)"))
         print(dim("  To stop:    docker compose -f docker-compose.prod.yml down"))
         print(dim("  To restart: docker compose -f docker-compose.prod.yml up -d"))
         print(dim("  Logs:       docker logs auditlens-forwarder --tail=50 -f"))

@@ -68,28 +68,6 @@ else
     unset _UPDATE_SCRIPT_DIR _LOCAL_SHA _REMOTE_SHA _REMOTE_SHORT _NEW_SHORT
 fi
 
-# ───────────────────────── .env compatibility migrations ─────────────────
-# Backfill required keys that newer compose files expect but older wizard
-# runs may not have written. Each block is idempotent — checks before
-# appending — so re-running ./setup is safe.
-#
-# API_AUTH_ENABLED:
-#   docker-compose.prod.yml now defaults API_AUTH_ENABLED=true (fail-secure).
-#   Older .env files generated before that change don't have the key at all,
-#   which means the value falls through to the compose default. That works,
-#   but it leaves operators surprised when the dashboard suddenly requires
-#   a bearer token. Make the value explicit so `cat .env` shows the truth.
-_ENV_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/.env"
-if [ -f "$_ENV_PATH" ]; then
-    if ! grep -q "^API_AUTH_ENABLED=" "$_ENV_PATH" 2>/dev/null; then
-        # Use a leading newline so we never accidentally concatenate onto
-        # the last line of a file that wasn't newline-terminated.
-        printf '\nAPI_AUTH_ENABLED=true\n' >> "$_ENV_PATH"
-        printf 'ℹ  Added API_AUTH_ENABLED=true to your .env (new required field).\n'
-    fi
-fi
-unset _ENV_PATH
-
 # ───────────────────────── Minimum versions ──────────────────────────────
 PYTHON=${PYTHON:-python3}
 PYTHON_MIN_MAJOR=3
@@ -214,6 +192,57 @@ detect_platform() {
             ;;
     esac
     export PLATFORM_OS PLATFORM_HOST PLATFORM_IS_CLOUD
+}
+
+# ───────────────────────── .env compatibility migration ──────────────────
+# Walk .env.example as the source of truth and backfill any KEY that is
+# missing from .env. Idempotent: never overwrites a key that's already
+# present (so operator-edited values + wizard-generated secrets survive),
+# never adds keys whose .env.example value is empty (those mean "operator
+# must fill in", e.g. AUDIT_API_KEY / DEST_API_SECRET — adding an empty
+# value would silently degrade the install).
+#
+# Triggered automatically at the top of main() on every ./setup run, and
+# directly via `./setup --migrate-env-only` from `make repair`. Both code
+# paths are equivalent — the flag form just skips the rest of the wizard.
+#
+# Inline-comment handling: lines like `KEY=val  # comment` in .env.example
+# get the comment stripped before append, so the appended line is a clean
+# `KEY=val`. The user-facing message also shows the stripped value.
+migrate_env() {
+    local script_dir env_path env_example_path
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    env_path="$script_dir/.env"
+    env_example_path="$script_dir/.env.example"
+
+    [ -f "$env_example_path" ] || return 0
+    # On a truly fresh install (no .env) the wizard creates it from scratch,
+    # so this function has nothing to do. Skipping avoids accidentally
+    # creating a .env full of empty placeholders.
+    [ -f "$env_path" ] || return 0
+
+    local raw key val
+    while IFS= read -r raw || [ -n "$raw" ]; do
+        # Strip leading whitespace.
+        raw="${raw#"${raw%%[![:space:]]*}"}"
+        # Skip blanks and comment lines.
+        case "$raw" in ''|\#*) continue ;; esac
+        # Skip lines without =.
+        case "$raw" in *=*) ;; *) continue ;; esac
+        key="${raw%%=*}"
+        val="${raw#*=}"
+        # Strip inline comment (whitespace then # then anything) + trim.
+        val=$(printf '%s' "$val" | sed 's/[[:space:]]*#.*$//; s/^[[:space:]]*//; s/[[:space:]]*$//')
+        # Skip empty values — those are placeholders the operator fills in
+        # by hand (credentials etc.). Silently materialising them as empty
+        # in .env would break docker compose health on next `up`.
+        [ -n "$val" ] || continue
+        # Skip if the key is already set (in any form — leading whitespace,
+        # quoted value, whatever).
+        grep -q "^[[:space:]]*${key}=" "$env_path" 2>/dev/null && continue
+        printf '%s=%s\n' "$key" "$val" >> "$env_path"
+        printf 'ℹ  Added missing config: %s=%s\n' "$key" "$val"
+    done < "$env_example_path"
 }
 
 # ───────────────────────── OS detection ──────────────────────────────────
@@ -849,6 +878,11 @@ ensure_python_deps() {
 main() {
     detect_os
     detect_platform
+    # Patch .env with any keys added since this clone's last setup run.
+    # Fully idempotent: never overwrites existing values, never adds
+    # empty placeholders. Runs before the prereq/wizard flow so the rest
+    # of setup sees the complete env regardless of how stale the .env is.
+    migrate_env
     if [ "$OS" = "windows" ]; then
         echo ""
         echo "╔══════════════════════════════════════╗"
@@ -903,5 +937,15 @@ main() {
     PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}" \
         exec "$PYTHON" "$SCRIPT_DIR/scripts/bootstrap_auditlens.py" "$@"
 }
+
+# --migrate-env-only short-circuit. Used by `make repair` to patch .env
+# without running the full wizard. detect_platform() must run first so
+# any future platform-aware migration in migrate_env() has the values.
+# Exits 0 on success — no prereq checks, no docker compose touch.
+if [ "${1:-}" = "--migrate-env-only" ]; then
+    detect_platform
+    migrate_env
+    exit 0
+fi
 
 main "$@"

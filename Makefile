@@ -1,7 +1,7 @@
 # Makefile for Audit Forwarder
 # Production-ready build, test, and deployment tasks
 
-.PHONY: help build build-alpine build-distroless test scan clean deploy deploy-check migrate setup start stop restart status monitoring logs health ps sync backup backup-list backup-restore update update-check
+.PHONY: help build build-alpine build-distroless test scan clean deploy deploy-check migrate setup start stop restart status monitoring logs health ps sync backup backup-list backup-restore update update-check repair
 
 ##############################################################################
 # Quickstart Lifecycle (Phase 3 — single-command install + service control)
@@ -76,6 +76,29 @@ update-check: ## Check if a remote update exists (no changes)
 	   echo "⬆  Update available: $$(git rev-parse --short HEAD) → $$(git rev-parse --short origin/main)"; \
 	   echo "   Run: make update"; \
 	 fi
+
+repair: ## Heal a broken install — pull, patch .env, rebuild, migrate (no credential re-entry)
+	@echo "🔧  Repairing AuditLens install..."
+	@echo "ℹ  Step 1/4 — Pulling latest code..."
+	@git pull origin main --quiet
+	@echo "ℹ  Step 2/4 — Patching .env with any missing config..."
+	@AUDITLENS_NO_UPDATE=1 AUDITLENS_REPAIR_ONLY=1 ./setup --migrate-env-only
+	@echo "ℹ  Step 3/4 — Rebuilding containers..."
+	@docker compose -f docker-compose.prod.yml pull --quiet 2>/dev/null || true
+	@docker compose -f docker-compose.prod.yml up -d --build --quiet-pull
+	@echo "ℹ  Step 4/4 — Running migrations..."
+	@docker exec auditlens-api bash -c \
+	  "cd /app/backend && python -m alembic upgrade head" 2>/dev/null || \
+	  echo "⚠  Migration step skipped"
+	@echo ""
+	@echo "✅  Repair complete. Open your browser:"
+	@if [ "$$(uname -s)" = "Darwin" ]; then \
+	  echo "   http://localhost:8088"; \
+	else \
+	  echo "   http://$$(curl -s --max-time 1 \
+	    http://169.254.169.254/latest/meta-data/public-ipv4 \
+	    2>/dev/null || hostname -I | awk '{print $$1}')"; \
+	fi
 
 ##############################################################################
 # Postgres backup / restore
