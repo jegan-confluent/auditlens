@@ -1,5 +1,19 @@
-"""Onboarding wizard endpoints — discover environments/clusters, validate bootstrap."""
-from __future__ import annotations
+"""Onboarding wizard endpoints — discover environments/clusters, validate bootstrap.
+
+Note on annotations: this module deliberately does NOT use
+``from __future__ import annotations``. FastAPI 0.115 + Pydantic 2.11
+inspects function annotations at decorator-application time to decide
+whether a parameter is a body, query, or path field. When the future
+import is active every annotation becomes a string ForwardRef that
+FastAPI cannot resolve before the heuristic runs — it then falls back
+to treating the BaseModel parameter as a Query field and Pydantic
+explodes at ``/openapi.json`` generation with
+``TypeAdapter[Annotated[ForwardRef('DiscoverRequest'), Query(...)]] is
+not fully defined``. Wrapping the annotation in
+``Annotated[Model, Body()]`` does NOT help — the wrapper is also
+stringified. The only fix is to drop the future import here so the
+annotations stay live.
+"""
 
 import asyncio
 import logging
