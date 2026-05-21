@@ -24,6 +24,7 @@ import argparse
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
 import textwrap
@@ -520,32 +521,112 @@ def _read_secret_file(name: str) -> str:
         return ""
 
 
+def _smart_default_model_for_openai_compatible(base_url: str) -> str:
+    """Pick a sensible default model based on the OPENAI_API_BASE hostname.
+
+    OpenAI-compatible APIs expose wildly different model rosters. Anthropic
+    has one default; OpenAI has one default; but any third-party endpoint
+    needs a model name that actually exists on THAT endpoint. The heuristic
+    below covers the three most common cases (OpenRouter, Azure, Ollama).
+    Operators on anything else should set LLM_MODEL explicitly — the
+    override path always wins.
+    """
+    base_lower = base_url.lower()
+    if "openrouter.ai" in base_lower:
+        # Cheapest reliable model on OpenRouter (~$0.075/M input tokens).
+        # google/gemini-flash-1.5 has free-tier credit for new accounts.
+        return "google/gemini-flash-1.5"
+    if "localhost" in base_lower or "127.0.0.1" in base_lower or "ollama" in base_lower:
+        # Ollama's default tag once `ollama pull llama3` has run.
+        return "llama3"
+    if "azure.com" in base_lower:
+        # Azure OpenAI uses deployment-name routing; the operator must
+        # provide their own deployment name, but gpt-4o-mini is the
+        # most common name they'll have created.
+        return "gpt-4o-mini"
+    return "gpt-4o-mini"
+
+
 def detect_llm_provider() -> dict[str, str] | None:
     """Return the first provider config found (env vars > secrets/ files).
 
-    Provider dict keys: provider, api_key, base_url, model.
+    Provider dict keys:
+      provider       — "anthropic" | "openai" | "gemini" (the protocol)
+      display_name   — human-readable label for the welcome line
+      flavor         — sub-variant of the protocol (vanilla | openrouter |
+                       ollama | azure | custom); used for error formatting
+      api_key, base_url, model
+
+    LLM_MODEL env var ALWAYS overrides the default model regardless of
+    provider, so operators can pin a specific model without changing
+    provider-selection logic.
     """
-    # 1. Anthropic
+    explicit_model = os.environ.get("LLM_MODEL") or ""
+
+    # 1. Anthropic — preferred when a key is present. Claude Haiku 4.5
+    #    is the cheapest first-party Anthropic model that handles this
+    #    diagnostic prompt cleanly.
     anthropic_key = os.environ.get("ANTHROPIC_API_KEY") or _read_secret_file("anthropic_api_key.txt")
     if anthropic_key:
         return {
             "provider": "anthropic",
+            "display_name": "Anthropic Claude",
+            "flavor": "anthropic",
             "api_key": anthropic_key,
             "base_url": "https://api.anthropic.com",
-            # Claude Haiku 4.5 — fastest / cheapest model that handles this
-            # well. Override with LLM_MODEL=… if a newer Claude ships.
-            "model": os.environ.get("LLM_MODEL", "claude-haiku-4-5-20251001"),
+            "model": explicit_model or "claude-haiku-4-5-20251001",
         }
 
-    # 2. OpenAI — also covers any OpenAI-compatible endpoint (Ollama,
-    #    Azure, vLLM) via OPENAI_API_BASE.
+    # 2. OpenAI-compatible (any vendor on the chat/completions wire
+    #    protocol). The OPENAI_API_BASE override is what distinguishes
+    #    OpenRouter, Ollama, Azure, vLLM, LiteLLM, etc.
     openai_key = os.environ.get("OPENAI_API_KEY") or _read_secret_file("openai_api_key.txt")
+    openai_base_raw = os.environ.get("OPENAI_API_BASE", "").strip()
+    if openai_key and openai_base_raw:
+        base_url = openai_base_raw.rstrip("/")
+        base_lower = base_url.lower()
+        if "openrouter.ai" in base_lower:
+            flavor = "openrouter"
+            display_name = "OpenRouter"
+        elif "localhost" in base_lower or "127.0.0.1" in base_lower or "ollama" in base_lower:
+            flavor = "ollama"
+            display_name = "Ollama (local)"
+        elif "azure.com" in base_lower:
+            flavor = "azure"
+            display_name = "Azure OpenAI"
+        else:
+            flavor = "custom"
+            display_name = f"OpenAI-compatible ({base_url})"
+        return {
+            "provider": "openai",
+            "display_name": display_name,
+            "flavor": flavor,
+            "api_key": openai_key,
+            "base_url": base_url,
+            "model": explicit_model or _smart_default_model_for_openai_compatible(base_url),
+        }
+
+    # 3. Vanilla OpenAI — no custom base, plain api.openai.com.
     if openai_key:
         return {
             "provider": "openai",
+            "display_name": "OpenAI",
+            "flavor": "openai",
             "api_key": openai_key,
-            "base_url": os.environ.get("OPENAI_API_BASE", "https://api.openai.com"),
-            "model": os.environ.get("LLM_MODEL", "gpt-4o-mini"),
+            "base_url": "https://api.openai.com",
+            "model": explicit_model or "gpt-4o-mini",
+        }
+
+    # 4. Google Gemini — generateContent endpoint, free tier available.
+    gemini_key = os.environ.get("GEMINI_API_KEY") or _read_secret_file("gemini_api_key.txt")
+    if gemini_key:
+        return {
+            "provider": "gemini",
+            "display_name": "Google Gemini",
+            "flavor": "gemini",
+            "api_key": gemini_key,
+            "base_url": "https://generativelanguage.googleapis.com/v1beta",
+            "model": explicit_model or "gemini-1.5-flash",
         }
     return None
 
@@ -620,7 +701,15 @@ def call_anthropic(cfg: dict[str, str], user_message: str) -> str:
 
 
 def call_openai(cfg: dict[str, str], user_message: str) -> str:
-    """POST /v1/chat/completions. Compatible with OpenAI, Azure, Ollama."""
+    """POST /chat/completions on the configured base. Covers OpenAI,
+    OpenRouter, Ollama, Azure OpenAI, vLLM, LiteLLM — any endpoint that
+    speaks the OpenAI chat-completions wire protocol.
+
+    The base URL convention is the part before "/chat/completions".
+    OpenAI uses "/v1" as the version segment; OpenRouter uses "/api/v1";
+    Azure uses "/openai/deployments/<name>". Operators bake the right
+    suffix into OPENAI_API_BASE.
+    """
     payload = {
         "model": cfg["model"],
         "max_tokens": 1024,
@@ -629,8 +718,15 @@ def call_openai(cfg: dict[str, str], user_message: str) -> str:
             {"role": "user",   "content": user_message},
         ],
     }
+    base = cfg["base_url"].rstrip("/")
+    # Vanilla openai.com needs the /v1 segment that OpenRouter / Ollama /
+    # Azure / LiteLLM already include in their OPENAI_API_BASE.
+    if base.endswith("api.openai.com"):
+        url = f"{base}/v1/chat/completions"
+    else:
+        url = f"{base}/chat/completions"
     req = Request(
-        f"{cfg['base_url'].rstrip('/')}/v1/chat/completions",
+        url,
         data=json.dumps(payload).encode("utf-8"),
         headers={
             "Authorization": f"Bearer {cfg['api_key']}",
@@ -643,30 +739,110 @@ def call_openai(cfg: dict[str, str], user_message: str) -> str:
     return body["choices"][0]["message"]["content"].strip()
 
 
+def call_gemini(cfg: dict[str, str], user_message: str) -> str:
+    """POST :generateContent on Google Generative Language v1beta.
+
+    Gemini does NOT speak the OpenAI chat-completions protocol. The auth
+    is a `?key=…` query string (not a header), and the body uses
+    `system_instruction` + `contents`.
+    """
+    url = (
+        f"{cfg['base_url'].rstrip('/')}/models/{cfg['model']}:generateContent"
+        f"?key={cfg['api_key']}"
+    )
+    payload = {
+        "system_instruction": {"parts": [{"text": SYSTEM_PROMPT}]},
+        "contents": [{"role": "user", "parts": [{"text": user_message}]}],
+        "generationConfig": {"maxOutputTokens": 1024},
+    }
+    req = Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"content-type": "application/json"},
+        method="POST",
+    )
+    with urlopen(req, timeout=60) as resp:
+        body = json.loads(resp.read().decode("utf-8"))
+    # Gemini returns { candidates: [{ content: { parts: [{ text: "..." }] } }] }
+    candidates = body.get("candidates") or []
+    if not candidates:
+        return ""
+    parts = (candidates[0].get("content") or {}).get("parts") or []
+    return "\n".join(p.get("text", "") for p in parts if p.get("text")).strip()
+
+
+def _provider_error_hint(cfg: dict[str, str], status_code: int) -> str:
+    """Map (provider, status) → an actionable one-liner for the operator.
+
+    We don't try to enumerate every error — just the half-dozen that
+    show up in real life. Anything we don't recognise falls through to a
+    generic "request failed" and the response body is printed below it
+    by the caller.
+    """
+    flavor = cfg.get("flavor", "")
+    provider = cfg.get("provider", "")
+    if status_code == 401:
+        if provider == "anthropic":
+            return "Invalid ANTHROPIC_API_KEY"
+        if provider == "gemini":
+            return "Invalid GEMINI_API_KEY"
+        if flavor == "openrouter":
+            return "Invalid OpenRouter API key — generate one at openrouter.ai/keys"
+        return "Invalid OPENAI_API_KEY"
+    if status_code == 402:
+        if flavor == "openrouter":
+            return "OpenRouter credits exhausted — add credits at openrouter.ai/credits"
+        return "Payment required — check the provider billing page"
+    if status_code == 403:
+        return f"{cfg.get('display_name', 'Provider')} refused the request (403) — check API-key scope / org access"
+    if status_code == 404 and flavor == "ollama":
+        return f"Model '{cfg.get('model')}' not pulled — run: ollama pull {cfg.get('model')}"
+    if status_code == 429:
+        return f"{cfg.get('display_name', 'Provider')} rate-limited — try again in a minute"
+    if status_code >= 500:
+        return f"{cfg.get('display_name', 'Provider')} upstream error ({status_code}) — usually transient"
+    return f"{cfg.get('display_name', 'Provider')} returned HTTP {status_code}"
+
+
 def run_ai(cfg: dict[str, str], ctx: dict[str, Any], basic_issues: list[dict[str, Any]]) -> str | None:
     """Send context to the LLM, return its reply or None on failure.
 
-    Failures (HTTP error, transport error, malformed JSON) are caught and
-    surfaced as a single line of stderr — the caller falls back to the
-    basic report and exits 0.
+    Failures (HTTP, transport, timeout, malformed JSON) are caught,
+    surfaced with a provider-specific hint, and return None — the
+    caller falls back to the basic report and exits 0. Never crashes.
     """
     msg = build_ai_user_message(ctx, basic_issues)
-    print(cyan(f"→ Calling {cfg['provider']} ({cfg['model']})…"))
+    print(cyan(f"ℹ  AI diagnosis via {cfg.get('display_name', cfg['provider'])} ({cfg['model']})…"))
     try:
         if cfg["provider"] == "anthropic":
             return call_anthropic(cfg, msg)
+        if cfg["provider"] == "gemini":
+            return call_gemini(cfg, msg)
         return call_openai(cfg, msg)
     except HTTPError as exc:
+        hint = _provider_error_hint(cfg, exc.code)
         try:
-            error_body = exc.read().decode("utf-8", errors="replace")[:500]
+            error_body = exc.read().decode("utf-8", errors="replace")[:300]
         except Exception:  # noqa: BLE001
             error_body = ""
-        print(red(f"   AI request failed: HTTP {exc.code}"))
+        print(red(f"   AI request failed: {hint}"))
         if error_body:
             print(dim(f"   {error_body}"))
         return None
     except URLError as exc:
-        print(red(f"   AI request failed: {exc.reason}"))
+        # Wraps socket.timeout / ConnectionRefused / DNS errors.
+        reason = exc.reason
+        if isinstance(reason, (TimeoutError, socket.timeout)):
+            print(red(
+                f"   LLM API timed out — falling back to basic diagnosis"
+            ))
+        else:
+            display = cfg.get("display_name", cfg.get("provider", "provider"))
+            print(red(f"   {display} unreachable: {reason}"))
+        return None
+    except (TimeoutError, socket.timeout):
+        # Some Python builds raise TimeoutError directly instead of via URLError.
+        print(red("   LLM API timed out — falling back to basic diagnosis"))
         return None
     except (json.JSONDecodeError, KeyError) as exc:
         print(red(f"   AI returned malformed response ({exc.__class__.__name__})"))
@@ -765,7 +941,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="AuditLens diagnostic — basic + optional AI.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="LLM keys: ANTHROPIC_API_KEY, OPENAI_API_KEY, OPENAI_API_BASE, LLM_MODEL.",
+        epilog=(
+            "LLM keys: ANTHROPIC_API_KEY, OPENAI_API_KEY (+ optional "
+            "OPENAI_API_BASE for OpenRouter/Ollama/Azure), GEMINI_API_KEY. "
+            "Set LLM_MODEL to pin a specific model regardless of provider. "
+            "Keys can also live in secrets/<provider>_api_key.txt."
+        ),
     )
     parser.add_argument("--basic", action="store_true", help="basic only, skip AI even with a key")
     parser.add_argument("--ai", action="store_true", help="force AI; error if no key")
@@ -786,15 +967,24 @@ def main() -> int:
 
     provider = detect_llm_provider()
     if not provider:
-        if args.ai or args.fix:
-            print(red("  ❌ AI mode requested but no LLM API key found."))
-            print(dim("     Set ANTHROPIC_API_KEY, OPENAI_API_KEY, or drop a key in"))
-            print(dim("     secrets/anthropic_api_key.txt / secrets/openai_api_key.txt."))
-            return 2
-        # No key, no flag — basic-only is the default.
-        print(dim("  No LLM key found — skipping AI diagnosis."))
-        print(dim("  Set ANTHROPIC_API_KEY for deeper analysis: make diagnose-ai"))
-        return 0
+        # Shared help block so --ai and the default (no flag) path show
+        # the same actionable list. The default path treats no-key as
+        # "you didn't ask for AI" and exits 0; --ai/--fix treats it as
+        # "you explicitly asked, here's why we can't deliver" and exits 2.
+        header = "AI mode requested but no LLM API key found." if (args.ai or args.fix) \
+                 else "No LLM key found — skipping AI diagnosis."
+        print(red(f"  ❌ {header}") if (args.ai or args.fix) else dim(f"  {header}"))
+        print(dim("     To enable AI diagnosis, set one of:"))
+        print(dim("       ANTHROPIC_API_KEY  → Anthropic Claude (recommended)"))
+        print(dim("       OPENAI_API_KEY     → OpenAI GPT"))
+        print(dim("       OPENAI_API_KEY + OPENAI_API_BASE=https://openrouter.ai/api/v1"))
+        print(dim("                          → OpenRouter (100+ models, free tier available)"))
+        print(dim("       GEMINI_API_KEY     → Google Gemini (free tier available)"))
+        print(dim("       OPENAI_API_KEY + OPENAI_API_BASE=http://localhost:11434/v1"))
+        print(dim("                          → Ollama (fully local, free)"))
+        print(dim("     Cheapest cloud option: OpenRouter gemini-flash at ~$0.00007/diagnosis"))
+        print(dim("     Keys can also live in secrets/<provider>_api_key.txt files."))
+        return 2 if (args.ai or args.fix) else 0
 
     ai_text = run_ai(provider, ctx, issues)
     if not ai_text:
