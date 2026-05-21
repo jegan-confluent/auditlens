@@ -15,7 +15,7 @@ import sys
 from logging.config import fileConfig
 from pathlib import Path
 
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import engine_from_config, pool, text
 
 from alembic import context
 
@@ -68,6 +68,26 @@ def run_migrations_online() -> None:
     connectable = engine_from_config(section, prefix="sqlalchemy.", poolclass=pool.NullPool)
 
     with connectable.connect() as connection:
+        # Postgres-only: widen alembic_version.version_num from the default
+        # VARCHAR(32) to VARCHAR(128) so longer revision IDs (date-prefixed
+        # slugs, branch-merge nodes) stop tripping `value too long for type
+        # character varying(32)` when alembic stamps the new head. Wrapped
+        # in a SAVEPOINT so a failure (column already wide, table missing
+        # on first install) does not abort the outer migration transaction.
+        # SQLite has no ALTER COLUMN TYPE and does not exhibit the failure,
+        # so the dialect guard keeps test runs clean.
+        if connection.dialect.name == "postgresql":
+            try:
+                with connection.begin_nested():
+                    connection.execute(text(
+                        "ALTER TABLE alembic_version "
+                        "ALTER COLUMN version_num TYPE VARCHAR(128)"
+                    ))
+            except Exception:
+                # Column already wide, table doesn't exist yet, or operator
+                # lacks ALTER privilege — none of those should block the
+                # actual migrations from running.
+                pass
         context.configure(
             connection=connection,
             target_metadata=target_metadata,

@@ -748,8 +748,30 @@ def validate_persistence_config(inputs: BootstrapInputs, repo_root: Path) -> Per
             message="Persistence disabled by configuration.",
         )
 
-    if inputs.persistence_backend != "sqlite":
-        raise BootstrapError("Only sqlite persistence is currently supported by the installer.")
+    if inputs.persistence_backend not in {"sqlite", "postgres"}:
+        raise BootstrapError(
+            f"Unsupported persistence backend {inputs.persistence_backend!r}. "
+            "Supported values: postgres, sqlite."
+        )
+
+    if inputs.persistence_backend == "postgres":
+        # Postgres preflight is handled by docker-compose's healthcheck +
+        # the api container's entrypoint (alembic upgrade head). The wizard
+        # itself only needs to confirm we are in docker mode — kubernetes
+        # PVC validation does not apply because the postgres container is
+        # NOT part of the k8s manifests today.
+        return PersistenceValidationResult(
+            enabled=True,
+            backend="postgres",
+            path="",
+            parent_exists=True,
+            local_parent_writable=True,
+            docker_volume_writable=True,
+            message=(
+                "Postgres backend selected — runtime validation deferred "
+                "to docker-compose healthcheck + alembic upgrade head."
+            ),
+        )
 
     parent = Path(inputs.persistence_db_path).parent
     parent_exists = parent.exists()
@@ -897,6 +919,72 @@ def wait_for_topic_message(
 
 
 def render_env_file(inputs: BootstrapInputs) -> str:
+    # FIX: the wizard previously rendered .env without DATABASE_URL or
+    # FORWARDER_DATABASE_URL, so docker-compose.prod.yml fell back to its
+    # SQLite defaults — and the api + forwarder containers ended up pointing
+    # at TWO DIFFERENT SQLite files even when Postgres was running in the
+    # same stack. Always write both DATABASE_URL and FORWARDER_DATABASE_URL,
+    # matched to the chosen persistence_backend.
+    #
+    # Read postgres password from the docker-secret file (preferred — that
+    # is the value the postgres container will actually use) and fall back
+    # to the inputs value. If both are empty, leave a recognisable
+    # placeholder so compose still parses; the wizard's password generator
+    # (collect_interactive_inputs) ensures inputs.postgres_password is set
+    # before render_env_file is called.
+    pg_pass = ""
+    secret_path = Path("secrets/postgres_password.txt")
+    if secret_path.exists():
+        try:
+            pg_pass = secret_path.read_text(encoding="utf-8").strip()
+        except OSError:
+            pg_pass = ""
+    if not pg_pass:
+        pg_pass = inputs.postgres_password or "changeme"
+
+    # backend/app/db/database.py::normalize_database_url() rewrites
+    # postgresql:// → postgresql+psycopg:// at import time, but emitting the
+    # explicit driver in .env makes the wiring unambiguous to anyone
+    # inspecting the file (and matches the EC2 reference config). Hostname
+    # is the docker-compose *service name* ("postgres") — that is what
+    # resolves on the kafka-network bridge, which both the api and
+    # postgres-exporter already depend on.
+    postgres_url = (
+        f"postgresql+psycopg://auditlens:{pg_pass}@postgres:5432/auditlens"
+    )
+    sqlite_url = "sqlite:////var/lib/auditlens/auditlens_api.db"
+    forwarder_sqlite_url = "sqlite:////app/data/auditlens.db"
+
+    if inputs.persistence_backend == "postgres":
+        database_url = postgres_url
+        forwarder_database_url = postgres_url
+        # PERSISTENCE_BACKEND must match DATABASE_URL — emitting
+        # PERSISTENCE_BACKEND=sqlite alongside a Postgres URL silently
+        # routed app code through the SQLite hot-cache layer instead of
+        # Postgres.
+        persistence_backend = "postgres"
+    else:
+        database_url = sqlite_url
+        forwarder_database_url = forwarder_sqlite_url
+        persistence_backend = "sqlite"
+
+    # CORS_ORIGINS must include the platform host (EC2 public IP, mac
+    # localhost). Read from PLATFORM_HOST exported by setup's
+    # detect_platform(); the default keeps the wizard usable when run
+    # outside the setup wrapper.
+    platform_host = os.environ.get("PLATFORM_HOST", "localhost")
+    if platform_host and platform_host != "localhost":
+        cors_origins = (
+            f"http://{platform_host},"
+            "http://localhost:3000,http://127.0.0.1:3000,"
+            "http://localhost:8088,http://127.0.0.1:8088"
+        )
+    else:
+        cors_origins = (
+            "http://localhost:3000,http://127.0.0.1:3000,"
+            "http://localhost:8088,http://127.0.0.1:8088"
+        )
+
     lines = [
         "APP_NAME=AuditLens",
         "APP_ENV=production",
@@ -954,20 +1042,42 @@ def render_env_file(inputs: BootstrapInputs) -> str:
         "",
         "# Postgres (required by docker-compose.prod.yml — compose refuses",
         "# to start when POSTGRES_PASSWORD is unset).",
-        f"POSTGRES_PASSWORD={inputs.postgres_password}",
+        f"POSTGRES_PASSWORD={pg_pass}",
+        "POSTGRES_USER=auditlens",
+        "POSTGRES_DB=auditlens",
+        "POSTGRES_PORT=5432",
         "",
         "# Grafana admin login (required by docker-compose.prod.yml — compose",
         "# refuses to start grafana without GRAFANA_ADMIN_PASSWORD).",
         f"GRAFANA_ADMIN_PASSWORD={inputs.grafana_admin_password}",
         "",
+        "# Database URLs — emitted unconditionally so the api and forwarder",
+        "# containers cannot drift onto separate SQLite files when Postgres",
+        "# is actually running. PERSISTENCE_BACKEND tracks DATABASE_URL so",
+        "# the SQLite hot-cache layer is disabled in product (Postgres) mode.",
+        f"DATABASE_URL={database_url}",
+        f"FORWARDER_DATABASE_URL={forwarder_database_url}",
+        "",
         "# Product persistence",
         f"PERSISTENCE_ENABLED={'true' if inputs.persistence_enabled else 'false'}",
-        f"PERSISTENCE_BACKEND={inputs.persistence_backend}",
+        f"PERSISTENCE_BACKEND={persistence_backend}",
         f"PERSISTENCE_DB_PATH={inputs.persistence_db_path}",
         "PERSISTENCE_ENRICHED_RETENTION_DAYS=30",
         "PERSISTENCE_SIGNALS_RETENTION_DAYS=30",
         "PERSISTENCE_ALERTS_RETENTION_DAYS=90",
         "PERSISTENCE_AUDIT_RETENTION_DAYS=90",
+        "",
+        "# Forwarder queue + hot-cache tuning (EC2 reference values). These",
+        "# were previously absent from wizard-rendered .env, so the",
+        "# forwarder fell back to module-level defaults that did not match",
+        "# the documented production posture.",
+        "RECORD_QUEUE_SIZE=10000",
+        "WRITER_BULK_QUEUE_SIZE=200000",
+        "WRITER_CATALOG_QUEUE_SIZE=10000",
+        "WRITER_CRITICAL_QUEUE_SIZE=500",
+        "WRITER_NORMAL_QUEUE_SIZE=5000",
+        "NOISE_PERSIST_WAIT_TIMEOUT_SECONDS=300",
+        "ENABLE_SQLITE_HOT_CACHE=false",
         "",
         "# Replay and rebuild",
         f"REPLAY_ENABLED={'true' if inputs.replay_enabled else 'false'}",
@@ -981,6 +1091,7 @@ def render_env_file(inputs: BootstrapInputs) -> str:
         f"API_MAX_SEARCH_RESULTS={inputs.api_max_search_results}",
         f"API_EXPORT_MAX_ROWS={inputs.api_export_max_rows}",
         f"API_EXPORT_MAX_HOURS={inputs.api_export_max_hours}",
+        f"CORS_ORIGINS={cors_origins}",
         "",
         "# Frontend → API base URL.",
         "# Relative '/api' lets Caddy on :80 reverse-proxy to api:8080,",

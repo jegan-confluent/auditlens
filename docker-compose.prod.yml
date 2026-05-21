@@ -44,7 +44,12 @@ services:
       - KAFKA_QUEUED_MAX_MESSAGES_KBYTES=${KAFKA_QUEUED_MAX_MESSAGES_KBYTES:-65536}
       - KAFKA_PRODUCER_QUEUE_MAX_KBYTES=${KAFKA_PRODUCER_QUEUE_MAX_KBYTES:-65536}
       - ENABLE_DB_WRITER=${ENABLE_DB_WRITER:-true}
-      - DATABASE_URL=${FORWARDER_DATABASE_URL:-sqlite:////app/data/auditlens_api.db}
+      # Read DATABASE_URL straight from .env so the forwarder hits the same
+      # store as the api container. The wizard writes both DATABASE_URL and
+      # FORWARDER_DATABASE_URL (matched values when Postgres is selected);
+      # FORWARDER_DATABASE_URL is kept as a secondary fallback for
+      # operators who hand-edited the legacy variable.
+      - DATABASE_URL=${DATABASE_URL:-${FORWARDER_DATABASE_URL:-sqlite:////app/data/auditlens.db}}
       - DB_WRITE_BATCH_SIZE=${DB_WRITE_BATCH_SIZE:-100}
       - DB_WRITE_FLUSH_INTERVAL_SECONDS=${DB_WRITE_FLUSH_INTERVAL_SECONDS:-2}
       - DB_WRITE_BACKOFF_MAX_SECONDS=${DB_WRITE_BACKOFF_MAX_SECONDS:-60}
@@ -271,6 +276,14 @@ services:
 
   postgres:
     image: postgres:16-alpine@sha256:4e6e670bb069649261c9c18031f0aded7bb249a5b6664ddec29c013a89310d50
+    # Pin the platform so Apple Silicon stops warning ("the requested
+    # image's platform (linux/amd64) does not match the detected host
+    # platform (linux/arm64/v8)…"). Default to linux/arm64 because the
+    # primary day-one path is `./setup` on a Mac dev laptop; x86_64 EC2
+    # operators must override with POSTGRES_PLATFORM=linux/amd64 in .env
+    # before `docker compose up`. The postgres:16-alpine image is a
+    # multi-arch manifest, so both variants resolve to a real layer set.
+    platform: ${POSTGRES_PLATFORM:-linux/arm64}
     shm_size: '256mb'
     container_name: auditlens-postgres
     restart: always

@@ -221,7 +221,38 @@ migrate_env() {
     # creating a .env full of empty placeholders.
     [ -f "$env_path" ] || return 0
 
-    local raw key val
+    # Keys that MUST NEVER be copied from .env.example into .env, even when
+    # the example happens to ship a non-empty default. Two distinct reasons:
+    #
+    #   1. Secrets / wizard outputs (POSTGRES_PASSWORD, GRAFANA_ADMIN_PASSWORD,
+    #      audit/dest API keys, CC creds, AUDIT_API_SECRET, DEST_API_SECRET,
+    #      AUDIT_BOOTSTRAP, DEST_BOOTSTRAP): these are owned by either the
+    #      operator (credentials) or by the wizard (generated passwords).
+    #      Materialising the .env.example default (or worse, "changeme")
+    #      silently overrides the real value.
+    #
+    #   2. DATABASE_URL / FORWARDER_DATABASE_URL: the wizard now picks the
+    #      driver, hostname, and credentials based on the chosen
+    #      persistence_backend (postgres vs sqlite). Copying the .env.example
+    #      placeholder pins the api container onto a stale sqlite path and
+    #      causes the api ↔ forwarder DB-mismatch bug this migration was
+    #      written to fix.
+    local skip_keys=(
+        DATABASE_URL
+        FORWARDER_DATABASE_URL
+        POSTGRES_PASSWORD
+        GRAFANA_ADMIN_PASSWORD
+        AUDIT_API_KEY
+        AUDIT_API_SECRET
+        DEST_API_KEY
+        DEST_API_SECRET
+        AUDIT_BOOTSTRAP
+        DEST_BOOTSTRAP
+        CONFLUENT_CLOUD_API_KEY
+        CONFLUENT_CLOUD_API_SECRET
+    )
+
+    local raw key val skip k
     while IFS= read -r raw || [ -n "$raw" ]; do
         # Strip leading whitespace.
         raw="${raw#"${raw%%[![:space:]]*}"}"
@@ -231,6 +262,12 @@ migrate_env() {
         case "$raw" in *=*) ;; *) continue ;; esac
         key="${raw%%=*}"
         val="${raw#*=}"
+        # Hard-skip wizard-owned keys regardless of value (see comment above).
+        skip=0
+        for k in "${skip_keys[@]}"; do
+            [ "$key" = "$k" ] && { skip=1; break; }
+        done
+        [ "$skip" -eq 1 ] && continue
         # Strip inline comment (whitespace then # then anything) + trim.
         val=$(printf '%s' "$val" | sed 's/[[:space:]]*#.*$//; s/^[[:space:]]*//; s/[[:space:]]*$//')
         # Skip empty values — those are placeholders the operator fills in
