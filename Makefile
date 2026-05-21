@@ -1,7 +1,7 @@
 # Makefile for Audit Forwarder
 # Production-ready build, test, and deployment tasks
 
-.PHONY: help build build-alpine build-distroless test scan clean deploy deploy-check migrate setup start stop restart status monitoring logs health ps sync backup backup-list backup-restore update update-check repair
+.PHONY: help build build-alpine build-distroless test scan clean deploy deploy-check migrate setup start stop restart status monitoring logs health ps sync backup backup-list backup-list-remote backup-restore update update-check repair
 
 ##############################################################################
 # Quickstart Lifecycle (Phase 3 — single-command install + service control)
@@ -360,7 +360,7 @@ backup-now: ## Run backup immediately on EC2
 		"bash ~/AuditLens/infra/backup/run_backup.sh"
 	@echo "✅ Backup complete"
 
-backup-list: ## List backups on EC2
+backup-list-remote: ## List backups on EC2 (remote ~/backups/postgres/)
 	ssh -i $(PEM) $(EC2_USER)@$(EC2_IP) \
 		"ls -lh ~/backups/postgres/ && echo '---' && tail -5 ~/backups/backup.log"
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from typing import Any
 
@@ -10,6 +11,8 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from backend.app.core.limiter import limiter
+
+logger = logging.getLogger("auditlens.backend.onboarding")
 
 router = APIRouter(tags=["onboarding"])
 
@@ -91,8 +94,16 @@ async def discover(request: Request, body: DiscoverRequest) -> dict[str, Any]:
                         audit_enabled_count += 1
                         if eligible:
                             tableflow_eligible_count += 1
-            except Exception:
-                pass
+            except Exception as exc:
+                # Tableflow eligibility check is best-effort: missing
+                # permissions, partial results, or a transient CC outage
+                # shouldn't block the onboarding page from rendering the
+                # rest of the org's envs. Logged at DEBUG so operators
+                # debugging an empty page can see what failed.
+                logger.debug(
+                    "Tableflow eligibility probe failed for env %s: %s",
+                    env_id, exc,
+                )
             try:
                 sr_resp = await client.get(
                     f"{base}/srcm/v3/clusters",
@@ -108,8 +119,15 @@ async def discover(request: Request, body: DiscoverRequest) -> dict[str, Any]:
                             "endpoint": sr_spec.get("http_endpoint", ""),
                             "package": sr_spec.get("package", ""),
                         }
-            except Exception:
-                pass
+            except Exception as exc:
+                # Schema Registry metadata is also best-effort. Envs
+                # without SR provisioned legitimately raise here; the
+                # surrounding page must still render. DEBUG keeps the
+                # signal available without polluting the default logs.
+                logger.debug(
+                    "Schema Registry metadata probe failed for env %s: %s",
+                    env_id, exc,
+                )
             environments.append({
                 "id": env_id,
                 "name": env_name,

@@ -113,19 +113,10 @@ def mark_expected(
     return pattern
 
 
-def reactivate_pattern(db: Session, pattern_id: int) -> AuditEventPattern | None:
-    pattern = db.get(AuditEventPattern, pattern_id)
-    if pattern is None:
-        return None
-    now = datetime.now(timezone.utc)
-    pattern.status = "active"
-    pattern.suppressed_until = None
-    pattern.suppressed_by = None
-    pattern.suppression_reason = None
-    pattern.updated_at = now
-    db.commit()
-    db.refresh(pattern)
-    return pattern
+# reactivate_pattern() lived here but was only called from a backend
+# route that had zero frontend callers (audit 2026-05-21). Removed
+# along with that route; restore from git history if a future UI
+# surfaces a "Reactivate" action.
 
 
 def get_suppressed_combos(db: Session) -> set[tuple[str, str, str]]:

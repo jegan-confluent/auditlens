@@ -1,4 +1,4 @@
-"""Pattern management endpoints — list, suppress, and reactivate recurring patterns."""
+"""Pattern management endpoints — list, suppress, and mark recurring patterns."""
 
 import re
 
@@ -12,7 +12,6 @@ from backend.app.services.admin_audit_service import log_admin_action
 from backend.app.services.pattern_service import (
     list_patterns,
     mark_expected,
-    reactivate_pattern,
     suppress_pattern,
 )
 from src.product.auth import AccessToken, AuthConfig, Authenticator, Role
@@ -243,15 +242,11 @@ def mark_expected_endpoint(
     return {"status": "expected", "id": pattern.id}
 
 
-@router.post("/patterns/{pattern_id}/reactivate")
-@limiter.limit("60/minute")
-def reactivate(
-    pattern_id: int,
-    request: Request,
-    db: Session = Depends(get_db),
-) -> dict:
-    _require_admin(request)
-    pattern = reactivate_pattern(db, pattern_id)
-    if pattern is None:
-        raise HTTPException(status_code=404, detail="Pattern not found")
-    return {"status": "active", "id": pattern.id}
+# Note: a POST /patterns/{pattern_id}/reactivate handler used to live
+# here, paired with reactivate_pattern() in pattern_service. The route
+# had zero frontend callers (confirmed via repo-wide grep over the
+# whole frontend tree, 2026-05-21) and no tests, so the route + service
+# function were removed to shrink the admin surface. If a future UI
+# needs to flip a pattern back from suppressed/expected to active, the
+# service function can be restored from git history (commit before this
+# one) and a button wired into RecurringPatterns.tsx.
