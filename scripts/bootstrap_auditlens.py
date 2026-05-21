@@ -1041,41 +1041,23 @@ def collect_interactive_inputs(
             help_text="Recommended. Persistence backs API search/export and replay-aware runtime state.",
         )
         if inputs.persistence_enabled:
-            inputs.persistence_backend = prompt_choice(
-                "Persistence backend",
-                ["postgres", "sqlite"],
-                "postgres",
-                help_text=(
-                    "postgres is recommended — Postgres is already running "
-                    "in your Docker stack. Use sqlite only for lightweight "
-                    "single-process deployments."
-                ),
-            )
-            # Path depends on deployment mode because docker bind-mounts
-            # ./data/forwarder as /app/data while k8s mounts the PVC at
-            # /var/lib/auditlens. Suggesting the wrong default puts the DB
-            # file on a tmpfs / unmounted path inside the container. When
-            # the operator picks postgres we still need a placeholder so
-            # PERSISTENCE_DB_PATH renders cleanly into the env file, but we
-            # do not prompt — the value is unused when DATABASE_URL is
-            # postgresql://.
-            default_db_path = (
+            # Postgres is the only supported backend now. The legacy
+            # SQLite hot cache is gone — Postgres is reached via
+            # DATABASE_URL through SQLAlchemy in every container.
+            # PERSISTENCE_DB_PATH is still rendered into .env (the
+            # SQLiteProductStore class still understands it for demo
+            # mode when ENABLE_SQLITE_HOT_CACHE=true) but no longer
+            # prompted for: the default tracks deployment_mode so
+            # the path is sane if anything ever opts back in.
+            inputs.persistence_backend = "postgres"
+            print()
+            print(cyan("  Persistence backend"))
+            print(dim("    Using Postgres persistence (recommended)."))
+            inputs.persistence_db_path = (
                 "/app/data/auditlens.db"
                 if inputs.deployment_mode == "docker"
                 else "/var/lib/auditlens/auditlens.db"
             )
-            if inputs.persistence_backend == "sqlite":
-                inputs.persistence_db_path = prompt_text(
-                    "SQLite DB path",
-                    default=default_db_path,
-                    help_text=(
-                        "Docker bind-mounts ./data/forwarder as /app/data; "
-                        "Kubernetes mounts a PVC at /var/lib/auditlens. The "
-                        "default matches the deployment mode you picked."
-                    ),
-                )
-            else:
-                inputs.persistence_db_path = default_db_path
         # Prepare the host directory backing persistence_db_path so the
         # validate_persistence_config docker run does not fail with
         # `unable to open database file` on a fresh host. Best-effort.

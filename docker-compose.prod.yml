@@ -27,7 +27,9 @@ services:
       - DLQ_TOPIC=${DLQ_TOPIC:-audit.dlq.v1}
       - ALERT_ON_HIGH_RISK=${ALERT_ON_HIGH_RISK:-true}
       - PERSISTENCE_ENABLED=${PERSISTENCE_ENABLED:-true}
-      - PERSISTENCE_BACKEND=${PERSISTENCE_BACKEND:-sqlite}
+      # Postgres-only: backend defaults to postgres so a missing .env
+      # cannot silently route the forwarder through the SQLite hot cache.
+      - PERSISTENCE_BACKEND=${PERSISTENCE_BACKEND:-postgres}
       - PERSISTENCE_DB_PATH=${FORWARDER_PERSISTENCE_DB_PATH:-/app/data/auditlens.db}
       - PERSISTENCE_DB_MAX_BYTES=${PERSISTENCE_DB_MAX_BYTES:-1073741824}
       - PERSISTENCE_WAL_MAX_BYTES=${PERSISTENCE_WAL_MAX_BYTES:-134217728}
@@ -44,12 +46,13 @@ services:
       - KAFKA_QUEUED_MAX_MESSAGES_KBYTES=${KAFKA_QUEUED_MAX_MESSAGES_KBYTES:-65536}
       - KAFKA_PRODUCER_QUEUE_MAX_KBYTES=${KAFKA_PRODUCER_QUEUE_MAX_KBYTES:-65536}
       - ENABLE_DB_WRITER=${ENABLE_DB_WRITER:-true}
-      # Read DATABASE_URL straight from .env so the forwarder hits the same
-      # store as the api container. The wizard writes both DATABASE_URL and
-      # FORWARDER_DATABASE_URL (matched values when Postgres is selected);
-      # FORWARDER_DATABASE_URL is kept as a secondary fallback for
-      # operators who hand-edited the legacy variable.
-      - DATABASE_URL=${DATABASE_URL:-${FORWARDER_DATABASE_URL:-sqlite:////app/data/auditlens.db}}
+      # Postgres-only: NO sqlite fallback. The wizard writes DATABASE_URL
+      # (and FORWARDER_DATABASE_URL as a transitional alias) into .env.
+      # If both are unset compose substitutes "" — SQLAlchemy then fails
+      # fast with a clear "could not parse rfc1738 url" instead of
+      # silently routing the forwarder onto a different SQLite file from
+      # the api container.
+      - DATABASE_URL=${DATABASE_URL:-${FORWARDER_DATABASE_URL:-}}
       - DB_WRITE_BATCH_SIZE=${DB_WRITE_BATCH_SIZE:-100}
       - DB_WRITE_FLUSH_INTERVAL_SECONDS=${DB_WRITE_FLUSH_INTERVAL_SECONDS:-2}
       - DB_WRITE_BACKOFF_MAX_SECONDS=${DB_WRITE_BACKOFF_MAX_SECONDS:-60}
@@ -126,7 +129,8 @@ services:
       - path: .secrets
         required: false
     environment:
-      - DATABASE_URL=${DATABASE_URL:-sqlite:////var/lib/auditlens/auditlens_api.db}
+      # Postgres-only: NO sqlite fallback. See forwarder DATABASE_URL note.
+      - DATABASE_URL=${DATABASE_URL:-}
       - AUDITLENS_RUNTIME_DIR=/var/lib/auditlens
       - FORWARDER_HEALTH_URL=${FORWARDER_HEALTH_URL:-http://auditlens-forwarder:${METRICS_PORT:-8003}/health}
       - EVENT_RETENTION_DAYS=${EVENT_RETENTION_DAYS:-7}

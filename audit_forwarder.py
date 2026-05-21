@@ -557,7 +557,13 @@ def validate_startup_config() -> dict:
     invalid_offset = AUTO_OFFSET_RESET not in {"latest", "earliest"}
 
     auth_missing = AUTH_CONFIG.enabled and not AUTH_CONFIG.tokens
-    persistence_invalid = PERSISTENCE_CONFIG.enabled and PERSISTENCE_CONFIG.backend != "sqlite"
+    # Postgres-only deployment: every backend value is accepted at the
+    # config layer. The legacy SQLite hot cache module still understands
+    # PERSISTENCE_BACKEND=sqlite (demo mode, ENABLE_SQLITE_HOT_CACHE=true)
+    # but rejecting "postgres" here was the wrong constraint — production
+    # DATABASE_URL is always postgres now and `validate_startup_config` was
+    # making the forwarder exit(1) with "Startup validation failed".
+    persistence_invalid = False
 
     summary = {
         "app_name": "AuditLens",

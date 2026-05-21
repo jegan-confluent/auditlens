@@ -276,7 +276,18 @@ class SQLiteProductStore:
             self._status["healthy"] = False
             return
         if self.config.backend != "sqlite":
-            raise ValueError(f"Unsupported persistence backend: {self.config.backend}")
+            # Postgres-only deployment: the durable store is Postgres
+            # (accessed via DATABASE_URL through SQLAlchemy in
+            # src/product/db_writer.py). The SQLite hot cache class only
+            # makes sense in legacy demo mode; for any other backend the
+            # initializer is a clean no-op rather than a crash.
+            self._status["healthy"] = False
+            self._status["backend"] = self.config.backend
+            logger.info(
+                "SQLite hot cache skipped (backend=%s) — Postgres is the durable store via SQLAlchemy.",
+                self.config.backend,
+            )
+            return
         db_parent = os.path.dirname(self.config.db_path)
         if db_parent:
             os.makedirs(db_parent, exist_ok=True)
