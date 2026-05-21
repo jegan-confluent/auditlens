@@ -593,33 +593,6 @@ services:
     security_opt:
       - no-new-privileges:true
 
-  # Auto-update for any container whose image is NOT digest-pinned.
-  # Most AuditLens services have @sha256 pins (caddy, grafana, loki,
-  # promtail, alertmanager, postgres, postgres-exporter) so watchtower
-  # will be a no-op for them. The forwarder/api/frontend images are
-  # locally built from compose, also outside watchtower's reach. The
-  # service is included so future un-pinned dependencies pick up
-  # security patches without manual intervention.
-  watchtower:
-    image: containrrr/watchtower:latest
-    container_name: auditlens-watchtower
-    restart: unless-stopped
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-    environment:
-      - WATCHTOWER_POLL_INTERVAL=${WATCHTOWER_POLL_INTERVAL:-300}
-      - WATCHTOWER_CLEANUP=true
-      - WATCHTOWER_INCLUDE_STOPPED=false
-      - WATCHTOWER_NO_STARTUP_MESSAGE=true
-      - WATCHTOWER_LABEL_ENABLE=false
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "5m"
-        max-file: "2"
-    networks:
-      - frontend-network
-
   mcp-server:
     profiles:
       - future

@@ -270,9 +270,7 @@ git pull origin main && docker compose -f docker-compose.prod.yml up -d --build
 
 `./setup` itself also self-updates on launch: if the local clone is behind `origin/main`, it pulls and re-execs before the wizard starts. Disable with `--no-update` (or `AUDITLENS_NO_UPDATE=1`) for offline / CI runs. The wizard also runs the same `.env` migration as `make repair` on every invocation, so a re-run is a strict superset of a repair.
 
-A `watchtower` service in `docker-compose.prod.yml` polls every 5 minutes for newer images of any container that isn't digest-pinned (configurable via `WATCHTOWER_POLL_INTERVAL`). Today most images are pinned by `@sha256:` so watchtower is mostly a no-op; the service exists so future un-pinned dependencies pick up security patches automatically.
-
-`make deploy` does the same flow remotely (rsync + rebuild) — see [docs/Deployment_Guide.md](docs/Deployment_Guide.md).
+`make deploy` does the same flow remotely (rsync + rebuild) — see [docs/Deployment_Guide.md](docs/Deployment_Guide.md). Image updates are controlled rather than automatic: `make update` / `make deploy` pulls and recreates containers on demand. There is no background updater (no watchtower) because uncontrolled image pulls have surprised us on schema-incompatible upstream releases in the past.
 
 ### Windows / WSL2
 
