@@ -330,6 +330,16 @@ def prompt_text(
             value = getpass.getpass(prompt_str)
         else:
             value = input(prompt_str).strip()
+        # Defensive sanitization: collapse any embedded newlines / carriage
+        # returns the user's paste may have smuggled in. input() itself
+        # terminates on the first \n, but bracketed-paste-mode terminals
+        # and getpass.getpass() (secret branch) can both deliver values
+        # containing literal \n or \r — which, when rendered into .env,
+        # would split one logical value across multiple physical lines
+        # and bleed the tail into whatever KEY= follows it. Belt-and-
+        # braces: replace newlines with a single space, drop carriage
+        # returns, then re-trim edge whitespace.
+        value = value.replace("\n", " ").replace("\r", "").strip()
         if not value and default is not None:
             value = default
         if value or not required:
