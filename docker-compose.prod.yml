@@ -144,6 +144,14 @@ services:
       # hot-reloaded by the api process; the api never writes back to it.
       # `grep -r notifications.yml backend/app/` confirms no write paths.
       - ./notifications.yml:/app/notifications.yml:ro
+      # The api container reads API_AUTH_TOKEN_FILE
+      # (/run/secrets/auditlens-api-tokens.json by default) to load the
+      # bearer-token roster on boot. Without this mount AuthConfig.from_env
+      # raises and every authed route returns 503 — which is exactly the
+      # "POSTGRES_PASSWORD mismatch" false-positive operators kept hitting.
+      # The forwarder already has this mount; the api needs it for the
+      # same reason. Read-only because the api never writes back.
+      - ./secrets:/run/secrets:ro
     ports:
       # Host-bound so the install wizard can poll /health directly. Caddy
       # at :80 still reverse-proxies /api/* and /health for normal traffic.
