@@ -4,8 +4,10 @@ The backfill query scans for rows needing re-enrichment, one condition being
 actor_confidence = 'low'. Without an index this forces a full sequential scan
 on audit_events (4.9M+ rows), consistently triggering the statement timeout.
 
-CREATE INDEX CONCURRENTLY must run outside a transaction block.
-autocommit_block() (Alembic 1.7+) handles the COMMIT/BEGIN wrapping.
+Uses plain ``CREATE INDEX IF NOT EXISTS`` — the prior
+``autocommit_block`` + ``CONCURRENTLY`` form failed
+``AssertionError: assert self._transaction is not None`` under env.py's
+transactional migration runner. See 0004 for the full rationale.
 
 Revision ID: 0019_idx_actor_confidence_low
 Revises: 0018_strip_actor_user_prefix
@@ -27,19 +29,17 @@ def upgrade() -> None:
     bind = op.get_bind()
     if bind.dialect.name != "postgresql":
         return
-    with op.get_context().autocommit_block():
-        op.execute(text(
-            "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_audit_events_actor_confidence_low"
-            " ON audit_events (id)"
-            " WHERE actor_confidence = 'low'"
-        ))
+    op.execute(text(
+        "CREATE INDEX IF NOT EXISTS idx_audit_events_actor_confidence_low"
+        " ON audit_events (id)"
+        " WHERE actor_confidence = 'low'"
+    ))
 
 
 def downgrade() -> None:
     bind = op.get_bind()
     if bind.dialect.name != "postgresql":
         return
-    with op.get_context().autocommit_block():
-        op.execute(text(
-            "DROP INDEX CONCURRENTLY IF EXISTS idx_audit_events_actor_confidence_low"
-        ))
+    op.execute(text(
+        "DROP INDEX IF EXISTS idx_audit_events_actor_confidence_low"
+    ))

@@ -37,38 +37,22 @@ _INDEX_NAMES: tuple[str, ...] = (
 
 
 def upgrade() -> None:
-    bind = op.get_bind()
-    dialect = bind.dialect.name
-
-    if dialect == "postgresql":
-        statements = (
-            "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_audit_events_resource_type_notnull "
-            "ON audit_events (resource_type) WHERE resource_type IS NOT NULL AND resource_type != ''",
-            "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_audit_events_actor_notnull "
-            "ON audit_events (actor) WHERE actor IS NOT NULL AND actor != ''",
-        )
-        with op.get_context().autocommit_block():
-            for sql in statements:
-                op.execute(text(sql))
-        return
-
-    sqlite_statements = (
+    # Plain CREATE INDEX (no CONCURRENTLY). autocommit_block + CONCURRENTLY
+    # was incompatible with env.py's transactional migration runner and
+    # broke fresh installs with `AssertionError: assert self._transaction
+    # is not None`. The ACCESS EXCLUSIVE lock on audit_events for these
+    # small partial indexes is brief enough to be acceptable migration
+    # cost. Same fix applied across 0004 / 0006 / 0016 / 0019 / 0025.
+    statements = (
         "CREATE INDEX IF NOT EXISTS idx_audit_events_resource_type_notnull "
         "ON audit_events (resource_type) WHERE resource_type IS NOT NULL AND resource_type != ''",
         "CREATE INDEX IF NOT EXISTS idx_audit_events_actor_notnull "
         "ON audit_events (actor) WHERE actor IS NOT NULL AND actor != ''",
     )
-    for sql in sqlite_statements:
+    for sql in statements:
         op.execute(text(sql))
 
 
 def downgrade() -> None:
-    bind = op.get_bind()
-    dialect = bind.dialect.name
-    if dialect == "postgresql":
-        with op.get_context().autocommit_block():
-            for name in _INDEX_NAMES:
-                op.execute(text(f"DROP INDEX CONCURRENTLY IF EXISTS {name}"))
-        return
     for name in _INDEX_NAMES:
         op.execute(text(f"DROP INDEX IF EXISTS {name}"))

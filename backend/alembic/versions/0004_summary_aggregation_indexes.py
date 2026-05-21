@@ -19,9 +19,16 @@ This revision adds:
 2. ``idx_audit_events_failure_time`` — partial ``(timestamp DESC) WHERE is_failure = true``
 3. ``idx_audit_events_denied_time`` — partial ``(timestamp DESC) WHERE is_denied = true``
 
-On Postgres we build with ``CREATE INDEX CONCURRENTLY`` so the live forwarder
-keeps writing while the index is being built. ``IF NOT EXISTS`` makes the
-revision idempotent if it has already been applied manually.
+``IF NOT EXISTS`` makes the revision idempotent if it has already been
+applied manually. Previously we used ``CREATE INDEX CONCURRENTLY`` inside
+an ``op.get_context().autocommit_block()`` so the forwarder could keep
+writing during the build, but ``autocommit_block()`` requires the env to
+run migrations outside a transaction and ours uses
+``context.begin_transaction()`` — the combination tripped
+``AssertionError: assert self._transaction is not None`` and blocked
+every fresh install. Standard ``CREATE INDEX`` takes a brief ACCESS
+EXCLUSIVE lock on ``audit_events`` (seconds, not minutes — these indexes
+are small partials / composites) which is acceptable migration cost.
 
 Revision ID: 0004_summary_aggregation_indexes
 Revises: 0003_triage_cascade_fk
@@ -52,25 +59,21 @@ def upgrade() -> None:
     dialect = bind.dialect.name
 
     if dialect == "postgresql":
-        # CONCURRENTLY cannot run inside a transaction, so wrap each statement
-        # in autocommit. Build order matches the priority of the queries that
-        # benefit: the resource-type composite first, then the partial indexes.
         statements = (
-            "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_audit_events_resource_type_time "
+            "CREATE INDEX IF NOT EXISTS idx_audit_events_resource_type_time "
             "ON audit_events (resource_type, timestamp DESC)",
-            "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_audit_events_failure_time "
+            "CREATE INDEX IF NOT EXISTS idx_audit_events_failure_time "
             "ON audit_events (timestamp DESC) WHERE is_failure = true",
-            "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_audit_events_denied_time "
+            "CREATE INDEX IF NOT EXISTS idx_audit_events_denied_time "
             "ON audit_events (timestamp DESC) WHERE is_denied = true",
         )
-        with op.get_context().autocommit_block():
-            for sql in statements:
-                op.execute(text(sql))
+        for sql in statements:
+            op.execute(text(sql))
         return
 
-    # SQLite (demo / tests). No CONCURRENTLY; partial-index syntax matches.
-    # The boolean column is stored as 0/1 in SQLite; the literal ``true``
-    # works through the SQLAlchemy parser, but we fork to ``= 1`` to be safe.
+    # SQLite (demo / tests). The boolean column is stored as 0/1; the
+    # literal ``true`` works through SQLAlchemy but we fork to ``= 1`` to
+    # be safe.
     sqlite_statements = (
         "CREATE INDEX IF NOT EXISTS idx_audit_events_resource_type_time "
         "ON audit_events (resource_type, timestamp DESC)",
@@ -84,12 +87,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    bind = op.get_bind()
-    dialect = bind.dialect.name
-    if dialect == "postgresql":
-        with op.get_context().autocommit_block():
-            for name in _INDEX_NAMES:
-                op.execute(text(f"DROP INDEX CONCURRENTLY IF EXISTS {name}"))
-        return
+    # Plain DROP INDEX IF EXISTS — no CONCURRENTLY (would re-introduce
+    # the autocommit_block requirement that broke fresh installs).
     for name in _INDEX_NAMES:
         op.execute(text(f"DROP INDEX IF EXISTS {name}"))

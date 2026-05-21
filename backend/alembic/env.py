@@ -62,32 +62,65 @@ def run_migrations_offline() -> None:
         context.run_migrations()
 
 
+def _preflight_alembic_version_table_pg(engine) -> None:
+    """Ensure alembic_version exists at VARCHAR(128) on Postgres BEFORE
+    alembic creates it at the default VARCHAR(32).
+
+    Done with its OWN connection + explicit begin/commit so the DDL is
+    durably persisted before alembic opens its own transaction. The
+    earlier "begin_nested() on the alembic connection" form leaked an
+    uncommitted outer transaction that swallowed every subsequent
+    migration write — audit_events would get populated by the forwarder
+    later, but alembic_version would never persist, so each restart
+    re-ran every migration from scratch (and corrupted state for any
+    one-shot migration). The dedicated-connection pattern avoids that
+    by committing this DDL on its own, completely independent of the
+    alembic context's transaction lifecycle.
+
+    Two cases handled:
+      1. Table already exists at any width → CREATE IF NOT EXISTS is a
+         no-op, then ALTER widens to 128 (Postgres no-ops the ALTER if
+         already that wide).
+      2. Fresh DB → table is created at VARCHAR(128); alembic's own
+         CREATE IF NOT EXISTS later finds it and skips its narrow create.
+
+    Any DDL failure (lock conflict, missing privilege, parallel runner
+    won the race) is swallowed — migrations themselves still run.
+    """
+    import logging
+    logger = logging.getLogger("alembic.env")
+    try:
+        with engine.connect() as ddl_conn:
+            with ddl_conn.begin():
+                ddl_conn.execute(text(
+                    "CREATE TABLE IF NOT EXISTS alembic_version ("
+                    "  version_num VARCHAR(128) NOT NULL,"
+                    "  CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num)"
+                    ")"
+                ))
+                ddl_conn.execute(text(
+                    "ALTER TABLE alembic_version "
+                    "ALTER COLUMN version_num TYPE VARCHAR(128)"
+                ))
+    except Exception as exc:
+        logger.warning("alembic_version preflight skipped: %s", exc)
+
+
 def run_migrations_online() -> None:
     section = config.get_section(config.config_ini_section, {}) or {}
     section["sqlalchemy.url"] = _resolve_url()
     connectable = engine_from_config(section, prefix="sqlalchemy.", poolclass=pool.NullPool)
 
+    # Pre-create alembic_version on Postgres so the column is wide enough
+    # for our 35+ character revision IDs (date-prefixed slugs, branch
+    # merges). SQLite has no ALTER COLUMN TYPE and uses dynamic typing,
+    # so the dialect guard skips it there. This runs on its OWN
+    # connection with a committed transaction — never share state with
+    # alembic's connection, which manages its own transaction lifecycle.
+    if connectable.dialect.name == "postgresql":
+        _preflight_alembic_version_table_pg(connectable)
+
     with connectable.connect() as connection:
-        # Postgres-only: widen alembic_version.version_num from the default
-        # VARCHAR(32) to VARCHAR(128) so longer revision IDs (date-prefixed
-        # slugs, branch-merge nodes) stop tripping `value too long for type
-        # character varying(32)` when alembic stamps the new head. Wrapped
-        # in a SAVEPOINT so a failure (column already wide, table missing
-        # on first install) does not abort the outer migration transaction.
-        # SQLite has no ALTER COLUMN TYPE and does not exhibit the failure,
-        # so the dialect guard keeps test runs clean.
-        if connection.dialect.name == "postgresql":
-            try:
-                with connection.begin_nested():
-                    connection.execute(text(
-                        "ALTER TABLE alembic_version "
-                        "ALTER COLUMN version_num TYPE VARCHAR(128)"
-                    ))
-            except Exception:
-                # Column already wide, table doesn't exist yet, or operator
-                # lacks ALTER privilege — none of those should block the
-                # actual migrations from running.
-                pass
         context.configure(
             connection=connection,
             target_metadata=target_metadata,

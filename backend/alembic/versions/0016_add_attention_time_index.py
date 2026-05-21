@@ -27,17 +27,20 @@ def upgrade() -> None:
     bind = op.get_bind()
     if bind.dialect.name != "postgresql":
         return
-    # CREATE INDEX CONCURRENTLY must run outside a transaction block.
-    # autocommit_block() (Alembic 1.7+) handles the COMMIT/BEGIN wrapping.
-    with op.get_context().autocommit_block():
-        op.execute(
-            text("""
-                CREATE INDEX CONCURRENTLY IF NOT EXISTS
-                    idx_audit_events_attention_time
-                ON audit_events (timestamp DESC, signal_type)
-                WHERE is_routine_noise = false
-            """)
-        )
+    # Plain CREATE INDEX (no CONCURRENTLY). The autocommit_block +
+    # CONCURRENTLY combo was incompatible with env.py's transactional
+    # migration runner — see 0004_summary_aggregation_indexes.py for
+    # the full rationale. The partial index is small (~11 % of rows
+    # with DROP_LOW_EVENTS enabled), so the brief ACCESS EXCLUSIVE lock
+    # is acceptable migration cost.
+    op.execute(
+        text("""
+            CREATE INDEX IF NOT EXISTS
+                idx_audit_events_attention_time
+            ON audit_events (timestamp DESC, signal_type)
+            WHERE is_routine_noise = false
+        """)
+    )
 
 
 def downgrade() -> None:

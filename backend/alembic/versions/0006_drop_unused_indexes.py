@@ -83,28 +83,17 @@ _INDEXES_TO_RECREATE: dict[str, str] = {
 
 
 def upgrade() -> None:
-    bind = op.get_bind()
-    dialect = bind.dialect.name
-
-    if dialect == "postgresql":
-        with op.get_context().autocommit_block():
-            for name in _INDEXES_TO_DROP:
-                op.execute(text(f"DROP INDEX CONCURRENTLY IF EXISTS {name}"))
-        return
-
+    # Plain DROP INDEX (no CONCURRENTLY). autocommit_block + CONCURRENTLY
+    # was incompatible with env.py's transactional migration runner —
+    # ran into `AssertionError: assert self._transaction is not None`.
+    # See 0004_summary_aggregation_indexes.py for the full rationale.
     for name in _INDEXES_TO_DROP:
         op.execute(text(f"DROP INDEX IF EXISTS {name}"))
 
 
 def downgrade() -> None:
-    bind = op.get_bind()
-    dialect = bind.dialect.name
-
-    if dialect == "postgresql":
-        with op.get_context().autocommit_block():
-            for name in _INDEXES_TO_DROP:
-                op.execute(text(_INDEXES_TO_RECREATE[name].format(concurrent="CONCURRENTLY ")))
-        return
-
+    # downgrade re-creates each previously-dropped index. Plain
+    # (non-concurrent) CREATE for the same migration-transaction reason
+    # — the {concurrent} placeholder is now always filled with "".
     for name in _INDEXES_TO_DROP:
         op.execute(text(_INDEXES_TO_RECREATE[name].format(concurrent="")))

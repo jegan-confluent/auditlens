@@ -30,11 +30,13 @@ dashboard queries; telemetry window may be too short to be conclusive):
   • idx_audit_events_actor_confidence_low (partial: WHERE actor_confidence='low')
   • idx_audit_events_actor_display_enrichment (partial: WHERE actor_display_name…)
 
-Uses DROP INDEX CONCURRENTLY (Postgres) inside an autocommit block so
-this migration doesn't take an ACCESS EXCLUSIVE lock on audit_events on
-EC2 where the table holds millions of rows + active forwarder writes.
-Pattern mirrors migration 0006_drop_unused_indexes. SQLite (test/demo)
-uses the non-concurrent path; SQLite has no concept of CONCURRENTLY.
+Uses plain ``DROP INDEX IF EXISTS`` (no CONCURRENTLY). The earlier
+``autocommit_block() + DROP INDEX CONCURRENTLY`` form failed under
+env.py's transactional migration runner with
+``AssertionError: assert self._transaction is not None``. The drop now
+takes a brief ACCESS EXCLUSIVE lock on audit_events; acceptable
+migration cost on a single-process upgrade. See 0004 for the full
+rationale.
 
 Revision ID: 0025_deduplicate_audit_events_indexes
 Revises: 0024_add_admin_audit_log
@@ -70,8 +72,10 @@ _INDEXES_TO_DROP: tuple[str, ...] = (
 
 # CREATE statements that mirror the original index definitions so
 # `alembic downgrade` returns the table to its pre-0025 shape. The
-# {concurrent} placeholder is filled with "CONCURRENTLY " on Postgres
-# and "" on SQLite.
+# {concurrent} placeholder is retained as an empty string for template
+# compatibility — CONCURRENTLY was dropped repo-wide because it
+# requires autocommit_block(), which is incompatible with env.py's
+# transactional migration runner.
 _INDEXES_TO_RECREATE: dict[str, str] = {
     "idx_audit_events_resource_type":
         "CREATE INDEX {concurrent}IF NOT EXISTS idx_audit_events_resource_type "
@@ -110,32 +114,13 @@ _INDEXES_TO_RECREATE: dict[str, str] = {
 
 
 def upgrade() -> None:
-    bind = op.get_bind()
-    dialect = bind.dialect.name
-
-    if dialect == "postgresql":
-        # CONCURRENTLY requires no surrounding transaction; the
-        # autocommit_block() helper temporarily exits the alembic-managed
-        # transaction so each DROP runs in its own auto-committed statement.
-        with op.get_context().autocommit_block():
-            for name in _INDEXES_TO_DROP:
-                op.execute(text(f"DROP INDEX CONCURRENTLY IF EXISTS {name}"))
-        return
-
-    # SQLite: just drop them (no CONCURRENTLY semantics).
+    # Plain DROP INDEX IF EXISTS for both dialects. The {concurrent}
+    # placeholder in _INDEXES_TO_RECREATE is retained for downgrade
+    # template compatibility but always filled with "".
     for name in _INDEXES_TO_DROP:
         op.execute(text(f"DROP INDEX IF EXISTS {name}"))
 
 
 def downgrade() -> None:
-    bind = op.get_bind()
-    dialect = bind.dialect.name
-
-    if dialect == "postgresql":
-        with op.get_context().autocommit_block():
-            for name in _INDEXES_TO_DROP:
-                op.execute(text(_INDEXES_TO_RECREATE[name].format(concurrent="CONCURRENTLY ")))
-        return
-
     for name in _INDEXES_TO_DROP:
         op.execute(text(_INDEXES_TO_RECREATE[name].format(concurrent="")))
