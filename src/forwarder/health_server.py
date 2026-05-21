@@ -883,7 +883,16 @@ class MetricsHandler(BaseHTTPRequestHandler):
             response = "\n".join(prometheus_metrics)
 
             self._send_bytes(200, 'text/plain', response.encode())
-        elif parsed.path in {'/health', '/api/v1/health'}:
+        elif parsed.path in {'/health', '/ready', '/api/v1/health'}:
+            # /ready is an alias for the unauthenticated /health probe so
+            # tools that expect the standard Kubernetes/Docker readiness
+            # convention can reach the forwarder. Both /health and /ready
+            # share the same payload — there's no meaningful difference
+            # between "live" and "ready" for a single-process consumer:
+            # once the consumer has subscribed and the writer threads are
+            # up, it can do its job. The api container exposes a separate
+            # /ready that does a DB-freshness check; the frontend probes
+            # that one for its readiness banner.
             if parsed.path == '/api/v1/health':
                 actor = self._authorize_request(parsed.path, params, export=False)
                 if actor is None:

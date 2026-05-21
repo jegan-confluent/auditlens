@@ -198,7 +198,11 @@ export default function DashboardPage() {
       ) : null}
 
       {readyError ? (
-        <p className="panel-error">Forwarder readiness check failed — {readyError}</p>
+        // The /ready endpoint this probes is the API container's (it
+        // verifies DB connectivity + last event freshness). Old wording
+        // said "Forwarder readiness check failed" which sent operators
+        // chasing the wrong process when the DB was the actual cause.
+        <p className="panel-error">API readiness check failed — {readyError}</p>
       ) : null}
 
       {summary ? (
