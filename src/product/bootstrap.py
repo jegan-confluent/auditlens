@@ -968,6 +968,21 @@ def render_env_file(inputs: BootstrapInputs) -> str:
         forwarder_database_url = forwarder_sqlite_url
         persistence_backend = "sqlite"
 
+    # Postgres image platform — must match the sha256 digest pinned in
+    # docker-compose.prod.yml (amd64). On Apple Silicon Macs we still
+    # want linux/arm64 so Docker Desktop's qemu emulation kicks in
+    # cleanly and the "image platform does not match host" warning goes
+    # away. On x86 hosts (Intel Mac, AL2023 EC2, Ubuntu workstation) we
+    # MUST emit linux/amd64 so the digest pull resolves — any other
+    # value triggers `cannot overwrite digest` and blocks the whole
+    # `docker compose up --force-recreate`.
+    import platform as _platform
+    machine = _platform.machine().lower()
+    if machine in {"arm64", "aarch64"}:
+        postgres_platform = "linux/arm64"
+    else:
+        postgres_platform = "linux/amd64"
+
     # CORS_ORIGINS must include the platform host (EC2 public IP, mac
     # localhost). Read from PLATFORM_HOST exported by setup's
     # detect_platform(); the default keeps the wizard usable when run
@@ -1046,6 +1061,7 @@ def render_env_file(inputs: BootstrapInputs) -> str:
         "POSTGRES_USER=auditlens",
         "POSTGRES_DB=auditlens",
         "POSTGRES_PORT=5432",
+        f"POSTGRES_PLATFORM={postgres_platform}",
         "",
         "# Grafana admin login (required by docker-compose.prod.yml — compose",
         "# refuses to start grafana without GRAFANA_ADMIN_PASSWORD).",

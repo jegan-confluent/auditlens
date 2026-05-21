@@ -278,12 +278,14 @@ services:
     image: postgres:16-alpine@sha256:4e6e670bb069649261c9c18031f0aded7bb249a5b6664ddec29c013a89310d50
     # Pin the platform so Apple Silicon stops warning ("the requested
     # image's platform (linux/amd64) does not match the detected host
-    # platform (linux/arm64/v8)…"). Default to linux/arm64 because the
-    # primary day-one path is `./setup` on a Mac dev laptop; x86_64 EC2
-    # operators must override with POSTGRES_PLATFORM=linux/amd64 in .env
-    # before `docker compose up`. The postgres:16-alpine image is a
-    # multi-arch manifest, so both variants resolve to a real layer set.
-    platform: ${POSTGRES_PLATFORM:-linux/arm64}
+    # platform (linux/arm64/v8)…"). Default is linux/amd64 because the
+    # sha256 digest pinned above is for the amd64 manifest variant — any
+    # other value causes `cannot overwrite digest` on pull and the
+    # postgres + every downstream container fail to recreate. On Apple
+    # Silicon, the wizard rewrites POSTGRES_PLATFORM=linux/arm64 in .env
+    # (see render_env_file()) so Docker Desktop's qemu translation kicks
+    # in cleanly and the warning disappears.
+    platform: ${POSTGRES_PLATFORM:-linux/amd64}
     shm_size: '256mb'
     container_name: auditlens-postgres
     restart: always
