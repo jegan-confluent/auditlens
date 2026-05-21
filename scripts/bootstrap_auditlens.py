@@ -817,7 +817,11 @@ def collect_interactive_inputs(
         print_phase_header(1, "Source cluster walkthrough")
         if prompt_bool(
             "Need help finding your source audit-log cluster details",
-            default=False,
+            # default=True: this is a HELP prompt. Capital letter = the
+            # recommended path; first-time installers almost always want
+            # the audit-log CLI walkthrough printed. Returning operators
+            # who don't can still press n.
+            default=True,
             help_text="Shows the Confluent CLI commands that identify the audit-log topic, cluster, service account, and API key path.",
         ):
             print_source_cluster_help()
@@ -1464,80 +1468,220 @@ def _wait_for_http_with_progress(
     )
 
 
+def _wait_for_postgres_ready(
+    container: str = "auditlens-postgres",
+    user: str = "auditlens",
+    db: str = "auditlens",
+    timeout_seconds: float = 90.0,
+    poll_seconds: float = 3.0,
+) -> None:
+    """Block until `pg_isready` inside the postgres container reports the
+    DB is accepting connections.
+
+    This MUST run before any HTTP probe of the api container — otherwise
+    the api's /health endpoint returns 200 the instant FastAPI boots,
+    but every authed route returns 503 until SQLAlchemy can complete
+    its first connection handshake. On a fresh Mac install the postgres
+    container has to: pull the image (when not cached), initdb (10-20 s),
+    run our tune.sh entrypoint, then accept connections. The api's
+    alembic upgrade head step also serialises behind this. 90 s covers
+    all three on cold-start.
+
+    Raises BootstrapError on timeout with a service-specific diagnosis
+    so the central try/except in main() can render the failure block."""
+    info_line(f"Waiting for Postgres to be ready ({container})…")
+    start = time.time()
+    deadline = start + timeout_seconds
+    next_progress = start + 10.0
+    last_stderr = ""
+    while time.time() < deadline:
+        try:
+            result = subprocess.run(
+                ["docker", "exec", container, "pg_isready", "-U", user, "-d", db],
+                check=False, capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0:
+                ok_line(f"Postgres is accepting connections (took {int(time.time() - start)}s).")
+                return
+            last_stderr = (result.stderr or result.stdout or "").strip()
+        except subprocess.TimeoutExpired:
+            last_stderr = "pg_isready timed out (postgres still starting?)"
+        except FileNotFoundError:
+            # docker binary missing — should have been caught by
+            # check_local_prerequisites long before we got here. Fall
+            # through to the timeout branch so the operator sees a
+            # consistent service-failure block instead of a stack trace.
+            last_stderr = "docker CLI not on PATH"
+        except Exception as exc:  # noqa: BLE001 — best-effort poll
+            last_stderr = f"{exc.__class__.__name__}: {exc}"
+        now = time.time()
+        if now >= next_progress:
+            info_line(f"Still waiting for Postgres… ({int(now - start)}s elapsed)")
+            next_progress = now + 10.0
+        time.sleep(poll_seconds)
+    raise BootstrapError(
+        f"Postgres did not become ready in {int(timeout_seconds)}s. "
+        f"Last pg_isready output: {last_stderr or '(empty)'}\n"
+        f"      Check: docker logs {container} --tail=20\n"
+        "      Common cause: POSTGRES_PASSWORD mismatch between .env and "
+        "secrets/postgres_password.txt, or volume permission issue on "
+        "./data/postgres."
+    )
+
+
+# Per-service diagnosis blocks. Each entry maps a logical service to a
+# (container name, common-cause hint) pair. The wait wrappers below
+# raise BootstrapError(service-specific-message) on timeout so the
+# central failure handler in main() can render a Supabase-style block.
+_SERVICE_DIAGNOSIS: dict[str, tuple[str, str]] = {
+    "Forwarder": (
+        "auditlens-forwarder",
+        "PERSISTENCE_BACKEND or DATABASE_URL misconfiguration",
+    ),
+    "API": (
+        "auditlens-api",
+        "Postgres not ready or DATABASE_URL wrong",
+    ),
+    "Frontend": (
+        "auditlens-frontend",
+        "Caddy upstream missing or Next.js build failure",
+    ),
+    "Postgres": (
+        "auditlens-postgres",
+        "POSTGRES_PASSWORD mismatch or volume permission issue",
+    ),
+}
+
+
+def _service_failure_message(service: str, underlying: str) -> str:
+    """Render a per-service failure diagnosis block.
+
+    Called by the central failure handler in main() — keeping it as a
+    pure string-builder lets us route every service timeout through the
+    same render path."""
+    container, cause = _SERVICE_DIAGNOSIS.get(
+        service, (f"auditlens-{service.lower()}", "see logs"),
+    )
+    return (
+        f"{service} failed to start\n"
+        f"      Check: docker logs {container} --tail=30\n"
+        f"      Common cause: {cause}\n"
+        f"      Underlying: {underlying}"
+    )
+
+
+def _wait_service(service: str, url: str, *, timeout_seconds: float, expect_json: bool = False) -> tuple[int, dict | None]:
+    """Wrap _wait_for_http_with_progress so a timeout produces a
+    per-service diagnosis block instead of a generic message. Returns
+    whatever _wait_for_http_with_progress returns on success."""
+    try:
+        return _wait_for_http_with_progress(
+            url, timeout_seconds=timeout_seconds, expect_json=expect_json,
+        )
+    except BootstrapError as exc:
+        raise BootstrapError(_service_failure_message(service, str(exc))) from exc
+
+
 def _validate_runtime_with_progress(inputs: BootstrapInputs) -> None:
-    """Progress-aware health checks for the docker deployment. Hits each
-    service on its direct host-bound port (compose maps 8080/3000 to
-    127.0.0.1 explicitly so the wizard doesn't depend on caddy being up
-    yet). The legacy Streamlit (8503) and landing-page (8088) checks were
+    """Progress-aware health checks for the docker deployment.
+
+    Sequence is critical: POSTGRES first (because the api refuses every
+    authed query until SQLAlchemy can connect), THEN forwarder, THEN
+    api, THEN frontend. Each step uses _wait_service() so a timeout
+    yields a service-specific BootstrapError that main()'s except
+    handler can render with the right docker-logs pointer.
+
+    The legacy Streamlit (8503) and landing-page (8088) checks were
     dropped because those containers no longer exist in
     docker-compose.prod.yml."""
     metrics_port = inputs.metrics_port
 
-    info_line("Waiting for forwarder health endpoint...")
-    _, probe_health = _wait_for_http_with_progress(
+    # 1. Postgres — root cause of the 503 false-positive class. The
+    #    api container's /health returns 200 as soon as uvicorn binds,
+    #    long before SQLAlchemy can connect; the only honest "API is
+    #    ready" probe runs AFTER pg_isready.
+    _wait_for_postgres_ready()
+
+    # 2. Forwarder /health is JSON (recovery dict) — failure here is
+    #    almost always a kafka misconfig, NOT a DB issue.
+    info_line("Waiting for forwarder health endpoint…")
+    _, probe_health = _wait_service(
+        "Forwarder",
         f"http://localhost:{metrics_port}/health",
         timeout_seconds=90.0,
         expect_json=True,
     )
     if not probe_health or not probe_health.get("recovery"):
-        raise BootstrapError("/health did not expose recovery status after startup.")
+        raise BootstrapError(_service_failure_message(
+            "Forwarder",
+            "/health did not expose recovery status after startup.",
+        ))
     if probe_health["recovery"].get("replay_in_progress"):
-        raise BootstrapError("Replay is unexpectedly running immediately after install.")
+        raise BootstrapError(_service_failure_message(
+            "Forwarder",
+            "Replay is unexpectedly running immediately after install.",
+        ))
 
-    info_line("Waiting for forwarder metrics endpoint...")
-    _wait_for_http_with_progress(
+    info_line("Waiting for forwarder metrics endpoint…")
+    _wait_service(
+        "Forwarder",
         f"http://localhost:{metrics_port}/metrics",
         timeout_seconds=30.0,
     )
 
-    info_line("Waiting for API health endpoint (http://localhost:8080/health)...")
-    _wait_for_http_with_progress(
+    # 3. API — postgres is already ready, so /health 200 here is honest.
+    info_line("Waiting for API health endpoint (http://localhost:8080/health)…")
+    _wait_service(
+        "API",
         "http://localhost:8080/health",
         timeout_seconds=90.0,
     )
 
-    info_line("Waiting for frontend (http://localhost:3000)...")
-    _wait_for_http_with_progress(
+    # 4. Frontend — last because it depends on api being routable.
+    info_line("Waiting for frontend (http://localhost:3000)…")
+    _wait_service(
+        "Frontend",
         "http://localhost:3000",
         timeout_seconds=90.0,
     )
 
-    # Single unauthenticated probe to confirm the api's auth configuration
-    # matches what .env says. /health is exempt from auth (see main.py's
-    # _EXEMPT_PATHS) so probing it can't surface an auth misconfiguration —
-    # we hit an authenticated route instead (/events?limit=1) and dispatch
-    # on the status code:
-    #   503  → AuthConfig.from_env() raised (e.g. API_AUTH_ENABLED=true but
-    #          the token file at API_AUTH_TOKEN_FILE is missing).
+    # Auth-configuration cross-check: hits an AUTHED route (/events?limit=1)
+    # and dispatches on the status code:
+    #   503  → DB or AuthConfig issue. AT THIS POINT _wait_for_postgres_ready
+    #          has already succeeded, so a 503 is genuinely abnormal — escalate
+    #          to BootstrapError so the central failure handler renders the
+    #          right diagnosis block. No in-band warning during success.
     #   200  + api_auth_enabled=True in inputs → silent mismatch, auth is
     #          OFF in the api container despite .env saying ON.
     #   401  + api_auth_enabled=False                 → mismatch the other way.
     #   401  + api_auth_enabled=True                  → expected; silent.
     #   403  → token role mismatch (we sent no token, so unusual; warn).
-    # Never blocks startup — this is observability, not a gate.
+    # Never warns during a healthy install — only the centralized
+    # failure-path handler in main() shows the POSTGRES_PASSWORD guidance.
     _check_auth_configuration(inputs)
 
 
 def _check_auth_configuration(inputs: BootstrapInputs) -> None:
-    """Detect API-auth misconfiguration without failing the install.
+    """Cross-check the api's auth configuration against .env.
 
-    Dispatches on the response status with actionable next-step messages
-    keyed to the most common root cause for each code:
+    Hits an AUTHED route (/events?limit=1) once postgres is ready (the
+    caller is _validate_runtime_with_progress, which has already waited
+    for pg_isready). Dispatches on status code:
 
-      503        → AuthConfig.from_env() raised → token file missing
-                   OR DB unreachable (POSTGRES_PASSWORD mismatch). The
-                   first failure mode is auth-misconfigured; the second
-                   surfaces because every authed route hits the DB.
-      no resp    → api container never came up; point at `docker logs`.
-      200/401/403 with config mismatch → as before.
-
-    Transient-503 retry: the api's /health endpoint returns 200 as soon as
-    the FastAPI process boots, but the SQLAlchemy engine + Postgres
-    handshake (and AuthConfig.from_env() reading the token file) take a
-    few more seconds. A single /events probe in that window returns 503
-    even though the install is healthy. We retry silently for up to 30 s
-    before declaring an actual misconfiguration — alarming the operator
-    on the first 503 was a false-positive in the postgres-startup race.
+      503  → genuine DB or AuthConfig failure. Raises BootstrapError so
+             the centralized failure handler in main() renders the
+             POSTGRES_PASSWORD diagnosis block. NEVER prints an in-band
+             warning during a healthy install — the old "warn now and
+             continue" path produced the contradiction of a yellow 503
+             line followed by ✅ at the end.
+      200 + api_auth_enabled=True → silent mismatch (auth OFF despite
+             .env saying ON). Warn — not a startup-fatal misconfig.
+      401 + api_auth_enabled=False → reverse mismatch. Warn — same.
+      401 + api_auth_enabled=True → expected; silent.
+      403 → token role mismatch (no token sent, so unusual). Warn.
+      transport_error → api container post-startup crash. Raises
+             BootstrapError so the central handler renders the API
+             failure-block.
     """
     from urllib.error import HTTPError, URLError
     from urllib.request import Request, urlopen
@@ -1550,22 +1694,14 @@ def _check_auth_configuration(inputs: BootstrapInputs) -> None:
         except HTTPError as exc:
             return exc.code, None
         except (URLError, Exception) as exc:  # noqa: BLE001 — best-effort probe
-            # No response at all. The earlier /health probe already enforced
-            # liveness with a 90 s timeout, so getting here means /health
-            # works but /events?limit=1 specifically refused. That can be a
-            # post-startup container crash — surface a clear log pointer.
             return None, exc
 
-    # 60-second silent retry budget. Postgres cold-start on a fresh Mac
-    # install runs `initdb` (10-20 s) + `tune.sh` + the api container's
-    # `alembic upgrade head` (10-20 s on a virgin DB), which routinely
-    # exceeds the 30-second window we tried first. The warning at the
-    # bottom of this function is reachable ONLY after this loop exits
-    # with status==503. Cannot reach the warning on a single 503; cannot
-    # reach it on a 503 that recovers within 60 s. Structured so that
-    # misreading the code is impossible — entry condition explicit, exit
-    # condition explicit.
-    RETRY_BUDGET_SECONDS = 60.0
+    # Short retry budget kept as a defense-in-depth — pg_isready already
+    # gates entry to this function, but the api's connection-pool warm-up
+    # can lag a few seconds even after postgres accepts connections. 30 s
+    # is now plenty; we no longer need the 60 s we used when this was the
+    # sole barrier against the cold-start race.
+    RETRY_BUDGET_SECONDS = 30.0
     RETRY_POLL_SECONDS = 2.0
     deadline = time.time() + RETRY_BUDGET_SECONDS
 
@@ -1575,37 +1711,36 @@ def _check_auth_configuration(inputs: BootstrapInputs) -> None:
         status, transport_error = _probe_once()
 
     if transport_error is not None:
-        warn_line(
-            f"API connection refused on /events?limit=1 ({transport_error.__class__.__name__})."
-        )
-        print(dim("      The api container is not responding. Diagnose with:"))
-        print(dim("        docker logs auditlens-api --tail=30"))
-        return
+        # Connection refused after postgres is healthy → api container
+        # crashed post-startup. Raise so main()'s except handler renders
+        # the API failure block.
+        raise BootstrapError(_service_failure_message(
+            "API",
+            f"connection refused on /events?limit=1 ({transport_error.__class__.__name__}): {transport_error}",
+        ))
 
     assert status is not None  # narrowed by the transport_error branch above
     expects_auth = inputs.api_auth_enabled
 
     if status == 503:
-        # 503 from an authed route most commonly means AuthConfig.from_env()
-        # raised (auth gate problem) OR the api couldn't reach the DB at
-        # request time (POSTGRES_PASSWORD mismatch between secret file
-        # and DATABASE_URL / env). Both are recoverable with `make repair`.
-        warn_line("API returned 503 — most likely a DB connection failure or auth misconfiguration.")
-        print(dim("      Likely cause: POSTGRES_PASSWORD mismatch between .env and"))
-        print(dim("                    secrets/postgres_password.txt."))
-        print(dim("      Auto-fix:    make repair"))
-        print(dim("      Manual:      cat secrets/postgres_password.txt"))
-        print(dim("                   # update POSTGRES_PASSWORD in .env to match"))
-        print(dim("                   docker compose -f docker-compose.prod.yml restart auditlens-api"))
-        return
+        # Genuine 503 after postgres is healthy + 30 s grace. Escalate.
+        # The centralized failure handler in main() formats the
+        # POSTGRES_PASSWORD mismatch / AuthConfig token-file guidance —
+        # not duplicated here so the success path is silent.
+        raise BootstrapError(_service_failure_message(
+            "API",
+            "/events?limit=1 returned 503 after postgres was ready. "
+            "Likely POSTGRES_PASSWORD mismatch between .env and "
+            "secrets/postgres_password.txt, or AuthConfig.from_env() "
+            "raised because API_AUTH_TOKEN_FILE is missing. "
+            "Auto-fix: make repair.",
+        ))
 
     mismatch = False
     if status == 200 and expects_auth:
-        # Auth is supposed to be ON but the api let us through unauth.
-        mismatch = True
+        mismatch = True   # Auth ON in .env, but api let us through.
     elif status == 401 and not expects_auth:
-        # Auth is supposed to be OFF but the api rejected an unauth call.
-        mismatch = True
+        mismatch = True   # Auth OFF in .env, but api rejected us.
     elif status == 403:
         mismatch = True
 
@@ -2040,10 +2175,24 @@ def main() -> int:
         )
         return 0 if flow_visible else 2
     except BootstrapError as exc:
+        # Render the diagnosis block preserving the structure that
+        # _service_failure_message() built. The previous form fed the
+        # whole error through textwrap.fill(), which collapsed newlines
+        # so a multi-line "Check: docker logs … / Common cause: …"
+        # diagnosis ended up wrapped into one paragraph and the operator
+        # could not see the recommended command on its own line. Now:
+        # each \n in the exception is honoured as a hard break, and only
+        # within-line overflow is wrapped.
         print()
         print(bold(red("  ❌  AuditLens installation failed")))
-        for line in textwrap.fill(str(exc), width=88).splitlines():
-            print(red(f"      {line}"))
+        for raw_line in str(exc).splitlines():
+            if not raw_line.strip():
+                print()
+                continue
+            for wrapped in textwrap.fill(
+                raw_line, width=88, subsequent_indent="      "
+            ).splitlines():
+                print(red(f"      {wrapped}"))
         print()
         return 1
 

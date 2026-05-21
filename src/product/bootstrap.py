@@ -567,6 +567,12 @@ def _kafka_client_config(bootstrap: str, api_key: str, api_secret: str, extra: d
         "sasl.username": api_key,
         "sasl.password": api_secret,
         "socket.timeout.ms": 15000,
+        # Silence librdkafka's INFO/NOTICE/WARN bands (3-6) that otherwise
+        # spew "%6|<ts>|GETSUBSCRIPTIONS|rdkafka#consumer-1| …" lines into
+        # the wizard's prompt area and break the clean UI. 0 = LOG_EMERG;
+        # only catastrophic failures get printed, which is exactly the
+        # right floor for an interactive setup probe.
+        "log_level": 0,
     }
     if extra:
         config.update(extra)
