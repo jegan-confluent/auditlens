@@ -1494,24 +1494,49 @@ def _check_auth_configuration(inputs: BootstrapInputs) -> None:
                    first failure mode is auth-misconfigured; the second
                    surfaces because every authed route hits the DB.
       no resp    → api container never came up; point at `docker logs`.
-      200/401/403 with config mismatch → as before."""
+      200/401/403 with config mismatch → as before.
+
+    Transient-503 retry: the api's /health endpoint returns 200 as soon as
+    the FastAPI process boots, but the SQLAlchemy engine + Postgres
+    handshake (and AuthConfig.from_env() reading the token file) take a
+    few more seconds. A single /events probe in that window returns 503
+    even though the install is healthy. We retry silently for up to 30 s
+    before declaring an actual misconfiguration — alarming the operator
+    on the first 503 was a false-positive in the postgres-startup race.
+    """
     from urllib.error import HTTPError, URLError
     from urllib.request import Request, urlopen
 
     status: int | None = None
     transport_error: Exception | None = None
-    try:
-        req = Request("http://localhost:8080/events?limit=1")
-        with urlopen(req, timeout=5.0) as resp:
-            status = resp.status
-    except HTTPError as exc:
-        status = exc.code
-    except (URLError, Exception) as exc:  # noqa: BLE001 — best-effort probe
-        # No response at all. The earlier /health probe already enforced
-        # liveness with a 90 s timeout, so getting here means /health
-        # works but /events?limit=1 specifically refused. That can be a
-        # post-startup container crash — surface a clear log pointer.
-        transport_error = exc
+
+    def _probe_once() -> tuple[int | None, Exception | None]:
+        try:
+            req = Request("http://localhost:8080/events?limit=1")
+            with urlopen(req, timeout=5.0) as resp:
+                return resp.status, None
+        except HTTPError as exc:
+            return exc.code, None
+        except (URLError, Exception) as exc:  # noqa: BLE001 — best-effort probe
+            # No response at all. The earlier /health probe already enforced
+            # liveness with a 90 s timeout, so getting here means /health
+            # works but /events?limit=1 specifically refused. That can be a
+            # post-startup container crash — surface a clear log pointer.
+            return None, exc
+
+    transient_503_budget_seconds = 30.0
+    transient_503_poll_seconds = 2.0
+    deadline = time.time() + transient_503_budget_seconds
+    while True:
+        status, transport_error = _probe_once()
+        # Only 503 is worth retrying — every other outcome (200/401/403,
+        # transport error) is either the final verdict or already
+        # actionable and should dispatch immediately.
+        if status != 503:
+            break
+        if time.time() >= deadline:
+            break
+        time.sleep(transient_503_poll_seconds)
 
     if transport_error is not None:
         warn_line(
