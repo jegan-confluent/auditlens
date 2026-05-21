@@ -358,6 +358,54 @@ _sync_env_with_secrets() {
     _sync_database_url_password "$env_path" "$pg_pw"
 }
 
+# Apply platform-aware filesystem permissions to the host directories the
+# containers bind-mount. Two regimes:
+#
+#   macOS / Windows WSL2 (Docker Desktop):
+#     Docker Desktop's qemu/lima VM does host↔container uid mapping that
+#     can leave a host-uid-501-owned dir unwritable by a container running
+#     as uid 1000. world-writable (0777) is the pragmatic fix everyone uses
+#     for dev bind mounts; the host fs is already inside the trust boundary.
+#
+#   Linux (EC2 or local Docker Engine):
+#     Real uid mapping — host owner IS the container owner. Chown the
+#     directories to 1000:1000 (the uid both forwarder + api Dockerfiles
+#     bake their files at) and chmod 0755. chown is best-effort: a host
+#     running setup as a non-root user without sudo cannot chown to a uid
+#     it doesn't own. In that case we still chmod and continue.
+#
+# Called from ensure_secrets_only() AND from the wizard's full main()
+# flow (idempotent — running both is harmless). detect_platform must
+# have run first; we rely on $PLATFORM_OS.
+_apply_platform_permissions() {
+    local data_dir="$SCRIPT_DIR/data"
+    local secrets_dir="$SCRIPT_DIR/secrets"
+    [ -d "$data_dir" ] || mkdir -p "$data_dir"
+    [ -d "$secrets_dir" ] || mkdir -p "$secrets_dir"
+    case "$PLATFORM_OS" in
+        macos|windows-wsl2)
+            # 0777 is intentional — see comment above. Mac Docker Desktop
+            # uid mapping forces this for any dev bind mount that must be
+            # writable from inside the container.
+            chmod -R 0777 "$data_dir" 2>/dev/null || true
+            printf 'ℹ  %s: data/ set to 0777 for Docker Desktop bind-mount writability\n' "$PLATFORM_OS"
+            # Secret files: keep 0444 (set by _generate_secret_file).
+            # Dir itself is 0777 so containers can stat their bind path.
+            chmod 0777 "$secrets_dir" 2>/dev/null || true
+            ;;
+        linux-ec2|linux-local|unknown|"")
+            chmod -R 0755 "$data_dir" 2>/dev/null || true
+            # chown is best-effort — non-root setup users can't chown to a
+            # uid they don't already own. Silently fall through; Docker
+            # propagates the image's chown 1000:1000 on first volume use.
+            chown -R 1000:1000 "$data_dir" 2>/dev/null || true
+            chmod 0755 "$secrets_dir" 2>/dev/null || true
+            chown -R 1000:1000 "$secrets_dir" 2>/dev/null || true
+            printf 'ℹ  %s: data/ set to 0755 (chown 1000:1000 best-effort)\n' "$PLATFORM_OS"
+            ;;
+    esac
+}
+
 # Top-level orchestrator for --ensure-secrets-only. Idempotent: each
 # sub-step is a no-op if its work is already done. Safe to call from
 # `make repair` before every `docker compose up`.
@@ -377,6 +425,7 @@ ensure_secrets_only() {
         GRAFANA_ADMIN_PASSWORD \
         "Grafana password"
     _sync_env_with_secrets
+    _apply_platform_permissions
 }
 
 # ───────────────────────── OS detection ──────────────────────────────────

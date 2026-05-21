@@ -142,11 +142,19 @@ services:
     networks:
       - kafka-network
       - frontend-network
-    # Drop root — the backend/Dockerfile chowns /app and /var/lib/auditlens
-    # to 1000:1000 at build time, but there's no USER directive. Without
-    # this line the container ran as root, which was inconsistent with
-    # the forwarder (already 1000:1000) and unnecessary for the workload.
-    user: "1000:1000"
+    # NO `user:` directive on purpose. The api image ships with
+    # backend/docker_entrypoint.py which is DESIGNED to start as root,
+    # chown the named-volume mount point at /var/lib/auditlens to
+    # uid 1000 (so the api process can write), run alembic migrations
+    # while still root (avoids permission issues on the SQLite hot
+    # cache), then setuid/setgid to 1000:1000 before exec'ing uvicorn.
+    # Forcing `user: 1000:1000` at the compose level defeats that
+    # entrypoint (it silent-no-ops the chown branch on `if os.geteuid()
+    # != 0:`) and breaks fresh installs on Mac Docker Desktop where the
+    # named volume can come up with the wrong owner. Security posture
+    # is preserved because the entrypoint drops privileges before any
+    # request-handling code runs (see _drop_privileges in
+    # backend/docker_entrypoint.py).
     logging:
       driver: "json-file"
       options:

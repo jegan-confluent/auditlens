@@ -1491,26 +1491,62 @@ def _validate_runtime_with_progress(inputs: BootstrapInputs) -> None:
 
 
 def _check_auth_configuration(inputs: BootstrapInputs) -> None:
-    """Detect API-auth misconfiguration without failing the install."""
+    """Detect API-auth misconfiguration without failing the install.
+
+    Dispatches on the response status with actionable next-step messages
+    keyed to the most common root cause for each code:
+
+      503        → AuthConfig.from_env() raised → token file missing
+                   OR DB unreachable (POSTGRES_PASSWORD mismatch). The
+                   first failure mode is auth-misconfigured; the second
+                   surfaces because every authed route hits the DB.
+      no resp    → api container never came up; point at `docker logs`.
+      200/401/403 with config mismatch → as before."""
     from urllib.error import HTTPError, URLError
     from urllib.request import Request, urlopen
 
+    status: int | None = None
+    transport_error: Exception | None = None
     try:
         req = Request("http://localhost:8080/events?limit=1")
         with urlopen(req, timeout=5.0) as resp:
             status = resp.status
     except HTTPError as exc:
         status = exc.code
-    except (URLError, Exception):  # noqa: BLE001 — best-effort probe
-        # No response at all — the earlier /health probe already raised on
-        # timeout, so getting here means a transient blip. Skip silently.
+    except (URLError, Exception) as exc:  # noqa: BLE001 — best-effort probe
+        # No response at all. The earlier /health probe already enforced
+        # liveness with a 90 s timeout, so getting here means /health
+        # works but /events?limit=1 specifically refused. That can be a
+        # post-startup container crash — surface a clear log pointer.
+        transport_error = exc
+
+    if transport_error is not None:
+        warn_line(
+            f"API connection refused on /events?limit=1 ({transport_error.__class__.__name__})."
+        )
+        print(dim("      The api container is not responding. Diagnose with:"))
+        print(dim("        docker logs auditlens-api --tail=30"))
         return
 
+    assert status is not None  # narrowed by the transport_error branch above
     expects_auth = inputs.api_auth_enabled
-    mismatch = False
+
     if status == 503:
-        mismatch = True
-    elif status == 200 and expects_auth:
+        # 503 from an authed route most commonly means AuthConfig.from_env()
+        # raised (auth gate problem) OR the api couldn't reach the DB at
+        # request time (POSTGRES_PASSWORD mismatch between secret file
+        # and DATABASE_URL / env). Both are recoverable with `make repair`.
+        warn_line("API returned 503 — most likely a DB connection failure or auth misconfiguration.")
+        print(dim("      Likely cause: POSTGRES_PASSWORD mismatch between .env and"))
+        print(dim("                    secrets/postgres_password.txt."))
+        print(dim("      Auto-fix:    make repair"))
+        print(dim("      Manual:      cat secrets/postgres_password.txt"))
+        print(dim("                   # update POSTGRES_PASSWORD in .env to match"))
+        print(dim("                   docker compose -f docker-compose.prod.yml restart auditlens-api"))
+        return
+
+    mismatch = False
+    if status == 200 and expects_auth:
         # Auth is supposed to be ON but the api let us through unauth.
         mismatch = True
     elif status == 401 and not expects_auth:

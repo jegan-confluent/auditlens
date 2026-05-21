@@ -79,29 +79,73 @@ update-check: ## Check if a remote update exists (no changes)
 
 repair: ## Heal a broken install — pull, patch .env, rebuild, migrate (no credential re-entry)
 	@echo "🔧  Repairing AuditLens install..."
-	@echo "ℹ  Step 1/6 — Pulling latest code..."
-	@git pull origin main --quiet
-	@echo "ℹ  Step 2/6 — Patching .env with any missing config..."
+	@# Step 0 — preflight: Docker daemon up. Bail loud if not (everything
+	@# below this point requires Docker; fewer cryptic errors mid-flow).
+	@docker info >/dev/null 2>&1 || \
+	  (echo "❌  Docker is not running. Start Docker Desktop (Mac) or 'sudo systemctl start docker' (Linux) first." \
+	   && exit 1)
+	@echo "ℹ  Step 1/8 — Pulling latest code..."
+	@git pull origin main --quiet || echo "⚠  git pull failed (offline?) — continuing with local code"
+	@# Step 2 — make sure .env exists. If the user nuked it, fall back to
+	@# the .env.example template so subsequent steps have something to patch.
+	@if [ ! -f .env ]; then \
+	  echo "ℹ  Step 2/8 — .env missing — seeding from .env.example..."; \
+	  cp .env.example .env && \
+	    echo "   ⚠  .env created from template — Kafka credentials need filling before the wizard"; \
+	else \
+	  echo "ℹ  Step 2/8 — .env present — preserving."; \
+	fi
+	@echo "ℹ  Step 3/8 — Patching .env with any missing config..."
 	@AUDITLENS_NO_UPDATE=1 AUDITLENS_REPAIR_ONLY=1 ./setup --migrate-env-only
-	@echo "ℹ  Step 3/6 — Generating Docker secret files + syncing .env passwords..."
+	@echo "ℹ  Step 4/8 — Generating Docker secret files + syncing .env passwords + applying platform-aware perms..."
 	@AUDITLENS_NO_UPDATE=1 ./setup --ensure-secrets-only
-	@echo "ℹ  Step 4/6 — Cleaning up any conflicting volumes..."
+	@echo "ℹ  Step 5/8 — Checking port conflicts..."
+	@for port in 80 443 3000 3001 8003 8080 8088 5432 9090 9093; do \
+	  if command -v lsof >/dev/null 2>&1 && \
+	     lsof -i :$$port -sTCP:LISTEN -t >/dev/null 2>&1; then \
+	    echo "   ⚠  Port $$port is in use — may conflict with AuditLens. Compose will fail if the conflicting process owns the same address."; \
+	  fi; \
+	done
+	@echo "ℹ  Step 6/8 — Cleaning up any conflicting volumes..."
 	@# Stop everything so volume locks are released before we try to remove
 	@# the named volume. `down --remove-orphans` drops orphaned containers
-	@# from prior compose versions. `volume rm` purges the
-	@# auditlens_auditlens_data volume that may have been created outside
-	@# compose's project labels — the subsequent `up` recreates it cleanly.
-	@# Safe in repair flow: this volume only holds api-side state (SQLite
-	@# hot cache), NOT the postgres database (that's postgres_data, untouched).
+	@# from prior compose versions. The api's auditlens_auditlens_data
+	@# volume only holds api-side state (SQLite hot cache), NOT the
+	@# postgres database — safe to nuke and let compose recreate.
 	@docker compose -f docker-compose.prod.yml down --remove-orphans 2>/dev/null || true
 	@docker volume rm auditlens_auditlens_data 2>/dev/null || true
-	@echo "ℹ  Step 5/6 — Rebuilding containers..."
+	@# postgres_data holds the database — never nuke without a label check.
+	@# If labels show compose owns it (com.docker.compose.project=auditlens),
+	@# leave it alone. If labels are missing → orphaned volume from a manual
+	@# `docker volume create`, safe to remove.
+	@if docker volume inspect auditlens_postgres_data >/dev/null 2>&1; then \
+	  pg_labels=$$(docker volume inspect --format '{{.Labels}}' auditlens_postgres_data 2>/dev/null); \
+	  case "$$pg_labels" in \
+	    *com.docker.compose.project:auditlens*) \
+	      echo "   postgres_data is compose-managed — preserving (database intact)" ;; \
+	    *) \
+	      echo "   postgres_data has no compose labels — removing orphaned volume"; \
+	      docker volume rm auditlens_postgres_data 2>/dev/null || true ;; \
+	  esac; \
+	fi
+	@echo "ℹ  Step 7/8 — Rebuilding containers..."
 	@docker compose -f docker-compose.prod.yml pull --quiet 2>/dev/null || true
 	@docker compose -f docker-compose.prod.yml up -d --build --quiet-pull
-	@echo "ℹ  Step 6/6 — Running migrations..."
+	@echo "ℹ  Step 8/8 — Running migrations (api entrypoint already runs alembic at boot — this is a belt-and-braces re-run)..."
 	@docker exec auditlens-api bash -c \
 	  "cd /app/backend && python -m alembic upgrade head" 2>/dev/null || \
 	  echo "⚠  Migration step skipped"
+	@# Pause briefly so containers have a chance to crash if they're going
+	@# to. Then surface any restart loops — operators see a clear pointer
+	@# to `docker logs` instead of mysterious "service unhealthy".
+	@sleep 5
+	@RESTARTING=$$(docker compose -f docker-compose.prod.yml ps --format '{{.Service}} {{.State}}' 2>/dev/null \
+	   | awk '$$2 == "restarting" {print $$1}'); \
+	 if [ -n "$$RESTARTING" ]; then \
+	   echo "⚠  These containers are in a restart loop:"; \
+	   echo "$$RESTARTING" | sed 's/^/     /'; \
+	   echo "   Diagnose with: docker logs <container-name> --tail=30"; \
+	 fi
 	@echo ""
 	@echo "✅  Repair complete. Open your browser:"
 	@if [ "$$(uname -s)" = "Darwin" ]; then \
