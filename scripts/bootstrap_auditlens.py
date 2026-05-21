@@ -7,6 +7,7 @@ import argparse
 import getpass
 import json
 import os
+import platform
 import shlex
 import stat
 import subprocess
@@ -224,8 +225,20 @@ def ensure_persistence_dir(inputs: BootstrapInputs) -> None:
     open database file`. Best-effort: failures (no sudo, no write perm) are
     warned and ignored so the install still proceeds — docker compose
     itself creates the directory on first `up`.
+
+    macOS / Windows skip: the persistence_db_path default is a CONTAINER
+    path (/app/data/auditlens.db). Running `sudo mkdir -p /app/data` on
+    a Mac host creates a root-owned /app/data directory at the host
+    filesystem root, prompts for a sudo password, and the warning that
+    fires when the operator declines the prompt was the false-positive
+    operators kept reporting from fresh Mac setups. Only Linux hosts
+    actually need this fallback (and there the compose bind mount uses
+    ./data/forwarder, not /app/data, so even on Linux it is mostly a
+    leftover). Skip silently on non-Linux platforms.
     """
     if not inputs.persistence_enabled:
+        return
+    if platform.system() != "Linux":
         return
     db_path = inputs.persistence_db_path or "/var/lib/auditlens/auditlens.db"
     target_dir = Path(db_path).parent
@@ -1261,7 +1274,16 @@ def _ensure_named_volume_perms(
 
 
 def deploy_docker() -> None:
-    run_checked(["docker", "compose", "up", "-d", "--build"], cwd=REPO_ROOT, redacted="docker compose up -d --build")
+    # -f docker-compose.prod.yml is REQUIRED: without it, `docker compose
+    # up` falls back to docker-compose.yml (the dev profile) which does
+    # not include the postgres / api / frontend / caddy services. The
+    # forwarder would come up alone, fail to reach the DB, and the
+    # wizard's runtime probes would all hit closed ports.
+    run_checked(
+        ["docker", "compose", "-f", "docker-compose.prod.yml", "up", "-d", "--build"],
+        cwd=REPO_ROOT,
+        redacted="docker compose -f docker-compose.prod.yml up -d --build",
+    )
 
 
 def _parse_port(output: str) -> int | None:
@@ -1286,10 +1308,13 @@ def existing_auditlens_bound_ports(inputs: BootstrapInputs) -> set[int]:
     ports: set[int] = set()
     for service, target_port in service_targets:
         try:
+            # Same -f rule as deploy_docker: without it, compose reads the
+            # dev compose file and reports "service not running" for the
+            # prod-only services we're trying to discover.
             result = run_checked(
-                ["docker", "compose", "port", service, str(target_port)],
+                ["docker", "compose", "-f", "docker-compose.prod.yml", "port", service, str(target_port)],
                 cwd=REPO_ROOT,
-                redacted=f"docker compose port {service}",
+                redacted=f"docker compose -f docker-compose.prod.yml port {service}",
             )
         except BootstrapError:
             continue
@@ -1507,9 +1532,6 @@ def _check_auth_configuration(inputs: BootstrapInputs) -> None:
     from urllib.error import HTTPError, URLError
     from urllib.request import Request, urlopen
 
-    status: int | None = None
-    transport_error: Exception | None = None
-
     def _probe_once() -> tuple[int | None, Exception | None]:
         try:
             req = Request("http://localhost:8080/events?limit=1")
@@ -1524,19 +1546,19 @@ def _check_auth_configuration(inputs: BootstrapInputs) -> None:
             # post-startup container crash — surface a clear log pointer.
             return None, exc
 
-    transient_503_budget_seconds = 30.0
-    transient_503_poll_seconds = 2.0
-    deadline = time.time() + transient_503_budget_seconds
-    while True:
+    # 30-second silent retry budget. The warning at the bottom of this
+    # function is reachable ONLY after this loop exits with status==503.
+    # Cannot reach the warning on a single 503; cannot reach it on a 503
+    # that recovers within 30 s. Structured so that misreading the code
+    # is impossible — entry condition explicit, exit condition explicit.
+    RETRY_BUDGET_SECONDS = 30.0
+    RETRY_POLL_SECONDS = 2.0
+    deadline = time.time() + RETRY_BUDGET_SECONDS
+
+    status, transport_error = _probe_once()
+    while status == 503 and time.time() < deadline:
+        time.sleep(RETRY_POLL_SECONDS)
         status, transport_error = _probe_once()
-        # Only 503 is worth retrying — every other outcome (200/401/403,
-        # transport error) is either the final verdict or already
-        # actionable and should dispatch immediately.
-        if status != 503:
-            break
-        if time.time() >= deadline:
-            break
-        time.sleep(transient_503_poll_seconds)
 
     if transport_error is not None:
         warn_line(
@@ -1770,7 +1792,7 @@ def print_final_summary(
         print(dim("    • confirm the audit-log cluster is receiving new events"))
         print(dim("    • confirm the source topic still has retained data inside the 7-day window"))
         print(dim("    • check firewall / private networking for source and destination Kafka"))
-        print(dim("    • inspect forwarder logs: docker compose logs -f auditlens-forwarder"))
+        print(dim("    • inspect forwarder logs: docker compose -f docker-compose.prod.yml logs -f auditlens-forwarder"))
         print()
 
 
