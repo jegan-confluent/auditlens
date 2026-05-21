@@ -297,6 +297,93 @@ PATTERNS: list[dict[str, Any]] = [
         ],
         "confidence": "medium",
     },
+    # ── Patterns added after the initial diagnose ship — each one encodes
+    # a real failure mode we hit during 2026-05 iteration and fixed in
+    # a follow-up commit. The signatures match the exact wording the
+    # offending process logged so a stale install upgrading from the
+    # broken state will surface the diagnosis without an LLM call.
+    {
+        "name": "alembic_autocommit_block_assert",
+        # Migrations 0004 / 0005 / 0006 / 0016 / 0019 / 0025 used
+        # CONCURRENTLY inside autocommit_block(); env.py runs them under
+        # a single context.begin_transaction() and Alembic's
+        # autocommit_block then asserts on the missing outer txn.
+        "regex": r"(?i)autocommit_block|assert self\._transaction is not None|alembic.*assertionerror",
+        "service": "auditlens-api",
+        "message": "Alembic migration uses CONCURRENTLY inside autocommit_block — incompatible with env.py's transactional runner.",
+        "fix": [
+            "# The migrations have been patched on main; pull + redeploy:",
+            "make repair",
+        ],
+        "confidence": "high",
+    },
+    {
+        "name": "pydantic_forwardref_openapi",
+        # The /openapi.json 500 we saw on the onboarding routes — Pydantic
+        # 2.11 + FastAPI 0.115 + `from __future__ import annotations`
+        # leaves the body model as an unresolved ForwardRef and the
+        # OpenAPI schema builder explodes.
+        "regex": r"(?i)PydanticUserError.*ForwardRef|TypeAdapter\[.*ForwardRef.*Query",
+        "service": "auditlens-api",
+        "message": "Pydantic schema generation failed — a route uses `from __future__ import annotations` and a BaseModel body whose ForwardRef can't be resolved.",
+        "fix": [
+            "# Drop `from __future__ import annotations` from the offending route file",
+            "# OR rewrite the body parameter with Annotated[Model, Body()] AFTER removing the future import.",
+            "docker compose -f docker-compose.prod.yml build api",
+            "docker compose -f docker-compose.prod.yml up -d --force-recreate api",
+        ],
+        "confidence": "high",
+    },
+    {
+        "name": "forwarder_ready_missing",
+        # /ready was missing from the forwarder's BaseHTTPRequestHandler
+        # until we added it as a /health alias. The dashboard probe at
+        # /api/ready hits the API container (not this one), so the
+        # forwarder 404 only shows up for operators curling :8003 by hand.
+        "regex": r"(?i)8003/ready.*\b404\b|GET /ready.*\b404\b",
+        "service": None,  # match in any log
+        "message": "Forwarder /ready endpoint missing — older health_server.py only registered /health and /api/v1/health.",
+        "fix": [
+            "make repair",
+            "# Verify after restart:",
+            "curl -s -o /dev/null -w '%{http_code}\\n' http://localhost:8003/ready",
+        ],
+        "confidence": "medium",
+    },
+    {
+        "name": "frontend_api_rewrite_missing",
+        # The dashboard 404 cascade when the operator opens
+        # http://localhost:3000/dashboard directly (skipping Caddy).
+        # Without next.config.ts rewrites every /api/* fetch resolves
+        # to Next.js itself and 404s.
+        "regex": r"(?i)GET /api/.*\b404\b|/api/(events|summary|system|ready|patterns|filters).*\b404\b",
+        "service": "auditlens-frontend",
+        "message": "Frontend serving /api/* itself instead of proxying — next.config.ts is missing the /api/:path* rewrite.",
+        "fix": [
+            "# Confirm rewrites() is present in frontend/next.config.ts",
+            "grep -A 4 'async rewrites' frontend/next.config.ts",
+            "docker compose -f docker-compose.prod.yml build frontend",
+            "docker compose -f docker-compose.prod.yml up -d --force-recreate frontend",
+        ],
+        "confidence": "medium",
+    },
+    {
+        "name": "auth_config_token_file_missing",
+        # AuthConfig.from_env() raises FileNotFoundError when
+        # API_AUTH_TOKEN_FILE doesn't exist inside the api container —
+        # most commonly because ./secrets:/run/secrets:ro wasn't mounted
+        # on the api service. Different symptom from `token_file_missing`
+        # above (that one fires at startup, this one mid-request).
+        "regex": r"(?i)AuthConfig.*from_env|API_AUTH_TOKEN_FILE.*(not.found|missing)|FileNotFoundError.*run/secrets",
+        "service": "auditlens-api",
+        "message": "API auth gate cannot load tokens — secrets volume not mounted on api service or token file absent.",
+        "fix": [
+            "# Confirm the api service has the secrets bind mount:",
+            "grep -A 12 '^  api:' docker-compose.prod.yml | grep 'secrets:/run/secrets'",
+            "make repair",
+        ],
+        "confidence": "high",
+    },
 ]
 
 
