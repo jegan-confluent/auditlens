@@ -1546,12 +1546,16 @@ def _check_auth_configuration(inputs: BootstrapInputs) -> None:
             # post-startup container crash — surface a clear log pointer.
             return None, exc
 
-    # 30-second silent retry budget. The warning at the bottom of this
-    # function is reachable ONLY after this loop exits with status==503.
-    # Cannot reach the warning on a single 503; cannot reach it on a 503
-    # that recovers within 30 s. Structured so that misreading the code
-    # is impossible — entry condition explicit, exit condition explicit.
-    RETRY_BUDGET_SECONDS = 30.0
+    # 60-second silent retry budget. Postgres cold-start on a fresh Mac
+    # install runs `initdb` (10-20 s) + `tune.sh` + the api container's
+    # `alembic upgrade head` (10-20 s on a virgin DB), which routinely
+    # exceeds the 30-second window we tried first. The warning at the
+    # bottom of this function is reachable ONLY after this loop exits
+    # with status==503. Cannot reach the warning on a single 503; cannot
+    # reach it on a 503 that recovers within 60 s. Structured so that
+    # misreading the code is impossible — entry condition explicit, exit
+    # condition explicit.
+    RETRY_BUDGET_SECONDS = 60.0
     RETRY_POLL_SECONDS = 2.0
     deadline = time.time() + RETRY_BUDGET_SECONDS
 
