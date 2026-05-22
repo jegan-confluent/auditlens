@@ -167,6 +167,37 @@ def _pagerduty_severity(signal_type: str | None, risk_level: str | None) -> str:
     return "info"
 
 
+# Placeholder markers that indicate the operator has NOT actually
+# configured a webhook. These show up in our notifications.example.yml
+# template and in copy-paste configs operators didn't finish editing.
+# Matching any of these substrings means "this URL is not real — skip
+# silently". The check fires BEFORE _validate_webhook_url, so a stale
+# placeholder never produces a noisy ERROR/WARNING about SSRF or DNS
+# failure; the operator sees a single DEBUG line and nothing else.
+#
+# Match is case-insensitive substring. `services/REPLACE` covers both
+# `REPLACE_ME` and `REPLACE_DIGEST_CHANNEL` from the example file.
+_PLACEHOLDER_URL_MARKERS: tuple[str, ...] = (
+    "REPLACE_ME",
+    "REPLACE_WITH",
+    "company.webhook",
+    "your-siem",
+    "services/REPLACE",
+)
+
+
+def _is_placeholder_url(value: str) -> bool:
+    """Return True when ``value`` is one of the example-file placeholders.
+
+    Empty strings count as placeholders too — an unset webhook_url is
+    just as much "unconfigured" as a REPLACE_ME literal.
+    """
+    if not value:
+        return True
+    haystack = value.lower()
+    return any(marker.lower() in haystack for marker in _PLACEHOLDER_URL_MARKERS)
+
+
 def _validate_webhook_url(url: str) -> None:
     """Validate webhook URL is https and does not resolve to a private/internal IP (SSRF protection)."""
     parsed = urlparse(url)
@@ -306,13 +337,24 @@ class AuditLensNotifier:
             )
             return None
         integration_key = str(entry.get("integration_key") or "")
+        # Placeholder safety net: fire BEFORE _validate_webhook_url so a
+        # stale `https://hooks.slack.com/services/REPLACE_ME` (a real
+        # host, so SSRF validation passes, but the path is fake — every
+        # event would produce a 404 WARNING) and a stale
+        # `https://company.webhook.office.com/REPLACE_ME` (host doesn't
+        # resolve, so _validate_webhook_url raises ERROR) both get
+        # demoted to a single DEBUG line at load time. Operators see
+        # nothing in the default INFO log stream. Identical handling
+        # for the PagerDuty integration_key.
+        check_target = integration_key if dtype == "pagerduty" else webhook_url
+        if _is_placeholder_url(check_target):
+            logger.debug(
+                "Skipping %s — placeholder URL not configured (%s)",
+                name,
+                "integration_key" if dtype == "pagerduty" else "webhook_url",
+            )
+            return None
         if dtype == "pagerduty":
-            if not integration_key:
-                logger.warning(
-                    "notifications.yml: %s is type=pagerduty but missing integration_key — skipping",
-                    name,
-                )
-                return None
             try:
                 _validate_webhook_url(PAGERDUTY_ENDPOINT_URL)
             except ValueError as exc:

@@ -18,7 +18,12 @@ destinations:
   - name: "security-alerts"          # human label for logs
     type: slack                      # slack | teams | webhook | pagerduty
     webhook_url: "https://hooks.slack.com/services/REPLACE_ME"
-    enabled: true
+    # Disabled by default. Flip to true AFTER you paste a real webhook
+    # above. Enabling with the REPLACE_ME placeholder generates HTTP
+    # errors on every action_required event; the notifier ALSO silently
+    # skips placeholder URLs as a defense-in-depth safety net, but
+    # explicit-off here keeps the operator in control.
+    enabled: false
     # Max deliveries per 60s window. Excess events are batched into one
     # "N events suppressed" summary notification. 0 = unlimited. Default: 10.
     rate_limit_per_minute: 10
@@ -37,7 +42,8 @@ destinations:
   - name: "ops-channel"
     type: teams
     webhook_url: "https://company.webhook.office.com/REPLACE_ME"
-    enabled: true
+    # Disabled by default — see security-alerts above.
+    enabled: false
     rate_limit_per_minute: 10
     filters:
       signal_type:
