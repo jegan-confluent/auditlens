@@ -135,6 +135,19 @@ class BootstrapInputs:
     cloud_api_key: str = ""
     cloud_api_secret: str = ""
 
+    # Confluent environment + cluster IDs for the AUDIT-LOG source.
+    # Surface them in .env so:
+    #   1. The IAM enrichment layer (src/product/actor_enrichment.py)
+    #      can scope its REST calls to the operator's environment.
+    #   2. The backend /tableflow routes (backend/app/api/routes/
+    #      tableflow.py) — which require CONFLUENT_ENV_ID and
+    #      CONFLUENT_CLUSTER_ID — can resolve the right cluster
+    #      without a second wizard pass.
+    # Empty strings are valid — the wizard prompts as `required=False`
+    # and downstream consumers gracefully no-op when these are unset.
+    source_env_id: str = ""
+    source_cluster_id: str = ""
+
     namespace: str = DEFAULT_NAMESPACE
     pvc_size: str = DEFAULT_STORAGE_SIZE
     forwarder_image: str = "auditlens-forwarder:bootstrap"
@@ -1128,6 +1141,59 @@ def render_env_file(inputs: BootstrapInputs) -> str:
         "NEXT_PUBLIC_API_BASE_URL=/api",
         "",
     ]
+
+    # ── Confluent Cloud REST credentials + IAM enrichment ──────────────────
+    # IAM enrichment turns raw `User:u-xxxx` / `sa-xxxxx` principal IDs into
+    # human-readable user emails + service-account display names via the
+    # Confluent IAM API. It needs a Cloud-scoped API key (NOT the audit-log
+    # Kafka key) — the wizard collected this in Phase 1 as inputs.cloud_*.
+    #
+    # Source of the original bug: the previous code wrote CC creds to
+    # .secrets (so the api container saw them) but never wrote
+    # IAM_ENRICHMENT_ENABLED, and docker-compose.prod.yml defaults that var
+    # to false. Result: creds present, enrichment dead. Symmetric write to
+    # .env fixes the failure-to-enable AND surfaces the config so operators
+    # can audit what's on without grep'ing two files.
+    if inputs.cloud_api_key and inputs.cloud_api_secret:
+        lines.extend([
+            "# Confluent Cloud REST credentials (Cloud-scoped, NOT Kafka).",
+            "# Power IAM enrichment of principal IDs → human-readable names.",
+            "IAM_ENRICHMENT_ENABLED=true",
+            f"CONFLUENT_CLOUD_API_KEY={inputs.cloud_api_key}",
+            f"CONFLUENT_CLOUD_API_SECRET={inputs.cloud_api_secret}",
+        ])
+    else:
+        # Per spec: when CC creds are absent, write the IAM toggle as
+        # false but do NOT emit empty CONFLUENT_CLOUD_API_KEY/SECRET
+        # lines. compose substitutes ${CONFLUENT_CLOUD_API_KEY:-} to ""
+        # already, and an empty assignment in .env would shadow any
+        # value the operator later set in their shell. Operators who
+        # want to flip on enrichment paste the key into .env manually
+        # (key name surfaced via the comment block) and flip
+        # IAM_ENRICHMENT_ENABLED to true.
+        lines.extend([
+            "# Confluent Cloud REST credentials — IAM enrichment stays off",
+            "# until the operator adds CONFLUENT_CLOUD_API_KEY +",
+            "# CONFLUENT_CLOUD_API_SECRET below AND flips this to true.",
+            "IAM_ENRICHMENT_ENABLED=false",
+        ])
+
+    # ── Source cluster identity ───────────────────────────────────────────
+    # CONFLUENT_ENV_ID and CONFLUENT_CLUSTER_ID are read by
+    # backend/app/api/routes/tableflow.py for cluster scoping. The wizard
+    # makes them optional (no Phase 1 prompt is hard-required for the
+    # main install to succeed), so empty values are normal — write them
+    # anyway per the "every wizard input lands in .env" principle so
+    # operators can discover the key and fill in later.
+    lines.extend([
+        "",
+        "# Source audit-log cluster identity (env_id + cluster_id).",
+        "# Required by /tableflow routes; consumed by IAM enrichment when set.",
+        f"CONFLUENT_ENV_ID={inputs.source_env_id}",
+        f"CONFLUENT_CLUSTER_ID={inputs.source_cluster_id}",
+        "",
+    ])
+
     return "\n".join(lines)
 
 
@@ -1146,11 +1212,10 @@ def render_secrets_env(inputs: BootstrapInputs) -> str:
         f"DEST_API_KEY={inputs.dest_api_key}",
         f"DEST_API_SECRET={inputs.dest_api_secret}",
     ]
-    # CC creds are only written when the wizard validated them — never emit
-    # empty lines that would later confuse compose's substitution context.
-    if inputs.cloud_api_key and inputs.cloud_api_secret:
-        lines.append(f"CONFLUENT_CLOUD_API_KEY={inputs.cloud_api_key}")
-        lines.append(f"CONFLUENT_CLOUD_API_SECRET={inputs.cloud_api_secret}")
+    # CONFLUENT_CLOUD_API_KEY/SECRET previously lived here too, but the
+    # missing IAM_ENRICHMENT_ENABLED next to them meant the api never
+    # actually used them. They now live in .env alongside the IAM toggle
+    # so the relationship is visible in one place — see render_env_file().
     lines.append(f"SLACK_WEBHOOK={inputs.slack_webhook}")
     lines.append(f"ALERTING_WEBHOOK={inputs.alerting_webhook}")
     lines.append("")

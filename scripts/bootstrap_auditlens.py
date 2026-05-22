@@ -869,6 +869,36 @@ def collect_interactive_inputs(
             secret=True,
             help_text="Required secret for the audit log Kafka API key. Kept masked and never echoed back.",
         )
+        # Env + cluster IDs are OPTIONAL during the wizard but power two
+        # downstream features once set:
+        #   1. IAM enrichment scope (when CC creds present).
+        #   2. /tableflow routes in backend/app/api/routes/tableflow.py
+        #      which use them to resolve the right cluster for enablement.
+        # Both default to the value we may have shown in the cluster
+        # listing above (`_show_eligible_clusters_for_reference`). The
+        # listing is informational, so we accept blank and write empty
+        # placeholders to .env — operators can fill in later.
+        inputs.source_env_id = prompt_text(
+            "Source environment ID (optional)",
+            default=inputs.source_env_id or "",
+            required=False,
+            help_text=(
+                "Confluent environment id (env-xxxxx) that owns the audit-log "
+                "cluster. Visible in the cluster listing above or via "
+                "`confluent environment list`. Required by /tableflow routes; "
+                "consumed by IAM enrichment when a Cloud API key is set."
+            ),
+        )
+        inputs.source_cluster_id = prompt_text(
+            "Source cluster ID (optional)",
+            default=inputs.source_cluster_id or "",
+            required=False,
+            help_text=(
+                "Confluent cluster id (lkc-xxxxx) for the audit-log cluster. "
+                "Visible in the cluster listing above or via `confluent kafka "
+                "cluster list`. Same usage as the environment id above."
+            ),
+        )
         inputs.audit_topic = prompt_text(
             "Source audit topic",
             default=SOURCE_AUDIT_TOPIC,

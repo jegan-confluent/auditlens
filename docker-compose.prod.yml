@@ -138,6 +138,12 @@ services:
       - IAM_ENRICHMENT_ENABLED=${IAM_ENRICHMENT_ENABLED:-false}
       - CONFLUENT_CLOUD_API_KEY=${CONFLUENT_CLOUD_API_KEY:-}
       - CONFLUENT_CLOUD_API_SECRET=${CONFLUENT_CLOUD_API_SECRET:-}
+      # backend/app/api/routes/tableflow.py reads these directly from
+      # os.getenv to scope its REST calls — the wizard always emits both
+      # (empty when undiscovered) so the variables are visible to the
+      # operator and the env_file lookup never warns about substitution.
+      - CONFLUENT_ENV_ID=${CONFLUENT_ENV_ID:-}
+      - CONFLUENT_CLUSTER_ID=${CONFLUENT_CLUSTER_ID:-}
     volumes:
       - auditlens_data:/var/lib/auditlens
       # Read-only: notifications.yml is operator-edited on the host and
