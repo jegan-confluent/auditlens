@@ -2578,15 +2578,18 @@ def main():
 
                     # Configurable notification layer (slack/teams/webhook)
                     # — runs before the legacy webhook so dedup keys are
-                    # owned by the notifier. Skip noise events and skip
-                    # entirely if no destinations are configured.
+                    # owned by the notifier. Only fire for action_required
+                    # and attention signals: informational events are
+                    # routine and would page on every routine read; noise
+                    # is excluded for the same reason. Skip entirely if no
+                    # destinations are configured.
                     if notifier is not None and notifier.has_destinations():
                         try:
                             notify_payload = {
                                 **enriched_event,
                                 **decision_snapshot(enriched_event),
                             }
-                            if notify_payload.get("signal_type") != "noise":
+                            if notify_payload.get("signal_type") in ("action_required", "attention"):
                                 notifier.notify(notify_payload)
                         except Exception as exc:
                             logger.warning("notifier dispatch failed: %s", exc)
