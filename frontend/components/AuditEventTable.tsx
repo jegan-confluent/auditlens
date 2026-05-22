@@ -233,7 +233,7 @@ function ExpandedEventRow({ event, detail, loading, error }: {
   const resourceText = displayResource(data);
   return (
     <tr className="event-row-expanded">
-      <td colSpan={4}>
+      <td colSpan={3}>
         <div className="expanded-block">
           {loading ? <p className="muted">Loading details…</p> : null}
           {error ? <p className="panel-error">Could not load detail — {error}</p> : null}
@@ -319,9 +319,6 @@ function EventRow({ event, options }: { event: AuditEvent; options: RowOptions }
             <div style={{ fontSize: "0.72em", color: "var(--muted)", marginTop: 1 }}>via {resolveClientTool(event.client_tool)}</div>
           ) : null}
         </td>
-        <td className="event-client-tool-cell" style={{ textAlign: "right", fontSize: "0.75em", color: "var(--muted)", whiteSpace: "nowrap" }}>
-          {resolveClientTool(event.client_tool) || "—"}
-        </td>
       </tr>
       {isExpanded ? (
         <ExpandedEventRow event={event} detail={options.expandedDetail} loading={options.expandedLoading} error={options.expandedError} />
@@ -364,9 +361,9 @@ function GroupRow({ group, expanded, onToggle, onActorClick }: {
           {actor.isServiceAccount ? <span className="actor-badge sa" title="Service account">SA</span> : null}
         </div>
         <div className="event-relative-time">{formatRelativeCompact(head.timestamp)}</div>
-      </td>
-      <td className="event-client-tool-cell" style={{ textAlign: "right", fontSize: "0.75em", color: "var(--muted)", whiteSpace: "nowrap" }}>
-        {resolveClientTool(head.client_tool) || "—"}
+        {resolveClientTool(head.client_tool) ? (
+          <div style={{ fontSize: "0.72em", color: "var(--muted)", marginTop: 1 }}>via {resolveClientTool(head.client_tool)}</div>
+        ) : null}
       </td>
     </tr>
   );
@@ -413,7 +410,6 @@ export default function AuditEventTable({
             <th>Event</th>
             <th style={{ width: 90 }}>Signal</th>
             <th style={{ textAlign: "right" }}>Who / When</th>
-            <th style={{ textAlign: "right" }}>Client</th>
           </tr>
         </thead>
         <tbody>

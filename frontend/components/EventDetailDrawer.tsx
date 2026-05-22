@@ -118,6 +118,12 @@ export default function EventDetailDrawer({ event, onClose, onTriage }: {
         </div>
       ) : null}
 
+      {(event.action === "schema-registry.DeleteSubject" || event.action === "schema-registry.DeleteSchemaVersion") ? (
+        <div className="drawer-stale-banner">
+          ⚠️ Schema deletion — consumers reading this schema may fail immediately. Verify downstream consumers before acknowledging.
+        </div>
+      ) : null}
+
       {(event.signal_type === "action_required" || event.signal_type === "attention") ? (
         <section className="why-this-matters">
           <div className="eyebrow" style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -141,14 +147,14 @@ export default function EventDetailDrawer({ event, onClose, onTriage }: {
           </div>
           {(event.decision_label || reason) ? (
             <div style={{ marginBottom: 8 }}>
-              <div className="detail-label">Decision</div>
+              <div className="detail-label">Why this was flagged</div>
               <strong>{event.decision_label || "Audit activity"}</strong>
               {reason ? <p style={{ margin: "2px 0 0" }}>{reason}</p> : null}
             </div>
           ) : null}
           {recommended ? (
             <div style={{ marginBottom: 8 }}>
-              <div className="detail-label">What to do</div>
+              <div className="detail-label">Recommended action</div>
               <p style={{ margin: 0 }}>→ {recommended}</p>
             </div>
           ) : null}
