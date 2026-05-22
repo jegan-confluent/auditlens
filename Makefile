@@ -378,6 +378,7 @@ deploy: ## Rsync to EC2 + rebuild containers
 		--exclude='*.log' \
 		--exclude='.env' \
 		--exclude='.secrets' \
+		--exclude='notifications.yml' \
 		./ $(REMOTE)
 	ssh -i $(PEM) $(EC2_USER)@$(EC2_IP) \
 		"sudo chown -R 1000:1000 ~/AuditLens/src ~/AuditLens/prometheus && \
@@ -407,6 +408,7 @@ deploy-check: ## Dry-run rsync (shows what would change)
 		--exclude='*.log' \
 		--exclude='.env' \
 		--exclude='.secrets' \
+		--exclude='notifications.yml' \
 		./ $(REMOTE)
 
 deploy-aws: ## Deploy to AWS EKS
@@ -544,6 +546,7 @@ sync: ## Sync files to EC2 without restart
 	  --exclude='.git' \
 	  --exclude='.env' \
 	  --exclude='.secrets' \
+		--exclude='notifications.yml' \
 	  --exclude='.venv' \
 	  --exclude='__pycache__' \
 	  --exclude='*.pyc' \
