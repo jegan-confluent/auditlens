@@ -1791,7 +1791,7 @@ def _validate_runtime_with_progress(inputs: BootstrapInputs) -> None:
     )
 
     # 4. Frontend — last because it depends on api being routable.
-    info_line("Waiting for frontend (http://localhost:3000)…")
+    info_line("Waiting for frontend (http://localhost:8088)…")
     _wait_service(
         "Frontend",
         "http://localhost:3000",
@@ -2029,7 +2029,7 @@ def print_service_status_panel(inputs: BootstrapInputs) -> None:
     status_rows = [
         ("Forwarder", f"http://localhost:{metrics_port}/health"),
         ("API",       "http://localhost:8080/health"),
-        ("Frontend",  "http://localhost:3000"),
+        ("Frontend",  f"http://localhost:{os.environ.get('CADDY_FALLBACK_PORT', '8088')}"),
     ]
     for label, url in status_rows:
         print(green(f"  ✅ {label.ljust(13)} — healthy  ({url})"))
@@ -2037,7 +2037,7 @@ def print_service_status_panel(inputs: BootstrapInputs) -> None:
     print()
     print(bold(cyan("  QUICK LINKS")))
     quick_rows = [
-        ("🔍", "Frontend", f"http://{public_host}:3000"),
+        ("🔍", "Frontend", f"http://localhost:{os.environ.get('CADDY_FALLBACK_PORT', '8088')}"),
         ("📡", "API",      f"http://{public_host}:8080"),
         ("📊", "Metrics",  f"http://{public_host}:{metrics_port}/metrics"),
     ]
@@ -2110,8 +2110,15 @@ def print_final_summary(
     # that only work from inside the box.
     if services_started and inputs.deployment_mode == "docker":
         public_host = _public_host()
-        frontend_url = f"http://{public_host}:3000"
-        api_url      = f"http://{public_host}:8080/health"
+        import platform as _platform
+        if _platform.system() == "Linux":
+            domain = os.environ.get("AUDITLENS_DOMAIN", "localhost")
+            frontend_url = f"http://{domain}"
+            api_url      = f"http://{domain}/api/health"
+        else:
+            caddy_port = os.environ.get("CADDY_FALLBACK_PORT", "8088")
+            frontend_url = f"http://localhost:{caddy_port}"
+            api_url      = f"http://localhost:{caddy_port}/api/health"
         metrics_url  = f"http://{public_host}:{inputs.metrics_port}/metrics"
         print(bold(green("  AuditLens is running!")))
         print()
