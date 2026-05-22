@@ -366,6 +366,7 @@ _RE_NORM_DESCRIBE = re.compile(r"\bdescribe[a-z]+\b")
 
 def derive_action_category(method_name: str | None, action: str | None) -> str:
     method = str(method_name or "")
+    method_lower = method.lower()
     action_text = str(action or "")
     combined = f"{method} {action_text}"
     lowered = _RE_NORM_SPLIT.sub(" ", combined).lower()
@@ -398,21 +399,41 @@ def derive_action_category(method_name: str | None, action: str | None) -> str:
         return "Create"
     if "deletetopic" in compact or "deletetopics" in compact:
         return "Delete"
-    # Specific Data markers first; then word-boundary regex so the long tail
-    # of Get*/List*/Describe* methods land in Data instead of Other.
-    if any(marker in compact for marker in (
-        "getstatement", "liststatements", "tableflowgettable",
-        "tableflowlisttables", "tableflowoauthtokens",
-        "listtables", "listnamespaces",
-        "produce", "fetch", "consume", "read",
-    )):
+    # Data-plane verbs (produce/fetch/consume/read) always classify as Data
+    # regardless of service prefix.
+    if any(marker in compact for marker in ("produce", "fetch", "consume", "read")):
         return "Data"
+    # tableflow.OAuthTokens-style endpoints don't follow Get/List/Describe
+    # naming but are still a data-plane read of token state.
+    if "tableflowoauthtokens" in compact:
+        return "Data"
+    # Service is data-plane when methodName carries a dotted prefix
+    # (kafka.X / schema-registry.X / tableflow.X) OR when the compacted
+    # form contains "tableflow" (covers bare names like TableflowListTables
+    # and ListTableFlowCatalog that legacy audit events emit without a dot).
+    is_data_plane_service = (
+        method_lower.startswith(("kafka.", "schema-registry.", "tableflow."))
+        or "tableflow" in compact
+    )
+    # Bare-name Get/List/Describe inside a compacted single word (the regex
+    # below relies on word boundaries that don't exist here, e.g.
+    # "tableflowlisttables"). Classify as Data when the embedded service is
+    # data-plane; otherwise Read.
+    if is_data_plane_service and any(verb in compact for verb in ("get", "list", "describe")):
+        return "Data"
+    # Standard Get/List/Describe gate for dotted methodName forms. kafka/
+    # schema-registry/tableflow keep "Data" because their reads ARE access
+    # to event/schema/table data. Every other service (cmk, iam, mds,
+    # flink, networking, …) returns "Read" so control-plane metadata reads
+    # aren't visually conflated with data access.
     if (
         _RE_NORM_GET.search(lowered)
         or _RE_NORM_LIST.search(lowered)
         or _RE_NORM_DESCRIBE.search(lowered)
     ):
-        return "Data"
+        if is_data_plane_service:
+            return "Data"
+        return "Read"
     if any(marker in compact for marker in ("authorize", "authorization", "authentication", "authenticate")):
         return "Security"
     # Delete equivalents include the schema-registry deregister-{dek,kek,keypair}
