@@ -31,13 +31,24 @@ type FeedState = {
   error: string | null;
 };
 
+type TimeWindow = "1h" | "6h" | "24h" | "7d";
+
+function formatTimeWindow(tw: TimeWindow): string {
+  switch (tw) {
+    case "1h": return "1 hour";
+    case "6h": return "6 hours";
+    case "24h": return "24 hours";
+    case "7d": return "7 days";
+  }
+}
+
 function buildCategories(timeWindow: string): FeedCategory[] {
   return [
     {
       key: "deletes",
       label: "Deletes",
       emoji: "🔴",
-      emptyMessage: "No destructive deletes in the last 24h",
+      emptyMessage: `No destructive deletes in the last ${formatTimeWindow(timeWindow as TimeWindow)}`,
       href: `/events?action_category=Delete&signal=action_required&time_window=${timeWindow}`,
       fetchParams: new URLSearchParams({
         time_window: timeWindow,
@@ -51,7 +62,7 @@ function buildCategories(timeWindow: string): FeedCategory[] {
       key: "creates",
       label: "Creates",
       emoji: "🟡",
-      emptyMessage: "No creates needing review in the last 24h",
+      emptyMessage: `No creates needing review in the last ${formatTimeWindow(timeWindow as TimeWindow)}`,
       href: `/events?action_category=Create&signal=attention&time_window=${timeWindow}`,
       fetchParams: new URLSearchParams({
         time_window: timeWindow,
@@ -65,7 +76,7 @@ function buildCategories(timeWindow: string): FeedCategory[] {
       key: "api_keys",
       label: "API Keys",
       emoji: "🔑",
-      emptyMessage: "No API key activity in the last 24h",
+      emptyMessage: `No API key activity in the last ${formatTimeWindow(timeWindow as TimeWindow)}`,
       href: `/events?action_category=API+Key&time_window=${timeWindow}`,
       fetchParams: new URLSearchParams({
         time_window: timeWindow,
@@ -78,7 +89,7 @@ function buildCategories(timeWindow: string): FeedCategory[] {
       key: "denials",
       label: "Denials",
       emoji: "🚫",
-      emptyMessage: "No denials in the last 24h",
+      emptyMessage: `No denials in the last ${formatTimeWindow(timeWindow as TimeWindow)}`,
       href: `/events?result=Denied&time_window=${timeWindow}`,
       fetchParams: new URLSearchParams({
         time_window: timeWindow,
@@ -91,7 +102,7 @@ function buildCategories(timeWindow: string): FeedCategory[] {
       key: "access",
       label: "Access changes",
       emoji: "🛡️",
-      emptyMessage: "No access changes needing action in the last 24h",
+      emptyMessage: `No access changes needing action in the last ${formatTimeWindow(timeWindow as TimeWindow)}`,
       href: `/events?action_category=Security&signal=action_required&time_window=${timeWindow}`,
       fetchParams: new URLSearchParams({
         time_window: timeWindow,
@@ -158,7 +169,7 @@ export default function ActionFeed({ timeWindow = "24h", timeWindowSelector }: {
 
   const [state, setState] = useState<Record<string, FeedState>>(() => {
     const initial: Record<string, FeedState> = {};
-    for (const cat of buildCategories("24h")) {
+    for (const cat of buildCategories(timeWindow)) {
       initial[cat.key] = { status: "loading", groups: [], total: 0, error: null };
     }
     return initial;
@@ -205,7 +216,7 @@ export default function ActionFeed({ timeWindow = "24h", timeWindowSelector }: {
       </div>
       <p className="muted">Grouped activity from the last {timeWindow} that may need your attention.</p>
       {allEmpty ? (
-        <p className="action-feed-allclear">✅ Nothing unusual in the last 24h. Continue monitoring.</p>
+        <p className="action-feed-allclear">✅ Nothing unusual in the last {formatTimeWindow(timeWindow as TimeWindow)}. Continue monitoring.</p>
       ) : null}
       <div className="action-feed-list">
         {categories.map((cat) => {
