@@ -94,7 +94,7 @@ export function humanTimeWindowLabel(value: string): string {
 
 // Backend `time_window` only accepts Nm/Nh (regex ^[1-9][0-9]*[mh]$). The UI
 // exposes 7d / 30d for ergonomics; translate to hours before sending.
-function encodeTimeWindow(value: string): string {
+export function encodeTimeWindow(value: string): string {
   const trimmed = value.trim();
   if (!trimmed) return "";
   if (trimmed.endsWith("d")) {

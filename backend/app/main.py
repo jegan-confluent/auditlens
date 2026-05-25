@@ -12,7 +12,7 @@ from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
-from backend.app.api.routes import actors, admin, events, filters, feedback as feedback_routes, health, patterns, readiness, summary, system
+from backend.app.api.routes import actors, admin, auth_analytics, events, filters, feedback as feedback_routes, health, patterns, readiness, summary, system
 from backend.app.core.logging import configure_logging
 from backend.app.api.routes import settings as settings_routes
 from backend.app.api.routes import onboarding as onboarding_routes
@@ -204,6 +204,7 @@ def create_app() -> FastAPI:
     app.include_router(onboarding_routes.router)
     app.include_router(tableflow_routes.router)
     app.include_router(notifications_routes.router)
+    app.include_router(auth_analytics.router)
     return app
 
 

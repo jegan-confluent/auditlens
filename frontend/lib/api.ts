@@ -330,6 +330,34 @@ export type ReadinessSnapshot = {
   oldest_event?: string | null;
 };
 
+export type AuthAnalyticsActor = {
+  actor: string;
+  actor_display_name: string;
+  auth_count: number;
+  unique_ips: number;
+  pct_of_total: number;
+  trend: "up" | "down" | "stable";
+};
+
+export type AuthAnalyticsSourceIp = {
+  source_ip: string;
+  auth_count: number;
+  unique_actors: number;
+  cloud_provider: string;
+};
+
+export type AuthAnalyticsResponse = {
+  total_auth_events: number;
+  time_window: "1d" | "7d";
+  top_actors: AuthAnalyticsActor[];
+  top_source_ips: AuthAnalyticsSourceIp[];
+  concentration: { top3_pct: number };
+};
+
+export function getAuthAnalytics(timeWindow: "1d" | "7d" = "1d", signal?: AbortSignal) {
+  return request<AuthAnalyticsResponse>(`/auth/analytics?time_window=${timeWindow}`, signal);
+}
+
 export async function getReadinessStatus(signal?: AbortSignal): Promise<ReadinessSnapshot> {
   try {
     const response = await fetch(`${API_BASE}/ready`, { cache: "no-store", signal });

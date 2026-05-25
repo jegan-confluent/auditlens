@@ -10,7 +10,7 @@ import SignalSummaryPanel from "../../components/SignalSummaryPanel";
 import SystemStatusPanel from "../../components/SystemStatusPanel";
 import TopActors from "../../components/TopActors";
 import { getReadinessStatus, getSummary, getSystemStatus, isAbortError } from "../../lib/api";
-import type { EventFilters } from "../../lib/eventFilters";
+import { encodeTimeWindow, type EventFilters } from "../../lib/eventFilters";
 import type { SummaryResponse, SystemStatus } from "../../lib/types";
 
 type TimeWindow = "1h" | "6h" | "24h" | "7d";
@@ -172,7 +172,7 @@ export default function DashboardPage() {
 
   useEffect(() => {
     const controller = new AbortController();
-    getSummary(new URLSearchParams({ time_window: timeWindow, mode: "decision" }), controller.signal)
+    getSummary(new URLSearchParams({ time_window: encodeTimeWindow(timeWindow), mode: "decision" }), controller.signal)
       .then(setSummary)
       .catch((err) => {
         if (isAbortError(err)) return;
