@@ -28,14 +28,32 @@ _STMT_TIMEOUT_MS = 10000
 
 
 def _cloud_provider_from_ip(ip: str) -> str:
-    """Best-effort label. Only Internal (RFC1918) is reliable without a
-    geo/ASN lookup — anything else returns Unknown so the UI doesn't lie."""
+    """Best-effort cloud-provider label keyed by /8 prefix.
+
+    Order matters: 35.x overlaps AWS and GCP, and the spec asks GCP to
+    win for that octet. Confluent Internal (134.238/16) is checked
+    before public AWS/GCP blocks so a Confluent IP can never get
+    mislabeled as a public-cloud one.
+    """
     if not ip:
         return "Unknown"
+    # RFC1918 internal
     if ip.startswith("10.") or ip.startswith("192.168."):
         return "Internal"
     if any(ip.startswith(f"172.{n}.") for n in range(16, 32)):
         return "Internal"
+    # Confluent Internal (specific before public blocks)
+    if ip.startswith("134.238."):
+        return "Confluent Internal"
+    # GCP first — owns 34.x and shares 35.x with AWS; spec says GCP wins for 35.x.
+    if ip.startswith("34.") or ip.startswith("35."):
+        return "GCP"
+    # AWS — public allocations 3/18/44/52/54 (35 already routed to GCP above).
+    if any(ip.startswith(f"{p}.") for p in ("3", "18", "44", "52", "54")):
+        return "AWS"
+    # Azure
+    if any(ip.startswith(f"{p}.") for p in ("20", "40", "104")):
+        return "Azure"
     return "Unknown"
 
 
@@ -85,6 +103,28 @@ def auth_analytics(
 
     mapping = get_actor_mapping_file()
 
+    # Resolve display names from the enriched audit_events table for the
+    # top-10 actors. audit_events_noise carries no actor_display_name; the
+    # enriched copy in audit_events does. DISTINCT ON keeps one row per
+    # actor (Postgres-specific). On SQLite (test runs only) skip this step
+    # and fall through to actor_mappings.yml — the route is exercised live
+    # only against Postgres.
+    actor_list = [row.actor for row in actor_rows if row.actor]
+    display_map: dict[str, str] = {}
+    if actor_list and db.get_bind().dialect.name == "postgresql":
+        display_rows = db.execute(text(
+            """
+            SELECT DISTINCT ON (actor) actor, actor_display_name, actor_email
+            FROM audit_events
+            WHERE actor = ANY(:actors)
+              AND actor_display_name IS NOT NULL
+              AND actor_display_name <> ''
+            """
+        ), {"actors": actor_list}).all()
+        for r in display_rows:
+            if r.actor_display_name:
+                display_map[r.actor] = r.actor_display_name
+
     def _trend(first: int, second: int) -> str:
         if first == 0 and second == 0:
             return "stable"
@@ -97,16 +137,21 @@ def auth_analytics(
         return "stable"
 
     def _display_name(actor_value: str) -> str:
+        # 1. audit_events enrichment (preferred — populated by IAM cache).
+        hit = display_map.get(actor_value)
+        if hit:
+            return hit
+        # 2. actor_mappings.yml manual override.
         name = mapping.get(actor_value)
         if name:
             return name
-        # actor may carry the "User:" prefix from the audit principal; strip
-        # and retry the lookup so mappings keyed on the bare resourceId hit.
+        # 3. "User:" prefix strip + retry the mapping lookup.
         if actor_value.startswith("User:"):
             stripped = actor_value[5:]
             name = mapping.get(stripped)
             if name:
                 return name
+        # 4. Raw actor as last resort.
         return actor_value
 
     top_actors = []
