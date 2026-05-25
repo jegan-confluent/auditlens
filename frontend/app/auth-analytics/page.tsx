@@ -79,6 +79,9 @@ export default function AuthAnalyticsPage() {
 
           <section className="panel table-panel" style={{ marginBottom: 16 }}>
             <h2 style={{ marginTop: 0 }}>Top API Keys by Auth Volume</h2>
+            <p className="muted" style={{ fontSize: 12, marginTop: 4, marginBottom: 12 }}>
+              Actor IDs shown are Kafka broker-level identifiers and cannot be resolved to email addresses.
+            </p>
             {data.top_actors.length === 0 ? (
               <p className="muted">No authentication events in this window.</p>
             ) : (
@@ -86,7 +89,6 @@ export default function AuthAnalyticsPage() {
                 <thead>
                   <tr>
                     <th>Actor</th>
-                    <th>Display Name</th>
                     <th style={{ textAlign: "right" }}>Auth Count</th>
                     <th style={{ textAlign: "right" }}>Unique IPs</th>
                     <th style={{ textAlign: "right" }}>% of Total</th>
@@ -97,7 +99,6 @@ export default function AuthAnalyticsPage() {
                   {data.top_actors.map((row) => (
                     <tr key={row.actor}>
                       <td><code>{row.actor}</code></td>
-                      <td>{row.actor_display_name === row.actor ? <span className="muted">—</span> : row.actor_display_name}</td>
                       <td style={{ textAlign: "right" }}>{row.auth_count.toLocaleString()}</td>
                       <td style={{ textAlign: "right" }}>{row.unique_ips.toLocaleString()}</td>
                       <td style={{ textAlign: "right" }}>{row.pct_of_total}%</td>
