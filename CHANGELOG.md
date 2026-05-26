@@ -600,3 +600,99 @@ work only.
 
 - Existing DB rows may physically retain mixed-case resource types.
   Why deferred: API and filter layers now canonicalize them without a migration.
+
+## [2026-05-25] Session [14]
+
+### Fixed
+- Setup wizard surfaced http://localhost:3000 to operators when the user-facing entry point is Caddy on :8088
+  Why: New EC2 / Linux installs landed on a broken URL right after install; localhost:3000 only works on the host running the frontend container
+  Files: scripts/bootstrap_auditlens.py (commit 7ccfe79)
+
+- Drawer used the wrong section titles for action_required events
+  Why: "Decision" / "What to do" didn't read clearly to first-time operators; spec asked for "Why this was flagged" / "Recommended action"
+  Files: frontend/components/EventDetailDrawer.tsx (commit 0d114f6)
+
+- Event table had client_tool shown in two places (inline "via X" AND dedicated Client column)
+  Why: Redundant — consolidated to the inline form only; reduced ExpandedEventRow colSpan 4 → 3
+  Files: frontend/components/AuditEventTable.tsx (commit 0d114f6)
+
+- action_category="Data" was misleading for control-plane Get/List/Describe operations
+  Why: cmk.ListClusters / iam.GetServiceAccount / flink.GetStatement aren't data-plane access; they're metadata reads. Reclassified as "Read"
+  Files: src/product/event_normalization.py (commit e5da9cf); SQL backfill flipped 5 existing rows (GetPeerings ×2, ListIntegrations ×2, GetPrivateLinkAccesses ×1); 112 tableflow/SR rows correctly stayed as "Data"
+
+- Notifier was firing for informational signals — too noisy
+  Why: Gate at audit_forwarder.py:2589 was `signal_type != "noise"`; tightened to `signal_type in ("action_required", "attention")` only
+  Files: audit_forwarder.py (commit e44b5a1)
+  Premise note: Earlier prompt asserted "AuditLensNotifier is never instantiated or called" — that was wrong; it was already wired at lines 1894 + 2527 + 2589. Root cause of "Slack alerts not firing" was 0 enabled destinations in notifications.yml, not unwired code.
+
+- Dashboard 7d time window returned 422 from /summary
+  Why: Backend regex `^[1-9][0-9]*[mh]$` only accepts m/h. Frontend now calls encodeTimeWindow(timeWindow) to send 168h instead of 7d. API contract intentionally NOT widened
+  Files: frontend/app/dashboard/page.tsx, frontend/lib/eventFilters.ts (export encodeTimeWindow) (commit e35663d)
+
+- ActionFeed empty-state messages hardcoded "24h" regardless of selected time window
+  Why: When user clicked 1h pill they saw "No deletes in the last 24h" — looked like the window filter wasn't applying. Added formatTimeWindow() helper; replaced 6 hardcoded strings; also fixed line-161 hardcoded buildCategories("24h") to use the live prop
+  Files: frontend/components/ActionFeed.tsx (commit 596036d)
+  Premise note: Reported as a data bug ("query uses 24h when 1h selected"); actual data path is correct, the misleading text is what users were observing.
+
+- Auth-analytics page showed "Display Name" column with values that mostly equalled the raw actor ID
+  Why: kafka.Authentication events come from Kafka brokers; the principal in audit_events_noise is a numeric broker-level ID that doesn't resolve to a user/SA in IAM. Dropped the column; added a small muted clarifying note instead
+  Files: frontend/app/auth-analytics/page.tsx (commit 7e1a66f)
+
+### Added
+- GET /auth/analytics endpoint — top API keys + source IPs by kafka.Authentication volume, with 1d/7d window
+  Why: Customer ask from Anji Narra (saved as memory). Top 10 actors, top 10 source IPs, concentration KPI, trend marker (first-half vs second-half ±20%)
+  Files: backend/app/api/routes/auth_analytics.py (new), backend/app/main.py (router registration) (commit e35663d → bc23081)
+
+- /auth-analytics frontend page (1d/7d toggle, two tables, KPI panel)
+  Why: Surfaces the new endpoint. Reuses existing panel/table-panel/event-table classes — no new components
+  Files: frontend/app/auth-analytics/page.tsx (new), frontend/lib/api.ts (client + types), frontend/components/NavLinks.tsx (sidebar entry)
+
+- Display-name resolution via audit_events JOIN
+  Why: audit_events_noise has no actor_display_name column. New endpoint now runs SELECT DISTINCT ON (actor) actor, actor_display_name FROM audit_events ... and falls back to actor_mappings.yml → "User:" prefix strip → raw actor
+  Files: backend/app/api/routes/auth_analytics.py (commit bc23081)
+  Postgres-only: SQLite tests skip the lookup gracefully.
+
+- Cloud-provider classification heuristic by IP /8 prefix
+  Why: Better than always-Unknown labels in the Top Source IPs table. RFC1918 → Internal; 134.238/16 → Confluent Internal; 34/35 → GCP (GCP wins 35.x); 3/18/44/52/54 → AWS; 20/40/104 → Azure
+  Files: backend/app/api/routes/auth_analytics.py:_cloud_provider_from_ip (commit bc23081)
+
+- Schema deletion warning banner in event drawer
+  Why: schema-registry.DeleteSubject / DeleteSchemaVersion can break consumers immediately. Warning shown using existing .drawer-stale-banner class — no new component
+  Files: frontend/components/EventDetailDrawer.tsx (commit 0d114f6)
+
+### Architecture Decisions
+- API time_window contract stays `^[1-9][0-9]*[mh]$` — frontend converts d → h
+  Why: Lower risk than widening backend regex; mirrors what eventFilters.encodeTimeWindow already does for /events
+  Impact: Any new caller hitting /summary or /events must convert "d" forms before sending; backend will continue 422-ing raw "7d"
+
+- audit_events_noise stays write-only-fast, no actor_display_name column
+  Why: Adding the column would require schema migration AND populate on every noise insert (kills the noise short-circuit perf wins from Phase 1)
+  Impact: Display names for /auth/analytics must JOIN to audit_events. Acceptable given top-10 limit on the actor query
+
+- Notifier gate hardcoded to action_required + attention (not configurable per-destination)
+  Why: Informational events on every routine read would page constantly. notifications.yml already supports per-destination signal_type filters, so destinations can NARROW further — they just can't widen past attention
+  Impact: Future "I want informational events" requests need a code change at audit_forwarder.py:2589 OR a different routing layer
+
+### Removed
+- "Client" column in event table (kept the inline "via {tool}" form only)
+  Files: frontend/components/AuditEventTable.tsx (commit 0d114f6)
+
+- "Display Name" column in /auth-analytics Top API Keys table
+  Why: Kafka broker-level actor IDs can't be resolved to display names — the column was always blank/identical
+  Files: frontend/app/auth-analytics/page.tsx (commit 7e1a66f)
+
+### Known Issues / Not Done
+- Schema deletion warning banner code is in place but not visually verified — no schema-registry.DeleteSubject events in the current dataset
+- ActionFeed subtitle on line 217 still uses the raw token (`1h`, `24h`) instead of the new humanized format; left untouched per "no other edits"
+- /auth/analytics display-name JOIN is Postgres-only; SQLite tests skip it. If we ever run tests against the noise/audit_events JOIN path we'll need a portable form
+- Docker daemon was down on the dev host for much of this session; live curl/browser validation gaps were called out at the time but not retroactively re-run after Docker came back
+- Memory dump (7 files at ~/.claude/projects/.../memory/) written during this session is NOT in git; that's intentional — they're per-user, not per-repo
+
+### Memory Captured
+- confluent-deploy-workflow.md — git push-external + caas.sh sequence
+- gitignored-runtime-configs.md — .env/.secrets/notifications.yml/flink-lab don't commit, don't rsync
+- ec2-bash-and-container-gotchas.md — `set +H` before psql; --force-recreate after env/yml edits
+- flink-lab-discipline.md — teardown after every session
+- notifier-state.md — Slack webhook on EC2 only; gate is action_required + attention
+- auditlens-roadmap.md — top 8 features prioritised; Auth Analytics validated by Anji Narra
+- ec2-deployment-target.md — host, key, compose file

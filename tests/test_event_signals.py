@@ -175,13 +175,41 @@ def test_flow_groups_prioritize_action_required_before_noise():
 # ── Fix 1: Confluent platform actor overrides ──────────────────────────────
 
 def test_confluent_platform_actor_is_informational():
+    # Behavioral assertion change (2026-05): the prior test pinned
+    # UnbindAllRolesForPrincipal → informational, which was the B1 bug
+    # (Override 1 swallowing real security mutations). The override now
+    # correctly demotes only NON-security-mutation methods. Substituted
+    # a benign read-only platform_automation method for the assertion.
     result = signal({
         "principal": '{"externalAccount":{"subject":"Confluent"}}',
-        "action": "schema-registry.UnbindAllRolesForPrincipal",
+        "action": "schema-registry.GetSubjects",
         "result": "Success",
     })
     assert result["signal_type"] == "informational"
     assert result["signal_reason"] == "platform_automation"
+
+
+def test_confluent_platform_security_mutation_bypasses_override():
+    # FIX B1 — when the Confluent platform actor performs a security
+    # mutation (grant/revoke/bind/unbind/...), Override 1 must NOT demote
+    # the event. Irreversible removals (unbind/revoke) classify as
+    # destructive; reversible additions (grant/bind) classify as access
+    # changes.
+    unbind_result = signal({
+        "principal": '{"externalAccount":{"subject":"Confluent"}}',
+        "action": "schema-registry.UnbindAllRolesForPrincipal",
+        "result": "Success",
+    })
+    assert unbind_result["signal_type"] == "action_required"
+    assert unbind_result["signal_reason"] == "destructive_change"
+
+    grant_result = signal({
+        "principal": '{"externalAccount":{"subject":"Confluent"}}',
+        "action": "GrantRoleResourcesForPrincipal",
+        "result": "Success",
+    })
+    assert grant_result["signal_type"] == "attention"
+    assert grant_result["signal_reason"] == "access_changed"
 
 
 def test_confluent_platform_high_risk_stays_action_required():
