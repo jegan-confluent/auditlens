@@ -1,7 +1,7 @@
 # Makefile for Audit Forwarder
 # Production-ready build, test, and deployment tasks
 
-.PHONY: help build build-alpine build-distroless test scan clean deploy deploy-check migrate setup start stop restart status monitoring logs health ps sync backup backup-list backup-list-remote backup-restore update update-check repair diagnose diagnose-ai
+.PHONY: help build build-alpine build-distroless test scan clean deploy deploy-check migrate setup start stop restart status monitoring logs health ps sync backup backup-list backup-list-remote backup-restore update update-check repair diagnose diagnose-ai register-schemas check-schemas sync-schemas
 
 ##############################################################################
 # Quickstart Lifecycle (Phase 3 — single-command install + service control)
@@ -43,6 +43,26 @@ monitoring: ## Show monitoring URLs
 	@echo "Grafana:    http://localhost:3001 (admin/admin)"
 	@echo "Prometheus: http://localhost:9090"
 	@echo ""
+
+##############################################################################
+# Schema Registry — Avro contracts for the produced Kafka topics
+#   - `register-schemas` : register/update all subjects in SR. enriched.v1 is
+#                          forced to FORWARD compatibility (other topics keep
+#                          the registry default BACKWARD).
+#   - `check-schemas`    : report current registered versions, no writes.
+# Both targets require SCHEMA_REGISTRY_URL / _API_KEY / _API_SECRET in env.
+##############################################################################
+
+sync-schemas: ## Sync schemas/*.avsc → src/schema/*.avsc (run after editing schemas/)
+	@cp schemas/audit_enriched_v1.avsc src/schema/audit_enriched_v1.avsc
+	@echo "Synced schemas/audit_enriched_v1.avsc -> src/schema/"
+
+register-schemas: sync-schemas ## Sync, then register Avro schemas with Schema Registry
+	@echo "Registering AuditLens schemas with Schema Registry..."
+	@.venv/bin/python scripts/register_sr_schemas.py
+
+check-schemas: ## Check current schema versions in Schema Registry
+	@.venv/bin/python scripts/register_sr_schemas.py --check-only
 
 ##############################################################################
 # Diagnostics — basic pattern analysis + optional AI deep-dive

@@ -246,8 +246,11 @@ def _await_noise_persisted(
 
 def _try_short_circuit_noise(msg) -> dict | None:
     """Decode a raw Kafka record and return the parsed dict iff it's a
-    bulk-noise method. Returns None on any failure or non-noise event,
-    so the caller falls back to the full processor path.
+    bulk-noise method AND not a denial. Returns None on any failure,
+    non-noise event, OR denial — so the caller falls back to the full
+    processor path. Denied events carry security signal that must not be
+    suppressed by the bulk-noise lane even when their methodName is in
+    BULK_NOISE_METHODS (mds.Authorize, ip-filter.Authorize, …).
 
     Never raises — wrapped in try/except so a malformed payload at the
     consume point can never crash the consumer thread.
@@ -269,6 +272,29 @@ def _try_short_circuit_noise(msg) -> dict | None:
             return None
         if method.lower() not in BULK_NOISE_METHODS:
             return None
+        # Denial bypass — three paths Confluent uses for denial expression
+        # in the RAW payload (flatten_audit has NOT run yet here):
+        #   1. data.authorizationInfo.granted == False        (kafka boolean)
+        #   2. data.authorizationInfo.result in {DENY, FAILURE}
+        #      (cloud / request / ip-filter string enum)
+        #   3. data.result.status in {DENY, FAILURE, UNAUTHENTICATED}
+        # Any match → fall through to full processor so the signal
+        # classifier can elevate to action_required / denied_access.
+        if data is not None:
+            raw_authz = data.get("authorizationInfo")
+            authz = raw_authz if isinstance(raw_authz, dict) else None
+            if authz is not None:
+                if authz.get("granted") is False:
+                    return None
+                authz_result = authz.get("result")
+                if isinstance(authz_result, str) and authz_result.upper() in {"DENY", "FAILURE"}:
+                    return None
+            raw_result_block = data.get("result")
+            result_block = raw_result_block if isinstance(raw_result_block, dict) else None
+            if result_block is not None:
+                result_status = result_block.get("status")
+                if isinstance(result_status, str) and result_status.upper() in {"DENY", "FAILURE", "UNAUTHENTICATED"}:
+                    return None
         return payload
     except Exception:
         return None  # Any decode/shape error → full path
@@ -2029,9 +2055,18 @@ def main():
 
     # Schema Registry — optional Avro serialization for audit.enriched.v1.
     # Falls back to orjson JSON production transparently if SR is not configured
-    # or if registration fails (e.g. network issues at startup).
+    # or if serializer construction fails (e.g. network issues at startup).
+    #
+    # Schema REGISTRATION is no longer performed here. The forwarder used to
+    # call register_schema() at startup, which auto-creates a new version on
+    # every change and bypasses the FORWARD compatibility check we set on the
+    # enriched subject. Registration is now owned by `make register-schemas`
+    # (scripts/register_sr_schemas.py). Operators must run that target before
+    # the first start (and after editing any .avsc); otherwise AvroSerializer
+    # raises 'Schema not found' on first produce and the forwarder will fall
+    # back to JSON for that batch.
     from src.product.schema_registry import (
-        get_sr_client, register_schema, get_avro_serializer, project_enriched,
+        get_sr_client, get_avro_serializer, project_enriched,
     )
     _sr_client = get_sr_client()
     _enriched_serializer = None
@@ -2040,16 +2075,6 @@ def main():
     if _sr_client:
         try:
             _SCHEMA_DIR = os.path.join(os.path.dirname(__file__), "src", "schema")
-            register_schema(
-                _sr_client,
-                f"{AUDIT_ENRICHED_TOPIC}-value",
-                os.path.join(_SCHEMA_DIR, "audit_enriched_v1.avsc"),
-            )
-            register_schema(
-                _sr_client,
-                "audit.noise.v1-value",
-                os.path.join(_SCHEMA_DIR, "audit_noise_v1.avsc"),
-            )
             _enriched_serializer = get_avro_serializer(
                 _sr_client,
                 os.path.join(_SCHEMA_DIR, "audit_enriched_v1.avsc"),
@@ -2059,11 +2084,12 @@ def main():
                 os.path.join(_SCHEMA_DIR, "audit_noise_v1.avsc"),
             )
             logger.info(
-                "Schema Registry configured — producing with Avro serialization"
+                "SR configured — schema registration is managed by "
+                "'make register-schemas'. Run it before first start."
             )
         except Exception as _sr_exc:
             logger.warning(
-                "Schema Registry init failed (%s) — falling back to JSON production",
+                "Schema Registry serializer init failed (%s) — falling back to JSON production",
                 _sr_exc,
             )
             record_schema_registry_failure()

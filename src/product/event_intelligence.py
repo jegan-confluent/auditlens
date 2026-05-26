@@ -93,8 +93,25 @@ def _result_text(payload: dict[str, Any]) -> str:
 
 
 def _is_denied(payload: dict[str, Any], event: Any | None = None) -> bool:
+    if bool(getattr(event, "is_denied", False)) or payload.get("granted") is False:
+        return True
     result = _result_text(payload).lower()
-    return bool(getattr(event, "is_denied", False)) or payload.get("granted") is False or any(marker in result for marker in ("deny", "denied", "forbid", "unauthoriz"))
+    if any(marker in result for marker in ("deny", "denied", "forbid", "unauthoriz")):
+        return True
+    # Cloud / request / ip-filter events express denial via enum values on
+    # authorizationInfo.result or result.status rather than granted=False.
+    # The substring scan above catches DENY / DENIED / FORBIDDEN /
+    # UNAUTHORIZED but misses the FAILURE and UNAUTHENTICATED enums.
+    data = _data(payload)
+    authz_result = _as_text(_nested(data, "authorizationInfo", "result")).upper()
+    if authz_result in {"DENY", "FAILURE"}:
+        return True
+    raw_result_block = data.get("result")
+    result_block = raw_result_block if isinstance(raw_result_block, dict) else {}
+    result_status = _as_text(result_block.get("status")).upper()
+    if result_status in {"DENY", "FAILURE", "UNAUTHENTICATED"}:
+        return True
+    return False
 
 
 def _is_failure(payload: dict[str, Any], event: Any | None = None) -> bool:
@@ -208,6 +225,22 @@ def classify_event(payload: dict[str, Any], event: Any | None = None) -> dict[st
         impact = "security_sensitive"
     elif denied:
         impact = "security_sensitive"
+    # FIX B2a — schema-registry.Get*/List*/LookUp*/Describe* are pure reads
+    # even though their event_type contains "authorization". Without this
+    # guard they short-circuit to authorization_check below and end up
+    # mis-routed to the noise table.
+    elif method_text.startswith("schema-registry.") and any(
+        method_text.startswith(f"schema-registry.{verb}")
+        for verb in ("get", "list", "lookup", "describe")
+    ):
+        impact = "read_only"
+    # FIX B2b — kafka.CreateAcls / DeleteAcls / DescribeAcls coming through
+    # the mutation event type (NOT io.confluent.kafka.server/authorization)
+    # are access changes, not authorization checks. The pure authorization-
+    # check event variant still falls through to the authorization_check
+    # branch below.
+    elif method in ("kafka.CreateAcls", "kafka.DeleteAcls", "kafka.DescribeAcls") and "authorization" not in event_type_text:
+        impact = "access_change"
     elif "authorization" in event_type_text or "authorize" in method_text:
         impact = "authorization_check"
     elif "authentication" in event_type_text or "authenticate" in method_text or "authentication" in method_text:

@@ -69,6 +69,10 @@ _ALWAYS_NOISE_METHODS: frozenset[str] = BULK_NOISE_METHODS - frozenset({
 _ALWAYS_INFORMATIONAL_METHODS = frozenset({
     "tableflowgettable",
     "tableflowlisttables",
+    "tableflowcatalogconfig",
+    "listtableflowcatalog",
+    "tableflowgetcatalog",
+    "tableflowlistcatalogs",
 })
 
 # Confluent platform automation: these org-level operations stay action_required
@@ -76,6 +80,19 @@ _ALWAYS_INFORMATIONAL_METHODS = frozenset({
 CONFLUENT_PLATFORM_HIGH_RISK = frozenset({
     "deleteorganization",
     "suspendorganization",
+})
+
+# Substring markers that indicate a security-sensitive mutation regardless
+# of the actor. When ANY of these appears in the method name, Override 1
+# (platform-automation demotion) is skipped so the main cascade can
+# classify the event properly. Confluent's own service account routinely
+# performs role grants/revokes/bindings, and those must NOT be demoted to
+# informational just because the actor is the Confluent platform.
+SECURITY_MUTATION_VERBS = frozenset({
+    "grant", "revoke", "unbind", "bind",
+    "deleteapi", "deleteserviceaccount",
+    "revokerole", "grantrole", "assignrole",
+    "removerolefromresource", "unbound",
 })
 
 # Topic name prefixes that are always Confluent-platform internals.
@@ -136,6 +153,25 @@ def classify_signal(event_or_fields: Any) -> dict[str, str]:
     result = _classify_signal_core(event_or_fields)
     action = _as_text(_field(event_or_fields, "action")).lower()
 
+    # Override AT — Access Transparency events (CloudEvents
+    # type "io.confluent.cloud/access-transparency") are always
+    # action_required security-sensitive changes. Match on the event_type
+    # field directly so classification does not depend on Confluent's
+    # undocumented methodName values for this category. The existing
+    # action_text-based check in _classify_signal_core remains as a
+    # fallback for events where the type field is absent.
+    event_type = _as_text(
+        _field(event_or_fields, "type")
+        or _field(event_or_fields, "event_type")
+    ).lower()
+    if "access-transparency" in event_type:
+        return {
+            "signal_type": "action_required",
+            "signal_reason": "security_sensitive_change",
+            "recommended_action": "Investigate immediately",
+            "decision_label": "Action Needed",
+        }
+
     # Override 0 — Confluent-internal topics (error-lcc-*, _confluent*, etc.)
     # are auto-created by the platform and produce enormous volumes of routine
     # events.  Suppress them as noise before any other override so they never
@@ -156,8 +192,16 @@ def classify_signal(event_or_fields: Any) -> dict[str, str]:
         }
 
     # Override 1 — Confluent platform automation is always informational
-    # unless it is a truly destructive org-level operation.
-    if _is_confluent_platform(event_or_fields) and action not in CONFLUENT_PLATFORM_HIGH_RISK:
+    # unless it is a truly destructive org-level operation OR contains a
+    # security-mutation verb (grant/revoke/bind/unbind/deleteapi/...). The
+    # mutation-verb bypass prevents the override from swallowing real
+    # security changes performed by Confluent's own service account
+    # (e.g. GrantRoleResourcesForPrincipal, UnbindAllRolesForPrincipal).
+    if (
+        _is_confluent_platform(event_or_fields)
+        and action not in CONFLUENT_PLATFORM_HIGH_RISK
+        and not any(verb in action for verb in SECURITY_MUTATION_VERBS)
+    ):
         return {
             "signal_type": "informational",
             "signal_reason": "platform_automation",
@@ -184,6 +228,18 @@ def classify_signal(event_or_fields: Any) -> dict[str, str]:
             "decision_label": "Review",
         }
 
+    # Override 2b — successful schema registrations are config changes.
+    # Without this, _classify_signal_core leaks successful RegisterSchema
+    # events to the catch-all 'unknown' bucket because no other rule
+    # matches the (informational impact, attention-worthy verb) shape.
+    if action == "schema-registry.registerschema" and "fail" not in result_val:
+        return {
+            "signal_type": "attention",
+            "signal_reason": "config_changed",
+            "recommended_action": "Verify schema evolution is expected",
+            "decision_label": "Review",
+        }
+
     return result
 
 
@@ -202,10 +258,20 @@ def _classify_signal_core(event_or_fields: Any) -> dict[str, str]:
     is_denied = bool(_field(event_or_fields, "is_denied", False)) or "denied" in result or change == "denied"
 
     # ── Early-return classifiers ───────────────────────────────────────────
-    # These run BEFORE the failure/denial cascade so that read-only and
-    # routine-noise methods don't get promoted to action_required when they
-    # happen to fail (e.g. GetStatement with a 404, mds.Authorize with
-    # granted=False).
+    # Denial check runs FIRST so denied bulk-noise / read-only methods
+    # (mds.Authorize denials, ip-filter.Authorize denials, denied GetSecret
+    # reads, …) surface as action_required instead of being swallowed by
+    # the auth_noise / read_only_lookup short-cuts below. Read-only and
+    # routine-noise methods that merely FAIL (e.g. GetStatement 404)
+    # still fall through to their respective informational / noise
+    # buckets because is_failure is handled later in the cascade.
+    if is_denied:
+        return {
+            "signal_type": "action_required",
+            "signal_reason": "denied_access",
+            "recommended_action": "Investigate immediately",
+            "decision_label": "Action Needed",
+        }
     if method_name in _ALWAYS_NOISE_METHODS:
         return {
             "signal_type": "noise",
@@ -223,14 +289,6 @@ def _classify_signal_core(event_or_fields: Any) -> dict[str, str]:
             "signal_reason": "read_only_lookup",
             "recommended_action": "No action needed",
             "decision_label": "Info",
-        }
-
-    if is_denied:
-        return {
-            "signal_type": "action_required",
-            "signal_reason": "denied_access",
-            "recommended_action": "Investigate immediately",
-            "decision_label": "Action Needed",
         }
     if is_failure:
         if impact == "read_only" or change == "read/listed":
@@ -253,7 +311,7 @@ def _classify_signal_core(event_or_fields: Any) -> dict[str, str]:
             "recommended_action": "Investigate immediately",
             "decision_label": "Action Needed",
         }
-    if risk == "critical" or impact == "destructive" or change == "deleted" or any(marker in action_text for marker in ("delete", "remove", "drop", "destroy", "terminate")):
+    if risk == "critical" or impact == "destructive" or change == "deleted" or any(marker in action_text for marker in ("delete", "remove", "drop", "destroy", "terminate", "unbind", "revoke")):
         return {
             "signal_type": "action_required",
             "signal_reason": "destructive_change",
@@ -268,7 +326,7 @@ def _classify_signal_core(event_or_fields: Any) -> dict[str, str]:
             "decision_label": "Action Needed",
         }
 
-    if impact == "access_change" or any(marker in action_text for marker in ("grant", "revoke", "assignrole", "remove role", "rolebinding", "createapikey", "deleteapikey")):
+    if impact == "access_change" or any(marker in action_text for marker in ("grant", "revoke", "assignrole", "remove role", "rolebinding", "bind", "unbind", "createapikey", "deleteapikey")):
         return {
             "signal_type": "attention",
             "signal_reason": "access_changed",

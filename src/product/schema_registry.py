@@ -27,7 +27,10 @@ SR_API_SECRET = (
 # Avro schema fields for audit.enriched.v1 — used to project dicts before
 # serialization so extra fields from flatten_audit() are silently dropped.
 _ENRICHED_FIELDS = {
-    "id", "event_fingerprint", "timestamp", "schema_version",
+    # NOTE: "id" intentionally NOT included — the new Avro schema
+    # (consolidation 2026-05-26) does not declare an id field, so
+    # projecting it would cause AvroSerializer to reject the message.
+    "event_fingerprint", "timestamp", "schema_version",
     "pipeline_stage", "event_contract_version", "result", "actor",
     "actor_id", "actor_display_name", "actor_email", "actor_type",
     "actor_source", "actor_confidence", "actor_enriched_at", "action",
@@ -41,6 +44,11 @@ _ENRICHED_FIELDS = {
     "impact_type", "risk_level", "change_type", "resource_family",
     "event_title", "event_summary", "decision_reason", "decision_label",
     "recommended_action", "client_tool",
+    # New fields added 2026-05-26 consolidation — flattened auth subfields
+    # (migration 0023), envelope ingested_at, raw Confluent methodName.
+    "access_type", "auth_granted", "auth_operation",
+    "auth_pattern_type", "auth_resource_type",
+    "ingested_at", "methodName", "result_resource_id",
 }
 
 
@@ -77,11 +85,17 @@ def register_schema(client: Any, subject: str, schema_path: str) -> int:
 
 
 def get_avro_serializer(client: Any, schema_path: str) -> Any:
-    """Return an AvroSerializer for the given .avsc file."""
+    """Return an AvroSerializer for the given .avsc file.
+
+    auto.register.schemas is forced OFF — schema registration is now
+    owned by `make register-schemas` (scripts/register_sr_schemas.py)
+    so the FORWARD compatibility check we set on the subject cannot be
+    bypassed by an auto-register at produce time.
+    """
     from confluent_kafka.schema_registry.avro import AvroSerializer  # type: ignore
     with open(schema_path) as f:
         schema_str = f.read()
-    return AvroSerializer(client, schema_str)
+    return AvroSerializer(client, schema_str, conf={"auto.register.schemas": False})
 
 
 def project_enriched(event: dict[str, Any]) -> dict[str, Any]:

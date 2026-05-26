@@ -146,6 +146,7 @@ _CRITICAL_METHODS_DEFAULT = {
 
     # Flink Operations
     'DeleteFlinkCompute',
+    'DeleteComputePool',
     'DeleteFlinkStatement',
     'DeleteStatement',  # General statement deletion
 
@@ -412,9 +413,13 @@ _MEDIUM_METHODS_DEFAULT = {
 
     # Flink Operations
     'CreateFlinkCompute',
+    'CreateComputePool',
     'UpdateFlinkCompute',
+    'UpdateComputePool',
     'CreateFlinkStatement',
+    'CreateStatement',
     'UpdateFlinkStatement',
+    'UpdateStatement',
 
     # Schema Registry
     'CreateSchema',
@@ -446,6 +451,7 @@ _MEDIUM_METHODS_DEFAULT = {
 
     # Workspace Operations
     'PatchWorkspace',
+    'UpdateWorkspace',
 
     # Integration Updates
     'UpdateIntegration',
@@ -601,6 +607,26 @@ _READ_ONLY_METHODS_DEFAULT = {
     # Tableflow OAuth token fetches — read-only, high-volume Flink/Tableflow
     # internals; previously hit the unclassified-method catch-all.
     'TableflowOAuthTokens',
+
+    # Drift gaps observed in production traffic (2026-05 schema audit).
+    # Confluent's API surface renames + read-only methods previously falling
+    # through to the unclassified catch-all.
+    'GetComputePool',
+    'TableflowCatalogConfig',
+    'ListTableFlowCatalog',
+    'TableflowGetCatalog',
+    'TableflowListCatalogs',
+    'GetPrivateLinkAccesses',
+    'GetPrivateLinkAccess',
+    'GetPeerings',
+    'GetPeering',
+    'ListIntegrations',
+    'GetIntegration',
+    'GetSchemaRegistryCluster',
+    'GetInvitations',
+    'GetInvitation',
+    'GetSSOConnection',
+    'ListSSOConnections',
 }
 
 READ_ONLY_METHODS = _get_methods('read_only_methods', _READ_ONLY_METHODS_DEFAULT)
