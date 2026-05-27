@@ -2,7 +2,7 @@
   "type": "record",
   "namespace": "io.confluent.auditlens",
   "name": "AuditEnrichedEvent",
-  "doc": "Post-enrichment audit event emitted on audit.enriched.v1. Mirrors the audit_events Postgres row + a small envelope. Shared field types match the prior src/schema/audit_enriched_v1.avsc exactly (consolidation 2026-05-26) so producers and consumers see the same wire shape they had before. New fields are nullable with default null so the schema can evolve forward without breaking existing consumers.",
+  "doc": "Post-enrichment audit event emitted on audit.enriched.v1. Mirrors the audit_events Postgres row + a small envelope. All data fields are nullable with default null so producers can omit fields when the source event lacks them — the only required wire field is event_fingerprint, which is always set by build_enriched_event(). _schema_version is non-nullable metadata.",
   "fields": [
     {
       "name": "_schema_version",
@@ -12,33 +12,33 @@
     },
     {
       "name": "schema_version",
-      "type": "string",
-      "default": "audit.enriched.v1",
+      "type": ["null", "string"],
+      "default": null,
       "doc": "Topic-contract identifier. build_enriched_event() always sets this to 'audit.enriched.v1'."
     },
     {
       "name": "pipeline_stage",
-      "type": "string",
-      "default": "enriched",
+      "type": ["null", "string"],
+      "default": null,
       "doc": "Forwarder pipeline stage that produced the event. Always 'enriched' on this topic."
     },
     {
       "name": "event_contract_version",
-      "type": "string",
-      "default": "v1",
+      "type": ["null", "string"],
+      "default": null,
       "doc": "Logical contract version of the enrichment shape. Always 'v1' on this topic."
     },
     {
       "name": "ingested_at",
       "type": ["null", {"type": "long", "logicalType": "timestamp-millis"}],
       "default": null,
-      "doc": "When the forwarder consumed this event from the source audit topic. UTC milliseconds. NEW field — nullable with default null for forward compatibility."
+      "doc": "When the forwarder consumed this event from the source audit topic. UTC milliseconds."
     },
     {
       "name": "methodName",
       "type": ["null", "string"],
       "default": null,
-      "doc": "Raw Confluent methodName from the source audit event (e.g. 'kafka.CreateTopics', 'mds.Authorize'). Duplicates the normalized 'action' field for consumers that want the unaltered string. NEW field — nullable."
+      "doc": "Raw Confluent methodName from the source audit event (e.g. 'kafka.CreateTopics', 'mds.Authorize'). Duplicates the normalized 'action' field for consumers that want the unaltered string."
     },
     {
       "name": "event_fingerprint",
@@ -47,17 +47,20 @@
     },
     {
       "name": "timestamp",
-      "type": "string",
-      "doc": "ISO 8601 UTC string. nullable=false in Postgres and required on the wire — build_enriched_event() always sets it from the source event's time field."
+      "type": ["null", "string"],
+      "default": null,
+      "doc": "ISO 8601 UTC string. nullable=false in Postgres but nullable on the wire — null tolerated for source events with malformed/missing time fields."
     },
     {
       "name": "result",
-      "type": "string",
+      "type": ["null", "string"],
+      "default": null,
       "doc": "Coarse outcome enum: 'Success' | 'Failure'. Derived from data.result.status / authorizationInfo.result."
     },
     {
       "name": "actor",
-      "type": "string",
+      "type": ["null", "string"],
+      "default": null,
       "doc": "Resolved principal — usually 'u-xxxxxx' or 'sa-xxxxxx', email, or a fallback raw ID."
     },
     {
@@ -104,33 +107,38 @@
     },
     {
       "name": "action",
-      "type": "string",
+      "type": ["null", "string"],
+      "default": null,
       "doc": "Normalized action string used by the API filters. Usually equals methodName."
     },
     {
       "name": "normalized_action",
-      "type": "string",
+      "type": ["null", "string"],
+      "default": null,
       "doc": "Human-readable verbed action (e.g. 'Created topic', 'Deleted ACL'). Used by event_summary."
     },
     {
       "name": "action_category",
-      "type": "string",
+      "type": ["null", "string"],
+      "default": null,
       "doc": "Coarse category — 'Create' | 'Delete' | 'Update' | 'Read' | 'Authentication' | 'Authorization' | 'Other'."
     },
     {
       "name": "resource_type",
-      "type": "string",
+      "type": ["null", "string"],
+      "default": null,
       "doc": "Canonical Confluent resource type (e.g. 'topic', 'environment', 'service_account', 'api_key')."
     },
     {
       "name": "resource_name",
-      "type": "string",
+      "type": ["null", "string"],
+      "default": null,
       "doc": "Resource identifier as extracted from CRN / cloudResources / resourceName."
     },
     {
       "name": "resource_display",
       "type": "string",
-      "doc": "Human-readable short form of resource_name (e.g. CRN tail)."
+      "doc": "Human-readable short form of resource_name (e.g. CRN tail). Non-nullable; build_enriched_event always sets a value (often 'Unknown' fallback)."
     },
     {
       "name": "cluster_id",
@@ -226,7 +234,7 @@
       "name": "production_hint",
       "type": ["null", "string"],
       "default": null,
-      "doc": "Production-likelihood inferred from resource name — 'production_likely' | 'non_production_likely' | 'unknown'. STRING (not boolean) despite earlier spec phrasing — see audit/audit_report 2026-05-25."
+      "doc": "Production-likelihood inferred from resource name — 'production_likely' | 'non_production_likely' | 'unknown'. STRING (not boolean) despite earlier spec phrasing."
     },
     {
       "name": "flink_region",
@@ -242,119 +250,134 @@
     },
     {
       "name": "signal_type",
-      "type": "string",
+      "type": ["null", "string"],
+      "default": null,
       "doc": "AuditLens 4-tier signal classification. Values: 'action_required' (investigate immediately), 'attention' (review soon), 'informational' (low priority), 'noise' (suppressed). Primary filter field for Flink jobs."
     },
     {
       "name": "signal_reason",
-      "type": "string",
+      "type": ["null", "string"],
+      "default": null,
       "doc": "Reason code for the signal_type — e.g. 'denied_access', 'destructive_change', 'access_changed', 'config_changed', 'read_only_lookup', 'auth_noise', 'platform_automation', 'unknown'."
     },
     {
       "name": "impact_type",
-      "type": "string",
+      "type": ["null", "string"],
+      "default": null,
       "doc": "Coarse impact — 'constructive' | 'destructive' | 'configuration_change' | 'access_change' | 'authentication' | 'authorization_check' | 'read_only' | 'operational' | 'security_sensitive' | 'unknown'."
     },
     {
       "name": "risk_level",
-      "type": "string",
+      "type": ["null", "string"],
+      "default": null,
       "doc": "Risk score — 'critical' | 'high' | 'medium' | 'low' | 'informational'."
     },
     {
       "name": "change_type",
-      "type": "string",
+      "type": ["null", "string"],
+      "default": null,
       "doc": "Verb category — 'created' | 'updated' | 'deleted' | 'configured' | 'denied' | 'authenticated' | 'authorized' | 'read/listed' | 'unknown'."
     },
     {
       "name": "resource_family",
-      "type": "string",
+      "type": ["null", "string"],
+      "default": null,
       "doc": "Resource-family family (e.g. 'topic', 'schema_registry', 'service_account', 'api_key', 'rbac', 'acl')."
     },
     {
       "name": "event_title",
-      "type": "string",
+      "type": ["null", "string"],
+      "default": null,
       "doc": "Short human-readable title (e.g. 'API key created')."
     },
     {
       "name": "event_summary",
-      "type": "string",
+      "type": ["null", "string"],
+      "default": null,
       "doc": "One-sentence English description suitable for inline display."
     },
     {
       "name": "decision_reason",
-      "type": "string",
+      "type": ["null", "string"],
+      "default": null,
       "doc": "Why the signal classifier arrived at signal_type."
     },
     {
       "name": "decision_label",
-      "type": "string",
+      "type": ["null", "string"],
+      "default": null,
       "doc": "UI badge label — 'Action Needed' | 'Review' | 'Info' | 'Noise'."
     },
     {
       "name": "recommended_action",
-      "type": "string",
+      "type": ["null", "string"],
+      "default": null,
       "doc": "Short operator-facing recommendation."
     },
     {
       "name": "auth_granted",
       "type": ["null", "boolean"],
       "default": null,
-      "doc": "Flattened authorizationInfo.granted from the source payload. True = allowed, False = denied, null = field absent. NEW field — nullable with default null."
+      "doc": "Flattened authorizationInfo.granted. True = allowed, False = denied, null = field absent."
     },
     {
       "name": "auth_operation",
       "type": ["null", "string"],
       "default": null,
-      "doc": "Flattened authorizationInfo.operation (e.g. 'WRITE', 'CREATE', 'DESCRIBE'). NEW field — nullable."
+      "doc": "Flattened authorizationInfo.operation (e.g. 'WRITE', 'CREATE', 'DESCRIBE')."
     },
     {
       "name": "auth_resource_type",
       "type": ["null", "string"],
       "default": null,
-      "doc": "Flattened authorizationInfo.resourceType. NEW field — nullable."
+      "doc": "Flattened authorizationInfo.resourceType."
     },
     {
       "name": "auth_pattern_type",
       "type": ["null", "string"],
       "default": null,
-      "doc": "Flattened authorizationInfo.patternType. NEW field — nullable."
+      "doc": "Flattened authorizationInfo.patternType."
     },
     {
       "name": "result_resource_id",
       "type": ["null", "string"],
       "default": null,
-      "doc": "Flattened result.data.id — the resource id created or mutated by this event. NEW field — nullable."
+      "doc": "Flattened result.data.id — the resource id created or mutated by this event."
     },
     {
       "name": "access_type",
       "type": ["null", "string"],
       "default": null,
-      "doc": "Flattened data.request.accessType from Confluent's v1.2 schema — 'UNKNOWN' | 'READ_ONLY' | 'MODIFICATION'. NEW field — nullable."
+      "doc": "Flattened data.request.accessType from Confluent's v1.2 schema — 'UNKNOWN' | 'READ_ONLY' | 'MODIFICATION'."
     },
     {
       "name": "summary",
-      "type": "string",
+      "type": ["null", "string"],
+      "default": null,
       "doc": "Free-form summary text — usually a templated sentence built by humanize_action()."
     },
     {
       "name": "is_failure",
-      "type": "boolean",
+      "type": ["null", "boolean"],
+      "default": null,
       "doc": "True when result indicates failure (Failure / 404 / not_found / error / denied / forbid / unauthorized)."
     },
     {
       "name": "is_denied",
-      "type": "boolean",
+      "type": ["null", "boolean"],
+      "default": null,
       "doc": "True when authorizationInfo.granted is False OR data.result.status / data.authorizationInfo.result is DENY / FAILURE / UNAUTHENTICATED."
     },
     {
       "name": "is_routine_noise",
-      "type": "boolean",
+      "type": ["null", "boolean"],
+      "default": null,
       "doc": "True when the event was classified as routine bulk noise (kafka.Fetch, mds.Authorize allowed, etc.)."
     },
     {
       "name": "is_high_risk",
-      "type": "boolean",
-      "default": false,
+      "type": ["null", "boolean"],
+      "default": null,
       "doc": "True when criticality is CRITICAL or methodName is in HIGH_RISK_SIGNAL_METHODS. Set by build_enriched_event()."
     }
   ]
