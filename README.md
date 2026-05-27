@@ -2,6 +2,8 @@
 
 Self-hosted audit intelligence for Confluent Cloud. AuditLens consumes your organisation's audit log topic, classifies every event by signal priority (action required / attention / informational / noise), enriches actors with real display names, and surfaces what matters through a real-time dashboard built for security and operations teams.
 
+**Repo:** https://github.com/jegan-confluent/auditlens
+
 No data leaves your deployment. No telemetry. No phone-home.
 
 ---
@@ -14,6 +16,7 @@ No data leaves your deployment. No telemetry. No phone-home.
 - Bulk-noise short circuit bypasses full pipeline for high-volume routine methods (mds.Authorize, kafka.Fetch, schema-registry.Authentication, etc.) — saves ~83% of processor work
 - Two-table storage split routes noise to a lean `audit_events_noise` table and signal events to `audit_events`
 - Multi-topic Kafka routing writes classified events to `audit.raw.v1`, `audit.enriched.v1`, `audit.signals.*`, `audit.dlq.v1`
+- Avro serialization for `audit.enriched.v1` with FORWARD compatibility when Schema Registry is configured; falls back to JSON when SR is absent or unreachable
 - Event fingerprinting prevents duplicate writes on consumer replay
 - Priority queue lanes (critical / normal / bulk / catalog) with configurable sizes
 - Resource snapshot extracted at ingest time — type, name, cluster, environment, blast radius hint
@@ -50,6 +53,7 @@ No data leaves your deployment. No telemetry. No phone-home.
 - Resource Catalog page — searchable inventory of all resources seen in audit events, grouped by type
 - System page — consumer lag, DB writer state, pipeline lag, queue depths, storage usage, effective retention
 - Settings page — tabs for retention, cold storage, notifications, schema registry, tableflow, actor mappings
+- Stream Output tab in Settings: lists every output topic with its live serialization mode (Avro vs JSON) and provides a Flink SQL quickstart with pre-filled DDL and copy-ready sample queries
 - Action alert banner when `action_required` events are present in the current window
 - Pipeline lag banner when forwarder → DB write lag is detected
 - Recurring patterns panel — surfaces high-frequency (actor, action, resource) combinations automatically
@@ -60,7 +64,7 @@ No data leaves your deployment. No telemetry. No phone-home.
 - Per-destination digest mode (daily summary) and per-destination rate limiting with burst suppression
 - Per-signal-type and per-action-category filter rules
 - Alert deduplication and retry on transient failures
-- Test notification button in Settings UI
+- Test notification button in Settings UI — fires real messages to every enabled destination (not just a module-import check) so operators can verify wiring before relying on alerts
 - AlertManager in production compose for metric-based alerting rules
 
 ### F. Storage & Retention
@@ -85,6 +89,7 @@ No data leaves your deployment. No telemetry. No phone-home.
 - Bearer token auth with three roles: `viewer`, `responder`, `admin` (opt-in, recommended for any non-local use)
 - AES-256-GCM encryption for all secrets stored in the database; never returned in plaintext from any endpoint
 - HMAC constant-time token comparison prevents timing attacks
+- Admin audit log: every admin action (setting change, schema register, backfill, retention edit) is written to the `admin_audit_log` table automatically — SOC2-ready trail
 - Content-Security-Policy, X-Frame-Options, Referrer-Policy headers on every response
 - Per-IP rate limiting on all endpoints
 - All container ports bound to `127.0.0.1` by default — not externally reachable without explicit configuration
@@ -97,7 +102,6 @@ No data leaves your deployment. No telemetry. No phone-home.
 - Interactive `./setup` wizard with checkpoint / resume — collects credentials, validates Kafka connectivity, generates `.env` and `.secrets`, starts services
 - Optional Confluent Cloud API key step lists the Standard / Dedicated clusters in your org for reference (Basic clusters are filtered out) — informational only; the audit-log cluster bootstrap is sourced from the Confluent Cloud audit-logs page
 - `make start / stop / restart / status / deploy / migrate / test / help`
-- SQLite demo mode with seeded sample events — no Kafka credentials required (opt-in)
 - Profile-based Docker Compose — `postgres`, `observability`, `dev` profiles for optional services
 - EC2 / VM deployment via `make deploy` (rsync + rebuild)
 - All service ports overridable via environment variables
@@ -105,6 +109,7 @@ No data leaves your deployment. No telemetry. No phone-home.
 ### J. Integrations
 
 - Schema Registry — endpoint and credentials configurable in Settings with live status check (opt-in)
+- Schema Registry self-service: register the AuditLens Avro schemas (`audit.enriched.v1` plus signal / alert / DLQ subjects) and detect drift between on-disk `.avsc` and the registered version — all from the Settings UI, no SSH required
 - Tableflow — Iceberg / Delta Lake export with in-UI prerequisite checking; AWS + Azure clusters (Dedicated, Enterprise, or Freight) with Schema Registry enabled
 - Confluent Cloud Admin API for IAM lookups and cluster discovery (opt-in, requires `CONFLUENT_CLOUD_API_KEY`)
 
@@ -189,13 +194,6 @@ http://localhost:3000
 ```
 
 You'll see the Dashboard with signal counts, top actors, and the event volume chart. Tables stay empty until the forwarder has consumed events from your audit topic.
-
-**No Kafka? SQLite demo mode:**
-
-```bash
-scripts/run_sqlite_demo.sh
-# Open http://127.0.0.1:3000
-```
 
 ---
 
@@ -354,6 +352,20 @@ Terraform configurations for AWS and GCP are in `deploy/`. They're provided as s
 - AuditLens has no telemetry and no phone-home. The only outbound connections are to your Confluent Kafka endpoint and (when explicitly enabled) `api.confluent.cloud`.
 
 See [SECURITY.md](SECURITY.md) for the full hardening guide, including reverse-proxy configuration, network firewall rules, secrets management, and container hardening notes.
+
+---
+
+## Roadmap
+
+**Coming next**
+
+- Flink SQL downstream analytics — sliding-window denial rate and cross-environment actor correlation using `audit.enriched.v1` (Avro schema already registered in Schema Registry)
+- Tableflow / Iceberg archival — long-term retention queryable from Snowflake, Athena, and Databricks (endpoints wired, prerequisites UI live)
+
+**Later**
+
+- MCP server — expose AuditLens data to LLM agents via 9 defined tools
+- OIDC / SSO authentication — current auth is bearer-token; OIDC upgrade planned
 
 ---
 
