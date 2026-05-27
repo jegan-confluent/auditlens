@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+import httpx
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -197,7 +198,7 @@ def _get_sr_creds(db: Session) -> tuple[str, str, str]:
 
 
 @router.get("/settings/schema_registry/status")
-def get_sr_status(
+async def get_sr_status(
     _: None = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> dict:
@@ -211,34 +212,35 @@ def get_sr_status(
             "drift_detected": False,
             "drift_detail": None,
         }
+    base = _sr_base(url)
+    auth = _sr_auth(api_key, api_secret)
     try:
-        from confluent_kafka.schema_registry import SchemaRegistryClient  # type: ignore[import-untyped]
-        conf: dict = {"url": url}
-        if api_key and api_secret:
-            conf["basic.auth.user.info"] = f"{api_key}:{api_secret}"
-        client = SchemaRegistryClient(conf)
-        subject_names: list[str] = client.get_subjects()
         # N+1 calls — fine for typical SR with <20 subjects per cluster.
-        # Each call is a small REST round-trip; serialising them keeps the
-        # endpoint simple and the SR client is sync-only anyway.
-        subjects: list[dict] = []
-        enriched_registered_schema_str: str | None = None
-        for name in subject_names:
-            try:
-                latest = client.get_latest_version(name)
-                subjects.append({
-                    "name": name,
-                    "schema_id": latest.schema_id,
-                    "version": latest.version,
-                })
-                if name == "audit.enriched.v1-value":
-                    # Capture the registered schema string so we can
-                    # compare it to the on-disk .avsc for drift detection.
-                    enriched_registered_schema_str = getattr(latest.schema, "schema_str", None)
-            except Exception:
-                # Subject exists but the latest-version probe failed
-                # (rare — usually permissions). Surface the name only.
-                subjects.append({"name": name, "schema_id": None, "version": None})
+        # AsyncClient keeps the connection pool warm for the inner loop.
+        async with httpx.AsyncClient(auth=auth, timeout=_SR_TIMEOUT_SECONDS) as client:
+            resp = await client.get(f"{base}/subjects")
+            resp.raise_for_status()
+            subject_names: list[str] = resp.json() or []
+
+            subjects: list[dict] = []
+            enriched_registered_schema_str: str | None = None
+            for name in subject_names:
+                latest = await client.get(f"{base}/subjects/{name}/versions/latest")
+                if latest.status_code == 200:
+                    body = latest.json()
+                    subjects.append({
+                        "name": name,
+                        "schema_id": body.get("id"),
+                        "version": body.get("version"),
+                    })
+                    if name == "audit.enriched.v1-value":
+                        # Capture the registered schema string so we can
+                        # compare it to the on-disk .avsc for drift detection.
+                        enriched_registered_schema_str = body.get("schema")
+                else:
+                    # Subject exists but the latest-version probe failed
+                    # (rare — usually permissions). Surface the name only.
+                    subjects.append({"name": name, "schema_id": None, "version": None})
 
         drift_detected, drift_detail = _compute_sr_drift(enriched_registered_schema_str)
 
@@ -249,15 +251,6 @@ def get_sr_status(
             "error": None,
             "drift_detected": drift_detected,
             "drift_detail": drift_detail,
-        }
-    except ImportError:
-        return {
-            "configured": True,
-            "url": url,
-            "subjects": [],
-            "error": "confluent-kafka not installed",
-            "drift_detected": False,
-            "drift_detail": None,
         }
     except Exception as exc:
         return {
@@ -304,25 +297,22 @@ def _compute_sr_drift(registered_schema_str: str | None) -> tuple[bool, str | No
 
 
 @router.post("/settings/test_sr")
-def test_sr(
+async def test_sr(
     _: None = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> dict:
     url, api_key, api_secret = _get_sr_creds(db)
     if not url:
         return {"ok": False, "latency_ms": None, "error": "Schema Registry URL not configured"}
+    base = _sr_base(url)
+    auth = _sr_auth(api_key, api_secret)
     try:
-        from confluent_kafka.schema_registry import SchemaRegistryClient  # type: ignore[import-untyped]
-        conf: dict = {"url": url}
-        if api_key and api_secret:
-            conf["basic.auth.user.info"] = f"{api_key}:{api_secret}"
-        client = SchemaRegistryClient(conf)
         t0 = time.monotonic()
-        client.get_subjects()
+        async with httpx.AsyncClient(auth=auth, timeout=_SR_TIMEOUT_SECONDS) as client:
+            resp = await client.get(f"{base}/subjects")
+            resp.raise_for_status()
         latency_ms = round((time.monotonic() - t0) * 1000)
         return {"ok": True, "latency_ms": latency_ms, "error": None}
-    except ImportError:
-        return {"ok": False, "latency_ms": None, "error": "confluent-kafka not installed"}
     except Exception as exc:
         return {"ok": False, "latency_ms": None, "error": str(exc)}
 
@@ -334,6 +324,37 @@ def test_sr(
 # the enriched schema is loaded from disk so there's only ONE copy of that.
 
 _SR_AVRO_NAMESPACE = "io.confluent.auditlens"
+
+# SR REST API timeout + content type. The API container only has httpx
+# (no confluent-kafka), so all SR calls go through the REST endpoint
+# directly. application/vnd.schemaregistry.v1+json is the spec content
+# type; Confluent Cloud also accepts application/json but the vendor
+# media type is what `confluent_kafka.schema_registry` ships.
+_SR_TIMEOUT_SECONDS = 15.0
+_SR_CONTENT_TYPE = "application/vnd.schemaregistry.v1+json"
+
+
+def _sr_base(url: str) -> str:
+    return url.rstrip("/")
+
+
+def _sr_auth(api_key: str, api_secret: str) -> tuple[str, str] | None:
+    return (api_key, api_secret) if api_key and api_secret else None
+
+
+def _canonical_avro(schema_str: str) -> str:
+    """Deterministic JSON for skip-detection.
+
+    SR has its own normalization (default-value handling, etc), so a
+    false UPDATED is harmless — it just triggers a POST that SR will
+    dedupe back to the same schema_id. We only use this for the
+    pre-POST short-circuit so a benign whitespace difference does not
+    bump the version.
+    """
+    try:
+        return json.dumps(json.loads(schema_str), sort_keys=True, separators=(",", ":"))
+    except (json.JSONDecodeError, TypeError):
+        return schema_str
 
 
 def _sr_signal_schema(record_name: str, doc: str) -> str:
@@ -433,13 +454,6 @@ def _sr_dlq_schema() -> str:
     })
 
 
-def _sr_not_found(exc) -> bool:
-    return (
-        getattr(exc, "error_code", None) == 40401
-        or getattr(exc, "http_status_code", None) == 404
-    )
-
-
 def _sr_enriched_avsc_path() -> Path:
     """Resolve the runtime location of audit_enriched_v1.avsc.
 
@@ -457,25 +471,23 @@ def _sr_enriched_avsc_path() -> Path:
 
 
 @router.post("/settings/schema_registry/register")
-def register_sr_schemas(
+async def register_sr_schemas(
     _: None = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> dict:
     """Register Avro schemas for every AuditLens-produced topic with SR.
-    Mirrors `make register-schemas`. Idempotent — SR's content-hash dedup
-    means re-running this with no schema change reports SKIPPED.
-    Sets FORWARD compatibility on audit.enriched.v1-value only; other
-    subjects keep the registry default (BACKWARD).
+    Mirrors `make register-schemas`. Idempotent — when the on-disk schema
+    already matches the registered latest version we short-circuit before
+    POSTing and report SKIPPED. Sets FORWARD compatibility on
+    audit.enriched.v1-value only; other subjects keep the registry
+    default (BACKWARD).
+
+    The API container ships httpx but not confluent-kafka, so this calls
+    the SR REST API directly.
     """
     url, api_key, api_secret = _get_sr_creds(db)
     if not url:
         raise HTTPException(status_code=400, detail="Schema Registry URL not configured")
-
-    try:
-        from confluent_kafka.schema_registry import Schema, SchemaRegistryClient  # type: ignore[import-untyped]
-        from confluent_kafka.schema_registry.error import SchemaRegistryError  # type: ignore[import-untyped]
-    except ImportError:
-        raise HTTPException(status_code=500, detail="confluent-kafka not installed")
 
     enriched_path = _sr_enriched_avsc_path()
     if not enriched_path.is_file():
@@ -495,65 +507,115 @@ def register_sr_schemas(
         ("audit.dlq.v1-value",              _sr_dlq_schema(),                                                   None),
     ]
 
-    conf: dict = {"url": url}
-    if api_key and api_secret:
-        conf["basic.auth.user.info"] = f"{api_key}:{api_secret}"
-    client = SchemaRegistryClient(conf)
+    base = _sr_base(url)
+    auth = _sr_auth(api_key, api_secret)
+    headers = {"Content-Type": _SR_CONTENT_TYPE, "Accept": _SR_CONTENT_TYPE}
 
     results: list[dict[str, Any]] = []
     overall_ok = True
-    for subject, schema_str, compat_level in plan:
-        try:
-            try:
-                pre = client.get_latest_version(subject)
-            except SchemaRegistryError as exc:
-                if _sr_not_found(exc):
-                    pre = None
-                else:
-                    raise
-
-            schema_id = client.register_schema(subject, Schema(schema_str, schema_type="AVRO"))
-            post = client.get_latest_version(subject)
-
-            if pre is None:
-                status = "registered"
-            elif pre.schema_id == schema_id:
-                status = "skipped"
-            else:
-                status = "updated"
-
-            applied_compat: str | None = None
-            compat_error: str | None = None
-            if compat_level:
-                try:
-                    client.set_compatibility(subject_name=subject, level=compat_level)
-                    applied_compat = compat_level
-                except Exception as exc:
-                    overall_ok = False
-                    compat_error = f"compatibility {compat_level} not set: {exc}"
-
-            results.append({
-                "subject": subject,
-                "status": status,
-                "schema_id": schema_id,
-                "version": post.version,
-                "previous_version": pre.version if pre else None,
-                "compatibility": applied_compat,
-                "error": compat_error,
-            })
-        except Exception as exc:
-            overall_ok = False
-            results.append({
-                "subject": subject,
-                "status": "error",
-                "schema_id": None,
-                "version": None,
-                "previous_version": None,
-                "compatibility": None,
-                "error": str(exc),
-            })
+    async with httpx.AsyncClient(auth=auth, timeout=_SR_TIMEOUT_SECONDS, headers=headers) as client:
+        for subject, schema_str, compat_level in plan:
+            result = await _register_one_subject(client, base, subject, schema_str, compat_level)
+            if result["status"] == "error" or result.get("error"):
+                overall_ok = False
+            results.append(result)
 
     return {"results": results, "success": overall_ok}
+
+
+async def _register_one_subject(
+    client: httpx.AsyncClient,
+    base: str,
+    subject: str,
+    schema_str: str,
+    compat_level: str | None,
+) -> dict[str, Any]:
+    """One subject's worth of work: probe → maybe skip → maybe POST →
+    set compatibility. Always returns a fully shaped result dict; never
+    raises, so the outer loop can keep going on per-subject failures."""
+    pre_id: int | None = None
+    pre_version: int | None = None
+    pre_schema_str: str | None = None
+    try:
+        latest_resp = await client.get(f"{base}/subjects/{subject}/versions/latest")
+        if latest_resp.status_code == 200:
+            body = latest_resp.json()
+            pre_id = body.get("id")
+            pre_version = body.get("version")
+            pre_schema_str = body.get("schema")
+        elif latest_resp.status_code != 404:
+            latest_resp.raise_for_status()
+    except Exception as exc:
+        return {
+            "subject": subject, "status": "error", "schema_id": None,
+            "version": None, "previous_version": None, "compatibility": None,
+            "error": f"latest probe failed: {exc}",
+        }
+
+    # Skip path: registered version's schema content already matches.
+    if pre_schema_str is not None and _canonical_avro(pre_schema_str) == _canonical_avro(schema_str):
+        applied_compat, compat_error = await _maybe_set_compat(client, base, subject, compat_level)
+        return {
+            "subject": subject, "status": "skipped", "schema_id": pre_id,
+            "version": pre_version, "previous_version": pre_version,
+            "compatibility": applied_compat, "error": compat_error,
+        }
+
+    # POST a new (or first-ever) version.
+    try:
+        post_resp = await client.post(
+            f"{base}/subjects/{subject}/versions",
+            json={"schema": schema_str, "schemaType": "AVRO"},
+        )
+        post_resp.raise_for_status()
+        new_id = post_resp.json().get("id")
+    except Exception as exc:
+        return {
+            "subject": subject, "status": "error", "schema_id": None,
+            "version": None, "previous_version": pre_version,
+            "compatibility": None, "error": f"register failed: {exc}",
+        }
+
+    # Re-probe for the resulting version number. Non-fatal on failure —
+    # we still have the schema_id from the POST response.
+    post_version: int | None = None
+    try:
+        latest2 = await client.get(f"{base}/subjects/{subject}/versions/latest")
+        if latest2.status_code == 200:
+            post_version = latest2.json().get("version")
+    except Exception:
+        pass
+
+    status = "updated" if pre_id is not None else "registered"
+    applied_compat, compat_error = await _maybe_set_compat(client, base, subject, compat_level)
+    return {
+        "subject": subject,
+        "status": status,
+        "schema_id": new_id,
+        "version": post_version,
+        "previous_version": pre_version,
+        "compatibility": applied_compat,
+        "error": compat_error,
+    }
+
+
+async def _maybe_set_compat(
+    client: httpx.AsyncClient,
+    base: str,
+    subject: str,
+    compat_level: str | None,
+) -> tuple[str | None, str | None]:
+    if not compat_level:
+        return None, None
+    try:
+        resp = await client.put(
+            f"{base}/config/{subject}",
+            json={"compatibility": compat_level},
+        )
+        resp.raise_for_status()
+        return compat_level, None
+    except Exception as exc:
+        return None, f"compatibility {compat_level} not set: {exc}"
 
 
 # ──────────── Stream Output info (for the Stream Output settings tab) ────────────
@@ -580,7 +642,7 @@ _TOPIC_ENV_VARS = {
 
 
 @router.get("/settings/stream_output/info")
-def stream_output_info(
+async def stream_output_info(
     _: None = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> dict:
@@ -604,21 +666,15 @@ def stream_output_info(
     sr_error: str | None = None
 
     if sr_configured:
+        base = _sr_base(url)
+        auth = _sr_auth(api_key, api_secret)
         try:
-            from confluent_kafka.schema_registry import SchemaRegistryClient  # type: ignore[import-untyped]
-            from confluent_kafka.schema_registry.error import SchemaRegistryError  # type: ignore[import-untyped]
-            conf: dict = {"url": url}
-            if api_key and api_secret:
-                conf["basic.auth.user.info"] = f"{api_key}:{api_secret}"
-            client = SchemaRegistryClient(conf)
-            try:
-                client.get_latest_version(enriched_subject)
-                enriched_avro_ready = True
-            except SchemaRegistryError as exc:
-                if not _sr_not_found(exc):
-                    sr_error = str(exc)
-        except ImportError:
-            sr_error = "confluent-kafka not installed"
+            async with httpx.AsyncClient(auth=auth, timeout=_SR_TIMEOUT_SECONDS) as client:
+                resp = await client.get(f"{base}/subjects/{enriched_subject}/versions/latest")
+                if resp.status_code == 200:
+                    enriched_avro_ready = True
+                elif resp.status_code != 404:
+                    sr_error = f"HTTP {resp.status_code}"
         except Exception as exc:
             sr_error = str(exc)
 
