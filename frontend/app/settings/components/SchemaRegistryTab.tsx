@@ -3,17 +3,40 @@
 import { useEffect, useState } from "react";
 import { apiDelete, apiGet, apiPost, apiPut, SaveStatus } from "./shared";
 
+type SrSubject = {
+  name: string;
+  schema_id: number | null;
+  version: number | null;
+};
+
 type SrStatus = {
   configured: boolean;
   url: string | null;
-  subjects: string[];
+  subjects: SrSubject[];
   error: string | null;
+  drift_detected?: boolean;
+  drift_detail?: string | null;
 };
 
 type SrTestResult = {
   ok: boolean;
   latency_ms: number | null;
   error: string | null;
+};
+
+type RegisterResult = {
+  subject: string;
+  status: "registered" | "skipped" | "updated" | "error";
+  schema_id: number | null;
+  version: number | null;
+  previous_version: number | null;
+  compatibility: string | null;
+  error: string | null;
+};
+
+type RegisterResponse = {
+  results: RegisterResult[];
+  success: boolean;
 };
 
 export function SchemaRegistryTab() {
@@ -28,6 +51,9 @@ export function SchemaRegistryTab() {
   const [testResult, setTestResult] = useState<SrTestResult | null>(null);
   const [testing, setTesting] = useState(false);
   const [removing, setRemoving] = useState(false);
+  const [registering, setRegistering] = useState(false);
+  const [registerResults, setRegisterResults] = useState<RegisterResult[] | null>(null);
+  const [registerError, setRegisterError] = useState<string | null>(null);
 
   function loadStatus() {
     setLoading(true);
@@ -77,11 +103,28 @@ export function SchemaRegistryTab() {
       await apiDelete("/settings/schema_registry/api_key");
       await apiDelete("/settings/schema_registry/api_secret");
       setTestResult(null);
+      setRegisterResults(null);
       loadStatus();
     } catch {
       // best effort
     } finally {
       setRemoving(false);
+    }
+  }
+
+  async function onRegister() {
+    setRegistering(true);
+    setRegisterError(null);
+    setRegisterResults(null);
+    try {
+      const r = (await apiPost("/settings/schema_registry/register")) as RegisterResponse;
+      setRegisterResults(r.results);
+      // Re-fetch status so subject versions reflect the new registrations.
+      loadStatus();
+    } catch (e) {
+      setRegisterError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRegistering(false);
     }
   }
 
@@ -103,17 +146,74 @@ export function SchemaRegistryTab() {
           <p className="settings-info">
             Schema Registry URL: <code>{status.url}</code>
           </p>
+          {status.drift_detected && (
+            <div
+              style={{
+                background: "var(--panel)",
+                border: "1px solid var(--warning)",
+                color: "var(--warning)",
+                padding: "8px 12px",
+                borderRadius: 6,
+                margin: "10px 0",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 12,
+                fontSize: "0.9em",
+              }}
+            >
+              <span>
+                ⚠ {status.drift_detail ?? "Local schema differs from registered version."}
+              </span>
+              <button
+                className="settings-save-btn"
+                onClick={onRegister}
+                disabled={registering}
+                style={{ flex: "0 0 auto" }}
+              >
+                {registering ? "Registering…" : "Register schemas →"}
+              </button>
+            </div>
+          )}
           {status.subjects.length > 0 && (
             <div className="settings-field">
               <label className="settings-label">Registered subjects</label>
-              <ul style={{ margin: "4px 0 0 16px", fontSize: "0.85em", color: "var(--muted)" }}>
-                {status.subjects.map((s) => <li key={s}>{s}</li>)}
-              </ul>
+              <table style={{ marginTop: 6, fontSize: "0.85em", borderCollapse: "collapse", width: "100%", maxWidth: 540 }}>
+                <thead>
+                  <tr style={{ color: "var(--muted)", textAlign: "left" }}>
+                    <th style={{ padding: "4px 8px", borderBottom: "1px solid var(--border)" }}>Subject</th>
+                    <th style={{ padding: "4px 8px", borderBottom: "1px solid var(--border)", width: 80 }}>Version</th>
+                    <th style={{ padding: "4px 8px", borderBottom: "1px solid var(--border)", width: 100 }}>Schema ID</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {status.subjects.map((s) => (
+                    <tr key={s.name}>
+                      <td style={{ padding: "4px 8px", fontFamily: "var(--font-mono)" }}>{s.name}</td>
+                      <td style={{ padding: "4px 8px", fontFamily: "var(--font-mono)", color: "var(--muted)" }}>
+                        {s.version != null ? `v${s.version}` : "—"}
+                      </td>
+                      <td style={{ padding: "4px 8px", fontFamily: "var(--font-mono)", color: "var(--muted)" }}>
+                        {s.schema_id != null ? s.schema_id : "—"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           )}
           <div className="settings-actions">
             <button className="settings-test-btn" onClick={onTest} disabled={testing}>
               {testing ? "Testing…" : "Test Connection"}
+            </button>
+            <button
+              className="settings-save-btn"
+              onClick={onRegister}
+              disabled={registering}
+              style={{ marginLeft: 8 }}
+              title="Register the AuditLens Avro schemas (audit.enriched.v1-value + signals + alerts + dlq). Required after first SR setup and after editing any .avsc file."
+            >
+              {registering ? "Registering…" : "Register schemas"}
             </button>
             <button className="settings-test-btn" onClick={onRemove} disabled={removing} style={{ marginLeft: 8 }}>
               {removing ? "Removing…" : "Remove"}
@@ -124,6 +224,38 @@ export function SchemaRegistryTab() {
               {testResult.ok
                 ? `✓ Connected — ${testResult.latency_ms}ms`
                 : `✗ ${testResult.error}`}
+            </div>
+          )}
+          {registerError && (
+            <div className="settings-test-result error">✗ {registerError}</div>
+          )}
+          {registerResults && (
+            <div style={{ marginTop: 10, fontSize: "0.9em" }}>
+              <div style={{ fontWeight: 600, marginBottom: 6 }}>Registration result</div>
+              <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
+                {registerResults.map((r) => (
+                  <li key={r.subject} style={{ padding: "2px 0", fontFamily: "var(--font-mono)" }}>
+                    {r.status === "registered" && (
+                      <span>✅ <strong>{r.subject}</strong> registered (id={r.schema_id}, version={r.version})
+                        {r.compatibility && <span style={{ color: "var(--muted)" }}> · compat {r.compatibility}</span>}
+                      </span>
+                    )}
+                    {r.status === "updated" && (
+                      <span>🔄 <strong>{r.subject}</strong> updated (v{r.previous_version} → v{r.version}, id={r.schema_id})
+                        {r.compatibility && <span style={{ color: "var(--muted)" }}> · compat {r.compatibility}</span>}
+                      </span>
+                    )}
+                    {r.status === "skipped" && (
+                      <span>⏭ <strong>{r.subject}</strong> already at version {r.version} (skipped)
+                        {r.compatibility && <span style={{ color: "var(--muted)" }}> · compat {r.compatibility}</span>}
+                      </span>
+                    )}
+                    {r.status === "error" && (
+                      <span style={{ color: "var(--critical)" }}>❌ <strong>{r.subject}</strong> error: {r.error}</span>
+                    )}
+                  </li>
+                ))}
+              </ul>
             </div>
           )}
         </>

@@ -267,7 +267,24 @@ export async function getResourceCatalogPage(params?: { resource_type?: string; 
   return request<ResourceCatalogResponse>(`/resources/catalog${qs ? `?${qs}` : ""}`, signal);
 }
 
-export async function testNotification(destinationName?: string): Promise<{ success: boolean; message: string }> {
+export type NotificationTestResult = {
+  destination: string;
+  type?: string;
+  status: "sent" | "skipped" | "error";
+  error: string | null;
+  reason?: string;
+};
+
+export type NotificationTestResponse = {
+  success: boolean;
+  results: NotificationTestResult[];
+  sent_count: number;
+  error_count: number;
+  warning?: string;
+  message?: string;
+};
+
+export async function testNotification(destinationName?: string): Promise<NotificationTestResponse> {
   const response = await fetch(`${API_BASE}/settings/notifications/test`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -278,7 +295,7 @@ export async function testNotification(destinationName?: string): Promise<{ succ
     const body = await response.text();
     throw new Error(body || `${response.status} ${response.statusText}`);
   }
-  return response.json() as Promise<{ success: boolean; message: string }>;
+  return response.json() as Promise<NotificationTestResponse>;
 }
 
 export type NotificationDestinationView = {

@@ -189,6 +189,13 @@ export type SystemStatus = {
     error?: string;
   } | null;
   auth_enabled?: boolean;
+  schema_registry?: {
+    configured?: boolean;
+    connected?: boolean;
+    url?: string | null;
+    serialization_mode?: "avro" | "json" | "unknown";
+    error?: string;
+  } | null;
 };
 
 // Shape of GET /system/forwarder-health (proxies the forwarder's /health).
@@ -201,6 +208,11 @@ export type ForwarderHealth = {
   processed_total?: number;
   consumer_lag?: number;
   processing_rate?: number;
+  serialization?: {
+    enriched_topic?: "avro" | "json" | "unknown";
+    sr_connected?: boolean;
+    sr_url?: string | null;
+  };
   freshness?: {
     last_enriched_event_time?: string | null;
     last_enriched_ingest_at?: string | null;

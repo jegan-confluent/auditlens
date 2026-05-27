@@ -6,8 +6,11 @@ VIEWER token sufficient for retention category reads.
 """
 from __future__ import annotations
 
+import json
 import os
 import time
+from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from pydantic import BaseModel
@@ -98,21 +101,98 @@ def test_notification(
     _: None = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> dict:
-    destination_name = body.get("destination_name", "")
+    """Send a real test notification to every enabled destination in
+    notifications.yml. Returns per-destination pass/fail + an aggregate
+    count so the operator can verify wiring without an inbox of stub
+    success messages.
+    """
+    from datetime import datetime, timezone
     try:
-        # Best-effort: try to send via notifier if available
         from src.notifications.notifier import AuditLensNotifier
-        # Just verify config is reachable — don't actually send in basic test
-        return {"success": True, "message": f"Notification config accessible for '{destination_name}'"}
     except Exception as exc:
-        return {"success": False, "message": str(exc)}
+        return {
+            "success": False,
+            "message": f"notifier module import failed: {exc}",
+            "results": [],
+            "sent_count": 0,
+            "error_count": 1,
+        }
+
+    config_path = os.environ.get("NOTIFICATIONS_CONFIG_PATH") or os.environ.get("NOTIFICATIONS_CONFIG") or "notifications.yml"
+    try:
+        notifier = AuditLensNotifier(config_path=config_path)
+    except Exception as exc:
+        return {
+            "success": False,
+            "message": f"failed to load {config_path}: {exc}",
+            "results": [],
+            "sent_count": 0,
+            "error_count": 1,
+        }
+
+    if not notifier.has_destinations():
+        return {
+            "success": True,
+            "results": [],
+            "sent_count": 0,
+            "error_count": 0,
+            "warning": "No notification destinations configured",
+        }
+
+    test_payload = {
+        "signal_type": "action_required",
+        "signal_reason": "test_notification",
+        "event_title": "AuditLens test notification",
+        "event_summary": (
+            "This is a test message from AuditLens Settings. If you see "
+            "this, your notification destination is configured correctly."
+        ),
+        "actor": "auditlens-system",
+        "actor_display_name": "AuditLens System",
+        "action": "TestNotification",
+        "resource_name": "notification-test",
+        "environment_name": "test",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "is_test": True,
+    }
+
+    results = notifier.send_test(test_payload)
+    sent_count = sum(1 for r in results if r.get("status") == "sent")
+    error_count = sum(1 for r in results if r.get("status") == "error")
+
+    return {
+        "success": error_count == 0 and sent_count > 0,
+        "results": results,
+        "sent_count": sent_count,
+        "error_count": error_count,
+    }
 
 
 def _get_sr_creds(db: Session) -> tuple[str, str, str]:
-    """Return (url, api_key, api_secret) from settings table, falling back to env vars."""
-    url = settings_service.get(db, "schema_registry", "url") or os.getenv("SCHEMA_REGISTRY_URL", "")
-    api_key = settings_service.get(db, "schema_registry", "api_key") or os.getenv("SCHEMA_REGISTRY_API_KEY", "")
-    api_secret = settings_service.get(db, "schema_registry", "api_secret") or os.getenv("SCHEMA_REGISTRY_API_SECRET", "")
+    """Return (url, api_key, api_secret) from settings table, falling back to env vars.
+    Env-var fan-out matches src/forwarder/config.py + src/product/schema_registry.py
+    so a single SR_* short-form in .env works everywhere.
+    """
+    url = (
+        settings_service.get(db, "schema_registry", "url")
+        or os.environ.get("SCHEMA_REGISTRY_URL")
+        or os.environ.get("SR_ENDPOINT")
+        or ""
+    )
+    api_key = (
+        settings_service.get(db, "schema_registry", "api_key")
+        or os.environ.get("SCHEMA_REGISTRY_API_KEY")
+        or os.environ.get("SCHEMA_REGISTRY_KEY")
+        or os.environ.get("SR_API_KEY")
+        or ""
+    )
+    api_secret = (
+        settings_service.get(db, "schema_registry", "api_secret")
+        or os.environ.get("SCHEMA_REGISTRY_API_SECRET")
+        or os.environ.get("SCHEMA_REGISTRY_SECRET")
+        or os.environ.get("SR_API_SECRET")
+        or ""
+    )
     return url, api_key, api_secret
 
 
@@ -123,19 +203,104 @@ def get_sr_status(
 ) -> dict:
     url, api_key, api_secret = _get_sr_creds(db)
     if not url:
-        return {"configured": False, "url": None, "subjects": [], "error": None}
+        return {
+            "configured": False,
+            "url": None,
+            "subjects": [],
+            "error": None,
+            "drift_detected": False,
+            "drift_detail": None,
+        }
     try:
         from confluent_kafka.schema_registry import SchemaRegistryClient  # type: ignore[import-untyped]
         conf: dict = {"url": url}
         if api_key and api_secret:
             conf["basic.auth.user.info"] = f"{api_key}:{api_secret}"
         client = SchemaRegistryClient(conf)
-        subjects: list[str] = client.get_subjects()
-        return {"configured": True, "url": url, "subjects": subjects, "error": None}
+        subject_names: list[str] = client.get_subjects()
+        # N+1 calls — fine for typical SR with <20 subjects per cluster.
+        # Each call is a small REST round-trip; serialising them keeps the
+        # endpoint simple and the SR client is sync-only anyway.
+        subjects: list[dict] = []
+        enriched_registered_schema_str: str | None = None
+        for name in subject_names:
+            try:
+                latest = client.get_latest_version(name)
+                subjects.append({
+                    "name": name,
+                    "schema_id": latest.schema_id,
+                    "version": latest.version,
+                })
+                if name == "audit.enriched.v1-value":
+                    # Capture the registered schema string so we can
+                    # compare it to the on-disk .avsc for drift detection.
+                    enriched_registered_schema_str = getattr(latest.schema, "schema_str", None)
+            except Exception:
+                # Subject exists but the latest-version probe failed
+                # (rare — usually permissions). Surface the name only.
+                subjects.append({"name": name, "schema_id": None, "version": None})
+
+        drift_detected, drift_detail = _compute_sr_drift(enriched_registered_schema_str)
+
+        return {
+            "configured": True,
+            "url": url,
+            "subjects": subjects,
+            "error": None,
+            "drift_detected": drift_detected,
+            "drift_detail": drift_detail,
+        }
     except ImportError:
-        return {"configured": True, "url": url, "subjects": [], "error": "confluent-kafka not installed"}
+        return {
+            "configured": True,
+            "url": url,
+            "subjects": [],
+            "error": "confluent-kafka not installed",
+            "drift_detected": False,
+            "drift_detail": None,
+        }
     except Exception as exc:
-        return {"configured": True, "url": url, "subjects": [], "error": str(exc)}
+        return {
+            "configured": True,
+            "url": url,
+            "subjects": [],
+            "error": str(exc),
+            "drift_detected": False,
+            "drift_detail": None,
+        }
+
+
+def _compute_sr_drift(registered_schema_str: str | None) -> tuple[bool, str | None]:
+    """Compare the canonical hash of src/schema/audit_enriched_v1.avsc on disk
+    with the canonical hash of the schema currently registered at SR. If they
+    differ → drift detected. If the subject is missing or SR is unreachable
+    → no drift (we already surface those failures elsewhere; we should not
+    false-alarm on top of them).
+    """
+    if not registered_schema_str:
+        return False, None
+    import hashlib
+    enriched_path = _sr_enriched_avsc_path()
+    if not enriched_path.is_file():
+        return False, None
+    try:
+        local_text = enriched_path.read_text(encoding="utf-8")
+        local_canonical = json.dumps(json.loads(local_text), sort_keys=True)
+        local_hash = hashlib.sha256(local_canonical.encode("utf-8")).hexdigest()
+    except (OSError, json.JSONDecodeError):
+        return False, None
+    try:
+        registered_canonical = json.dumps(json.loads(registered_schema_str), sort_keys=True)
+        registered_hash = hashlib.sha256(registered_canonical.encode("utf-8")).hexdigest()
+    except json.JSONDecodeError:
+        # SR returned something we can't parse — be silent rather than alarmist.
+        return False, None
+    if local_hash != registered_hash:
+        return True, (
+            "Local audit_enriched_v1.avsc differs from the registered version. "
+            "Click Register schemas to sync."
+        )
+    return False, None
 
 
 @router.post("/settings/test_sr")
@@ -160,3 +325,322 @@ def test_sr(
         return {"ok": False, "latency_ms": None, "error": "confluent-kafka not installed"}
     except Exception as exc:
         return {"ok": False, "latency_ms": None, "error": str(exc)}
+
+
+# ──────────── Schema Registry: register schemas from UI ────────────
+# Mirrors scripts/register_sr_schemas.py so operators can click a button
+# from the Settings tab instead of SSH'ing to run `make register-schemas`.
+# Keep the inline signal/alert/dlq schemas in sync with the CLI script;
+# the enriched schema is loaded from disk so there's only ONE copy of that.
+
+_SR_AVRO_NAMESPACE = "io.confluent.auditlens"
+
+
+def _sr_signal_schema(record_name: str, doc: str) -> str:
+    """Inline Avro schema for signal-stream topics. Must match
+    scripts/register_sr_schemas.py:_signal_schema() exactly so re-running
+    `make register-schemas` after a UI register produces the same SR
+    content-hash (== a SKIPPED, not an unnecessary new version)."""
+    return json.dumps({
+        "type": "record",
+        "namespace": _SR_AVRO_NAMESPACE,
+        "name": record_name,
+        "doc": doc,
+        "fields": [
+            {"name": "_schema_version", "type": "string", "default": "1.0"},
+            {"name": "event_fingerprint", "type": "string",
+             "doc": "Per-event SHA-256 fingerprint. Matches audit.enriched.v1 for join keys."},
+            {"name": "timestamp",
+             "type": ["null", {"type": "long", "logicalType": "timestamp-millis"}],
+             "default": None,
+             "doc": "Original event time. UTC milliseconds."},
+            {"name": "ingested_at",
+             "type": ["null", {"type": "long", "logicalType": "timestamp-millis"}],
+             "default": None,
+             "doc": "When the forwarder ingested this event."},
+            {"name": "actor", "type": ["null", "string"], "default": None},
+            {"name": "actor_display_name", "type": ["null", "string"], "default": None},
+            {"name": "action", "type": ["null", "string"], "default": None},
+            {"name": "resource_name", "type": ["null", "string"], "default": None},
+            {"name": "source_ip", "type": ["null", "string"], "default": None},
+            {"name": "environment_id", "type": ["null", "string"], "default": None},
+            {"name": "cluster_id", "type": ["null", "string"], "default": None},
+            {"name": "signal_type", "type": ["null", "string"], "default": None},
+            {"name": "signal_reason", "type": ["null", "string"], "default": None},
+            {"name": "risk_level", "type": ["null", "string"], "default": None},
+            {"name": "is_denied", "type": ["null", "boolean"], "default": None},
+            {"name": "is_failure", "type": ["null", "boolean"], "default": None},
+            {"name": "raw_payload_json", "type": ["null", "string"], "default": None,
+             "doc": "Full original event for replay."},
+        ],
+    })
+
+
+def _sr_alert_schema() -> str:
+    return json.dumps({
+        "type": "record",
+        "namespace": _SR_AVRO_NAMESPACE,
+        "name": "AuditAlert",
+        "doc": "Per-event operator alert (Slack/Teams/PagerDuty/webhook destinations consume this).",
+        "fields": [
+            {"name": "_schema_version", "type": "string", "default": "1.0"},
+            {"name": "event_fingerprint", "type": "string",
+             "doc": "Per-event SHA-256 fingerprint."},
+            {"name": "alert_timestamp",
+             "type": ["null", {"type": "long", "logicalType": "timestamp-millis"}],
+             "default": None,
+             "doc": "When the alert was emitted by the forwarder."},
+            {"name": "severity", "type": ["null", "string"], "default": None,
+             "doc": "CRITICAL | HIGH | MEDIUM | LOW."},
+            {"name": "title", "type": ["null", "string"], "default": None},
+            {"name": "message", "type": ["null", "string"], "default": None},
+            {"name": "actor", "type": ["null", "string"], "default": None},
+            {"name": "action", "type": ["null", "string"], "default": None},
+            {"name": "resource_name", "type": ["null", "string"], "default": None},
+            {"name": "signal_type", "type": ["null", "string"], "default": None},
+            {"name": "risk_level", "type": ["null", "string"], "default": None},
+            {"name": "raw_payload_json", "type": ["null", "string"], "default": None},
+        ],
+    })
+
+
+def _sr_dlq_schema() -> str:
+    return json.dumps({
+        "type": "record",
+        "namespace": _SR_AVRO_NAMESPACE,
+        "name": "AuditDlq",
+        "doc": "Dead-letter envelope for events that failed processing.",
+        "fields": [
+            {"name": "_schema_version", "type": "string", "default": "1.0"},
+            {"name": "ingested_at",
+             "type": ["null", {"type": "long", "logicalType": "timestamp-millis"}],
+             "default": None},
+            {"name": "error_type", "type": ["null", "string"], "default": None},
+            {"name": "error_message", "type": ["null", "string"], "default": None},
+            {"name": "source_topic", "type": ["null", "string"], "default": None},
+            {"name": "source_partition", "type": ["null", "int"], "default": None},
+            {"name": "source_offset", "type": ["null", "long"], "default": None},
+            {"name": "retry_count", "type": ["null", "int"], "default": None},
+            {"name": "first_failure",
+             "type": ["null", {"type": "long", "logicalType": "timestamp-millis"}],
+             "default": None},
+            {"name": "last_failure",
+             "type": ["null", {"type": "long", "logicalType": "timestamp-millis"}],
+             "default": None},
+            {"name": "raw_payload_json", "type": ["null", "string"], "default": None,
+             "doc": "Original event payload for replay after the underlying defect is fixed."},
+        ],
+    })
+
+
+def _sr_not_found(exc) -> bool:
+    return (
+        getattr(exc, "error_code", None) == 40401
+        or getattr(exc, "http_status_code", None) == 404
+    )
+
+
+def _sr_enriched_avsc_path() -> Path:
+    """Resolve the runtime location of audit_enriched_v1.avsc.
+
+    The forwarder loads from src/schema/ (the docker-mounted runtime
+    location) so registration should target the same file — otherwise
+    the producer's serializer would expect a schema content the SR
+    doesn't have. AUDITLENS_SCHEMA_DIR overrides for tests.
+    """
+    return Path(
+        os.getenv(
+            "AUDITLENS_SCHEMA_DIR",
+            str(Path(__file__).resolve().parents[4] / "src" / "schema"),
+        )
+    ) / "audit_enriched_v1.avsc"
+
+
+@router.post("/settings/schema_registry/register")
+def register_sr_schemas(
+    _: None = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Register Avro schemas for every AuditLens-produced topic with SR.
+    Mirrors `make register-schemas`. Idempotent — SR's content-hash dedup
+    means re-running this with no schema change reports SKIPPED.
+    Sets FORWARD compatibility on audit.enriched.v1-value only; other
+    subjects keep the registry default (BACKWARD).
+    """
+    url, api_key, api_secret = _get_sr_creds(db)
+    if not url:
+        raise HTTPException(status_code=400, detail="Schema Registry URL not configured")
+
+    try:
+        from confluent_kafka.schema_registry import Schema, SchemaRegistryClient  # type: ignore[import-untyped]
+        from confluent_kafka.schema_registry.error import SchemaRegistryError  # type: ignore[import-untyped]
+    except ImportError:
+        raise HTTPException(status_code=500, detail="confluent-kafka not installed")
+
+    enriched_path = _sr_enriched_avsc_path()
+    if not enriched_path.is_file():
+        raise HTTPException(
+            status_code=500,
+            detail=f"audit_enriched_v1.avsc not found at {enriched_path}",
+        )
+    # Re-serialize through json.dumps so we send canonical JSON to SR
+    # (matches scripts/register_sr_schemas.py:_load_avsc).
+    enriched_str = json.dumps(json.loads(enriched_path.read_text(encoding="utf-8")))
+
+    plan: list[tuple[str, str, str | None]] = [
+        ("audit.enriched.v1-value",         enriched_str,                                                       "FORWARD"),
+        ("audit.signals.denials.v1-value",  _sr_signal_schema("AuditDenialSignal", "Denial signal stream."),     None),
+        ("audit.signals.highrisk.v1-value", _sr_signal_schema("AuditHighRiskSignal", "High-risk signal stream."), None),
+        ("audit.alerts.v1-value",           _sr_alert_schema(),                                                 None),
+        ("audit.dlq.v1-value",              _sr_dlq_schema(),                                                   None),
+    ]
+
+    conf: dict = {"url": url}
+    if api_key and api_secret:
+        conf["basic.auth.user.info"] = f"{api_key}:{api_secret}"
+    client = SchemaRegistryClient(conf)
+
+    results: list[dict[str, Any]] = []
+    overall_ok = True
+    for subject, schema_str, compat_level in plan:
+        try:
+            try:
+                pre = client.get_latest_version(subject)
+            except SchemaRegistryError as exc:
+                if _sr_not_found(exc):
+                    pre = None
+                else:
+                    raise
+
+            schema_id = client.register_schema(subject, Schema(schema_str, schema_type="AVRO"))
+            post = client.get_latest_version(subject)
+
+            if pre is None:
+                status = "registered"
+            elif pre.schema_id == schema_id:
+                status = "skipped"
+            else:
+                status = "updated"
+
+            applied_compat: str | None = None
+            compat_error: str | None = None
+            if compat_level:
+                try:
+                    client.set_compatibility(subject_name=subject, level=compat_level)
+                    applied_compat = compat_level
+                except Exception as exc:
+                    overall_ok = False
+                    compat_error = f"compatibility {compat_level} not set: {exc}"
+
+            results.append({
+                "subject": subject,
+                "status": status,
+                "schema_id": schema_id,
+                "version": post.version,
+                "previous_version": pre.version if pre else None,
+                "compatibility": applied_compat,
+                "error": compat_error,
+            })
+        except Exception as exc:
+            overall_ok = False
+            results.append({
+                "subject": subject,
+                "status": "error",
+                "schema_id": None,
+                "version": None,
+                "previous_version": None,
+                "compatibility": None,
+                "error": str(exc),
+            })
+
+    return {"results": results, "success": overall_ok}
+
+
+# ──────────── Stream Output info (for the Stream Output settings tab) ────────────
+
+
+_DEFAULT_TOPICS = {
+    "raw":        "audit.raw.v1",
+    "normalized": "audit.normalized.v1",
+    "enriched":   "audit.enriched.v1",
+    "denials":    "audit.signals.denials.v1",
+    "highrisk":   "audit.signals.highrisk.v1",
+    "alerts":     "audit.alerts.v1",
+    "dlq":        "audit.dlq.v1",
+}
+_TOPIC_ENV_VARS = {
+    "raw":        "AUDIT_RAW_TOPIC",
+    "normalized": "AUDIT_NORMALIZED_TOPIC",
+    "enriched":   "AUDIT_ENRICHED_TOPIC",
+    "denials":    "AUDIT_SIGNALS_DENIALS_TOPIC",
+    "highrisk":   "AUDIT_SIGNALS_HIGHRISK_TOPIC",
+    "alerts":     "AUDIT_ALERTS_TOPIC",
+    "dlq":        "DLQ_TOPIC",
+}
+
+
+@router.get("/settings/stream_output/info")
+def stream_output_info(
+    _: None = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Aggregated read-only view used by the Stream Output settings tab.
+    Returns:
+      - the topic names AuditLens publishes to (resolved from env or defaults)
+      - SR configured + whether audit.enriched.v1-value is registered (Avro vs JSON)
+      - Confluent env/cluster ids + a deep-link to the Flink workspace
+    """
+    topics = {
+        key: os.environ.get(env_var, default)
+        for key, (env_var, default) in (
+            (k, (_TOPIC_ENV_VARS[k], _DEFAULT_TOPICS[k])) for k in _DEFAULT_TOPICS
+        )
+    }
+
+    url, api_key, api_secret = _get_sr_creds(db)
+    sr_configured = bool(url)
+    enriched_subject = f"{topics['enriched']}-value"
+    enriched_avro_ready = False
+    sr_error: str | None = None
+
+    if sr_configured:
+        try:
+            from confluent_kafka.schema_registry import SchemaRegistryClient  # type: ignore[import-untyped]
+            from confluent_kafka.schema_registry.error import SchemaRegistryError  # type: ignore[import-untyped]
+            conf: dict = {"url": url}
+            if api_key and api_secret:
+                conf["basic.auth.user.info"] = f"{api_key}:{api_secret}"
+            client = SchemaRegistryClient(conf)
+            try:
+                client.get_latest_version(enriched_subject)
+                enriched_avro_ready = True
+            except SchemaRegistryError as exc:
+                if not _sr_not_found(exc):
+                    sr_error = str(exc)
+        except ImportError:
+            sr_error = "confluent-kafka not installed"
+        except Exception as exc:
+            sr_error = str(exc)
+
+    env_id = os.environ.get("CONFLUENT_ENV_ID", "")
+    cluster_id = os.environ.get("CONFLUENT_CLUSTER_ID", "")
+    flink_workspace_url = (
+        f"https://confluent.cloud/environments/{env_id}/flink"
+        if env_id else None
+    )
+
+    return {
+        "topics": topics,
+        "enriched_subject": enriched_subject,
+        "schema_registry": {
+            "configured": sr_configured,
+            "url": url or None,
+            "enriched_avro_ready": enriched_avro_ready,
+            "error": sr_error,
+        },
+        "confluent": {
+            "env_id": env_id or None,
+            "cluster_id": cluster_id or None,
+            "flink_workspace_url": flink_workspace_url,
+        },
+    }

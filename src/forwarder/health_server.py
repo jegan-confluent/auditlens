@@ -163,6 +163,18 @@ def _normalize_json_keys(obj):
     return obj
 
 
+def _serialization_status_safe() -> dict:
+    """Pull the producer-side serialization state for audit.enriched.v1
+    from src.product.schema_registry. Wrapped so a missing module / import
+    error cannot break /health (which has a hard <100ms budget).
+    """
+    try:
+        from src.product.schema_registry import get_serialization_status
+        return get_serialization_status()
+    except Exception:  # pragma: no cover — defensive only
+        return {"enriched_topic": "unknown", "sr_connected": False, "sr_url": None}
+
+
 # ──────────── metrics server ────────────
 class MetricsHandler(BaseHTTPRequestHandler):
     def _send_json(self, status_code: int, payload: dict, headers: dict | None = None):
@@ -340,6 +352,12 @@ class MetricsHandler(BaseHTTPRequestHandler):
             "noise_short_circuited_total": metrics_data.get("noise_short_circuited_total", 0),
             "noise_persist_wait_timeouts_total": metrics_data.get("noise_persist_wait_timeouts_total", 0),
             "dry_run_suppressed_total": metrics_data.get("dry_run_suppressed_total", 0),
+            # Producer-side serialization state for audit.enriched.v1.
+            # Set by audit_forwarder at SR init via schema_registry.
+            # set_serialization_status(). Surfaced here so the UI can
+            # show whether the enriched topic is actually going out as
+            # Avro or has fallen back to JSON.
+            "serialization": _serialization_status_safe(),
             # ── DB-writer freshness / replay-recommended ──
             # Computed defensively off the in-memory metrics snapshot.
             # Every helper below returns a safe default on bad input so

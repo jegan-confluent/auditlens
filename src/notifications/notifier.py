@@ -500,6 +500,47 @@ class AuditLensNotifier:
     # ------------------------------------------------------------------
     # Dispatch (non-blocking)
     # ------------------------------------------------------------------
+    def send_test(self, event: dict) -> list[dict[str, Any]]:
+        """Synchronously dispatch a test event to every ENABLED destination.
+
+        Bypasses filters, dedup, rate-limiting, and the daemon-thread
+        retry loop so the operator gets an accurate per-destination
+        pass/fail result inline in the UI. Disabled destinations are
+        reported as 'skipped' so the operator can tell whether the
+        absence of delivery is by design or a config error.
+        """
+        try:
+            self._maybe_reload()
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.warning("notifier.send_test reload failed: %s", exc)
+        results: list[dict[str, Any]] = []
+        for destination in self._destinations:
+            if not destination.enabled:
+                results.append({
+                    "destination": destination.name,
+                    "type": destination.type,
+                    "status": "skipped",
+                    "error": None,
+                    "reason": "destination disabled",
+                })
+                continue
+            try:
+                ok = self._dispatch(event, destination)
+                results.append({
+                    "destination": destination.name,
+                    "type": destination.type,
+                    "status": "sent" if ok else "error",
+                    "error": None if ok else "dispatch returned False",
+                })
+            except Exception as exc:
+                results.append({
+                    "destination": destination.name,
+                    "type": destination.type,
+                    "status": "error",
+                    "error": f"{exc.__class__.__name__}: {exc}",
+                })
+        return results
+
     def notify(self, event: dict) -> None:
         """Fire matching destinations off-thread. Never raises."""
         try:

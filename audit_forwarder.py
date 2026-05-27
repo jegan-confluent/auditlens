@@ -2067,6 +2067,7 @@ def main():
     # back to JSON for that batch.
     from src.product.schema_registry import (
         get_sr_client, get_avro_serializer, project_enriched,
+        set_serialization_status,
     )
     _sr_client = get_sr_client()
     _enriched_serializer = None
@@ -2087,6 +2088,11 @@ def main():
                 "SR configured — schema registration is managed by "
                 "'make register-schemas'. Run it before first start."
             )
+            set_serialization_status(
+                enriched_topic="avro",
+                sr_connected=True,
+                sr_url=SCHEMA_REGISTRY_URL,
+            )
         except Exception as _sr_exc:
             logger.warning(
                 "Schema Registry serializer init failed (%s) — falling back to JSON production",
@@ -2094,8 +2100,18 @@ def main():
             )
             record_schema_registry_failure()
             _sr_client = None
+            set_serialization_status(
+                enriched_topic="json",
+                sr_connected=False,
+                sr_url=SCHEMA_REGISTRY_URL,
+            )
     else:
         logger.info("Schema Registry not configured - using JSON serialization without schema validation")
+        set_serialization_status(
+            enriched_topic="json",
+            sr_connected=False,
+            sr_url=None,
+        )
 
     # Subscribe to source topic - offsets are managed by Kafka consumer groups
     # On first join: starts from auto.offset.reset (latest)

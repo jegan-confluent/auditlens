@@ -7,6 +7,7 @@ import {
   toggleNotificationDestination,
   type NotificationDestinationView,
   type NotificationDestinationsResponse,
+  type NotificationTestResponse,
 } from "../../../lib/api";
 
 function describeFilters(filters: NotificationDestinationView["filters"]): string {
@@ -53,7 +54,8 @@ export function NotificationsTab() {
   const [togglingName, setTogglingName] = useState<string | null>(null);
   const [toggleError, setToggleError] = useState<string | null>(null);
   const [testing, setTesting] = useState(false);
-  const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
+  const [testResult, setTestResult] = useState<NotificationTestResponse | null>(null);
+  const [testError, setTestError] = useState<string | null>(null);
 
   const load = useCallback(async (signal?: AbortSignal) => {
     setLoadError(null);
@@ -88,11 +90,12 @@ export function NotificationsTab() {
   async function handleTest() {
     setTesting(true);
     setTestResult(null);
+    setTestError(null);
     try {
       const result = await testNotification();
       setTestResult(result);
     } catch (e) {
-      setTestResult({ success: false, message: e instanceof Error ? e.message : String(e) });
+      setTestError(e instanceof Error ? e.message : String(e));
     } finally {
       setTesting(false);
     }
@@ -165,13 +168,44 @@ export function NotificationsTab() {
           {testing ? "Testing…" : "Send test notification"}
         </button>
       </div>
-      {testResult !== null && (
-        <p
-          className={testResult.success ? "settings-info" : "settings-access-denied"}
-          style={{ marginTop: 8 }}
-        >
-          {testResult.success ? "✓ " : "✗ "}{testResult.message}
+      {testError !== null && (
+        <p className="settings-access-denied" style={{ marginTop: 8 }}>
+          ✗ {testError}
         </p>
+      )}
+      {testResult !== null && (
+        <div style={{ marginTop: 10 }}>
+          {testResult.warning ? (
+            <p className="settings-info" style={{ marginBottom: 8 }}>ℹ {testResult.warning}</p>
+          ) : (
+            <p className="settings-info" style={{ marginBottom: 8 }}>
+              <strong>Sent: {testResult.sent_count}</strong>
+              {testResult.error_count > 0 && (
+                <> · <span style={{ color: "var(--critical)" }}>Errors: {testResult.error_count}</span></>
+              )}
+            </p>
+          )}
+          {testResult.results.length > 0 && (
+            <ul style={{ listStyle: "none", padding: 0, margin: 0, fontFamily: "var(--font-mono)", fontSize: "0.9em" }}>
+              {testResult.results.map((r) => {
+                let icon = "?";
+                let toneColor: string = "var(--muted)";
+                if (r.status === "sent") { icon = "✅"; toneColor = "var(--success)"; }
+                else if (r.status === "skipped") { icon = "⏭"; toneColor = "var(--muted)"; }
+                else if (r.status === "error") { icon = "❌"; toneColor = "var(--critical)"; }
+                return (
+                  <li key={r.destination} style={{ padding: "2px 0", color: toneColor }}>
+                    {icon} <strong style={{ color: "var(--text)" }}>{r.destination}</strong>
+                    {r.type && <span style={{ color: "var(--muted)" }}> ({r.type})</span>}
+                    {r.status === "sent" && <> — delivered</>}
+                    {r.status === "skipped" && r.reason && <> — {r.reason}</>}
+                    {r.status === "error" && r.error && <> — {r.error}</>}
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
       )}
     </div>
   );

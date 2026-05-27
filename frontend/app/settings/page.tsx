@@ -7,10 +7,11 @@ import { NotificationsTab } from "./components/NotificationsTab";
 import { ResourceCatalogTab } from "./components/ResourceCatalogTab";
 import { RetentionTab } from "./components/RetentionTab";
 import { SchemaRegistryTab } from "./components/SchemaRegistryTab";
+import { StreamOutputTab } from "./components/StreamOutputTab";
 import { API_BASE } from "./components/shared";
 import { TableflowTab } from "./components/TableflowTab";
 
-const TABS = ["Retention", "Cold Storage", "Notifications", "Actor Mappings", "Resource Catalog", "Schema Registry", "Data Export"] as const;
+const TABS = ["Retention", "Cold Storage", "Notifications", "Actor Mappings", "Resource Catalog", "Schema Registry", "Stream Output", "Tableflow"] as const;
 type Tab = (typeof TABS)[number];
 
 export default function SettingsPage() {
@@ -53,7 +54,13 @@ export default function SettingsPage() {
         {activeTab === "Actor Mappings" && <ActorMappingsTab />}
         {activeTab === "Resource Catalog" && <ResourceCatalogTab />}
         {activeTab === "Schema Registry" && <SchemaRegistryTab />}
-        {activeTab === "Data Export" && <TableflowTab />}
+        {activeTab === "Stream Output" && (
+          <StreamOutputTab
+            onGotoSchemaRegistry={() => setActiveTab("Schema Registry")}
+            onGotoTableflow={() => setActiveTab("Tableflow")}
+          />
+        )}
+        {activeTab === "Tableflow" && <TableflowTab />}
       </div>
     </main>
   );

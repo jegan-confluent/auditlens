@@ -46,6 +46,13 @@ const PREREQ_ORDER: (keyof Prerequisites["prerequisites"])[] = [
   "region",
 ];
 
+type SchemaRegistrationResult = {
+  status?: "ok" | "skipped" | "error";
+  reason?: string;
+  subject?: string;
+  schema_id?: number | null;
+};
+
 export function TableflowTab() {
   const [prereqs, setPrereqs] = useState<Prerequisites | null>(null);
   const [status, setStatus] = useState<TableflowStatus | null>(null);
@@ -57,6 +64,7 @@ export function TableflowTab() {
   const [actionStatus, setActionStatus] = useState<"idle" | "working" | "ok" | "error">("idle");
   const [actionMessage, setActionMessage] = useState<string | null>(null);
   const [showCostNotice, setShowCostNotice] = useState(false);
+  const [schemaReg, setSchemaReg] = useState<SchemaRegistrationResult | null>(null);
 
   function loadAll() {
     setLoading(true);
@@ -90,14 +98,18 @@ export function TableflowTab() {
   async function onEnable() {
     setActionStatus("working");
     setActionMessage(null);
+    setSchemaReg(null);
     try {
-      await apiPost("/tableflow/enable", {
+      const response = (await apiPost("/tableflow/enable", {
         format,
         storage_type: storageType,
         storage_bucket: storageType === "custom" ? storageBucket : null,
-      });
+      })) as { enabled?: boolean; schema_registration?: SchemaRegistrationResult };
       setActionStatus("ok");
       setShowCostNotice(true);
+      if (response?.schema_registration) {
+        setSchemaReg(response.schema_registration);
+      }
       loadAll();
     } catch (e) {
       setActionStatus("error");
@@ -125,6 +137,10 @@ export function TableflowTab() {
   return (
     <div className="settings-section">
       <h3 className="settings-section-title">Apache Iceberg / Delta Lake export via Tableflow</h3>
+      <p className="settings-info" style={{ marginTop: -4, marginBottom: 12 }}>
+        Export audit.enriched.v1 as an Iceberg or Delta Lake table queryable
+        from Snowflake, Athena, Databricks, or Spark.
+      </p>
 
       {loading ? (
         <div className="settings-skeleton">
@@ -152,6 +168,7 @@ export function TableflowTab() {
               actionStatus={actionStatus}
               actionMessage={actionMessage}
               showCostNotice={showCostNotice}
+              schemaReg={schemaReg}
               onEnable={onEnable}
               onDisable={onDisable}
             />
@@ -237,6 +254,7 @@ type FormProps = {
   actionStatus: "idle" | "working" | "ok" | "error";
   actionMessage: string | null;
   showCostNotice: boolean;
+  schemaReg: SchemaRegistrationResult | null;
   onEnable: () => void;
   onDisable: () => void;
 };
@@ -329,6 +347,24 @@ function TableflowForm(p: FormProps) {
           <p className="settings-info">
             ✅ Exporting <code>{status.topic}</code> as {status.format?.toUpperCase()} tables
           </p>
+          {p.schemaReg && (
+            <p className="settings-info" style={{ marginTop: -4 }}>
+              {p.schemaReg.status === "ok" && (
+                <>✅ Schema registered (<code>{p.schemaReg.subject ?? "audit.enriched.v1-value"}</code>
+                {p.schemaReg.schema_id != null && <>, id={p.schemaReg.schema_id}</>})</>
+              )}
+              {p.schemaReg.status === "skipped" && (
+                <span style={{ color: "var(--muted)" }}>
+                  ⏭ Schema already registered (skipped){p.schemaReg.reason ? ` — ${p.schemaReg.reason}` : ""}
+                </span>
+              )}
+              {p.schemaReg.status === "error" && (
+                <span style={{ color: "var(--warning)" }}>
+                  ⚠ Schema registration failed: {p.schemaReg.reason ?? "unknown error"} — run Register schemas in the Schema Registry tab.
+                </span>
+              )}
+            </p>
+          )}
           <p className="settings-info muted">
             Query from: Snowflake, Athena, Databricks, Spark
           </p>

@@ -523,4 +523,47 @@ def get_system_status(db: Session) -> dict[str, Any]:
     except Exception as exc:
         logger.warning("effective_retention assembly failed: %s", exc)
         status["effective_retention"] = None
+    # Schema Registry status — composed from forwarder /health (producer-
+    # side serialization mode) + settings credentials (configured-ness).
+    # All sub-calls are best-effort so SR being down can never 500 the
+    # /system/status route.
+    try:
+        status["schema_registry"] = _build_schema_registry_status(db, status)
+    except Exception as exc:
+        logger.warning("schema_registry status assembly failed: %s", exc)
+        status["schema_registry"] = {
+            "configured": False,
+            "connected": False,
+            "url": None,
+            "serialization_mode": "unknown",
+            "error": str(exc),
+        }
     return status
+
+
+def _build_schema_registry_status(db: Session, forwarder_status: dict[str, Any]) -> dict[str, Any]:
+    """Compose the schema_registry block surfaced on /system/status.
+
+    Source of truth for each field:
+      - configured       : SR creds present in settings table or env
+      - serialization_mode: forwarder /health → serialization.enriched_topic
+                            (set by audit_forwarder at SR init; one of
+                             'avro' | 'json' | 'unknown')
+      - connected        : forwarder /health → serialization.sr_connected
+                            (true only when AvroSerializer construction
+                             succeeded against this SR endpoint)
+      - url              : SR url visible to settings (masked of credentials)
+    """
+    from backend.app.api.routes.settings import _get_sr_creds
+    url, _api_key, _api_secret = _get_sr_creds(db)
+    serialization = forwarder_status.get("serialization") or {}
+    if not isinstance(serialization, dict):
+        serialization = {}
+    enriched_topic = serialization.get("enriched_topic") or "unknown"
+    sr_connected_from_forwarder = bool(serialization.get("sr_connected", False))
+    return {
+        "configured": bool(url),
+        "connected": sr_connected_from_forwarder,
+        "url": url or None,
+        "serialization_mode": enriched_topic,
+    }

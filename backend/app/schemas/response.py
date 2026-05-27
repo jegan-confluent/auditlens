@@ -156,3 +156,4 @@ class SystemStatusResponse(BaseModel):
     auth_enabled: bool = False
     confluent_configured: bool = False
     effective_retention: dict[str, int] | None = None
+    schema_registry: dict[str, Any] | None = None

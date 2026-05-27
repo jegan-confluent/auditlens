@@ -34,9 +34,23 @@ AUDIT_API_SECRET       = os.getenv("AUDIT_API_SECRET")
 DEST_BOOTSTRAP         = os.getenv("DEST_BOOTSTRAP")
 DEST_API_KEY           = os.getenv("DEST_API_KEY")
 DEST_API_SECRET        = os.getenv("DEST_API_SECRET")
-SCHEMA_REGISTRY_URL    = os.getenv("SCHEMA_REGISTRY_URL")
-SCHEMA_REGISTRY_KEY    = os.getenv("SCHEMA_REGISTRY_KEY")
-SCHEMA_REGISTRY_SECRET = os.getenv("SCHEMA_REGISTRY_SECRET")
+SCHEMA_REGISTRY_URL    = (
+    os.environ.get("SCHEMA_REGISTRY_URL")
+    or os.environ.get("SR_ENDPOINT")
+    or ""
+)
+SCHEMA_REGISTRY_KEY    = (
+    os.environ.get("SCHEMA_REGISTRY_API_KEY")
+    or os.environ.get("SCHEMA_REGISTRY_KEY")
+    or os.environ.get("SR_API_KEY")
+    or ""
+)
+SCHEMA_REGISTRY_SECRET = (
+    os.environ.get("SCHEMA_REGISTRY_API_SECRET")
+    or os.environ.get("SCHEMA_REGISTRY_SECRET")
+    or os.environ.get("SR_API_SECRET")
+    or ""
+)
 AUDIT_TOPIC            = os.getenv("AUDIT_TOPIC", "confluent-audit-log-events")
 # Consumer group - offsets are managed by Kafka consumer groups (not files)
 GROUP_ID               = os.getenv("GROUP_ID", "auditlens-forwarder-v1")

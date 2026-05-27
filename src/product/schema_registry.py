@@ -7,20 +7,30 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from typing import Any
 
 logger = logging.getLogger("auditlens.schema_registry")
 
-# Accept both naming conventions: new API_KEY style and existing KEY style.
-SR_URL = os.getenv("SCHEMA_REGISTRY_URL", "")
+# Accept three naming conventions: SCHEMA_REGISTRY_API_KEY (canonical),
+# SCHEMA_REGISTRY_KEY (legacy from src/forwarder/config.py), and SR_API_KEY
+# (short form used by some Confluent docs / examples). Same fan-out for URL
+# and SECRET.
+SR_URL = (
+    os.environ.get("SCHEMA_REGISTRY_URL")
+    or os.environ.get("SR_ENDPOINT")
+    or ""
+)
 SR_API_KEY = (
-    os.getenv("SCHEMA_REGISTRY_API_KEY")
-    or os.getenv("SCHEMA_REGISTRY_KEY")
+    os.environ.get("SCHEMA_REGISTRY_API_KEY")
+    or os.environ.get("SCHEMA_REGISTRY_KEY")
+    or os.environ.get("SR_API_KEY")
     or ""
 )
 SR_API_SECRET = (
-    os.getenv("SCHEMA_REGISTRY_API_SECRET")
-    or os.getenv("SCHEMA_REGISTRY_SECRET")
+    os.environ.get("SCHEMA_REGISTRY_API_SECRET")
+    or os.environ.get("SCHEMA_REGISTRY_SECRET")
+    or os.environ.get("SR_API_SECRET")
     or ""
 )
 
@@ -105,3 +115,40 @@ def project_enriched(event: dict[str, Any]) -> dict[str, Any]:
     so AvroSerializer does not raise on unexpected fields.
     """
     return {k: event.get(k) for k in _ENRICHED_FIELDS}
+
+
+# ──────────── Serialization status (for /health + UI surface) ────────────
+# audit_forwarder.py calls set_serialization_status() at startup once it
+# knows whether AvroSerializer construction succeeded. The forwarder
+# /health endpoint reads get_serialization_status() so the UI can show
+# whether audit.enriched.v1 is actually going out as Avro or fell back
+# to JSON — without this the SR-configured customer has no way to tell
+# if the producer is honoring their setup.
+
+_SERIALIZATION_LOCK = threading.Lock()
+_SERIALIZATION_STATUS: dict[str, Any] = {
+    "enriched_topic": "json",
+    "sr_connected": False,
+    "sr_url": None,
+}
+
+
+def set_serialization_status(
+    *,
+    enriched_topic: str,
+    sr_connected: bool,
+    sr_url: str | None = None,
+) -> None:
+    """Record the live producer-side serialization mode for audit.enriched.v1.
+    Called by the forwarder once Avro init completes (or fails).
+    """
+    with _SERIALIZATION_LOCK:
+        _SERIALIZATION_STATUS["enriched_topic"] = enriched_topic
+        _SERIALIZATION_STATUS["sr_connected"] = bool(sr_connected)
+        _SERIALIZATION_STATUS["sr_url"] = sr_url
+
+
+def get_serialization_status() -> dict[str, Any]:
+    """Return a copy of the current serialization status dict."""
+    with _SERIALIZATION_LOCK:
+        return dict(_SERIALIZATION_STATUS)

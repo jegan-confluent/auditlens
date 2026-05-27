@@ -229,6 +229,7 @@ export default function SystemPage() {
             metric={`${formatNumber(recordsConsumed)} events`}
             detail={`${dbWriter?.retention_days ?? 7} day retention`}
           />
+          <SchemaRegistryRow health={health} />
         </div>
       </section>
 
@@ -326,5 +327,43 @@ function QualityRow({ ok, info, label, value }: { ok: boolean; info?: boolean; l
       <span className="system-quality-label">{label}</span>
       <span className="system-quality-value">{value.toLocaleString("en-US")}</span>
     </li>
+  );
+}
+
+function SchemaRegistryRow({ health }: { health: ForwarderHealth }) {
+  const serialization = health.serialization;
+  const mode = serialization?.enriched_topic ?? "unknown";
+  const connected = !!serialization?.sr_connected;
+  const url = serialization?.sr_url ?? null;
+
+  let tone: Tone = "unknown";
+  let metric = "—";
+  let detail = "not configured";
+
+  if (mode === "avro" && connected) {
+    tone = "ok";
+    metric = "avro ✅";
+    detail = url ? `connected · ${url}` : "connected";
+  } else if (url && mode === "json") {
+    tone = "warning";
+    metric = "json ⚠";
+    detail = "SR set but producer is on JSON — register schemas or restart forwarder";
+  } else if (url) {
+    tone = "warning";
+    metric = "json";
+    detail = `${url} · ${connected ? "connected" : "disconnected"}`;
+  } else {
+    tone = "unknown";
+    metric = "json";
+    detail = "Schema Registry not configured (enriched topic publishes as JSON)";
+  }
+
+  return (
+    <div className="system-pipeline-row">
+      <span className="system-pipeline-tone">{indicator(tone)}</span>
+      <span className="system-pipeline-stage">Schema Registry</span>
+      <span className="system-pipeline-metric">{metric}</span>
+      <span className="system-pipeline-detail muted">{detail}</span>
+    </div>
   );
 }
