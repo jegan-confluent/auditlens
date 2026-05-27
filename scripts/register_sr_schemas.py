@@ -219,9 +219,23 @@ def main() -> int:
                         help="Report current schema versions without registering.")
     args = parser.parse_args()
 
-    url = (os.environ.get("SCHEMA_REGISTRY_URL") or "").strip()
-    key = (os.environ.get("SCHEMA_REGISTRY_API_KEY") or "").strip()
-    secret = (os.environ.get("SCHEMA_REGISTRY_API_SECRET") or "").strip()
+    url = (
+        os.environ.get("SCHEMA_REGISTRY_URL")
+        or os.environ.get("SR_ENDPOINT")
+        or ""
+    ).strip()
+    key = (
+        os.environ.get("SCHEMA_REGISTRY_API_KEY")
+        or os.environ.get("SCHEMA_REGISTRY_KEY")
+        or os.environ.get("SR_API_KEY")
+        or ""
+    ).strip()
+    secret = (
+        os.environ.get("SCHEMA_REGISTRY_API_SECRET")
+        or os.environ.get("SCHEMA_REGISTRY_SECRET")
+        or os.environ.get("SR_API_SECRET")
+        or ""
+    ).strip()
 
     if not url:
         print("ERROR: SCHEMA_REGISTRY_URL is not set", file=sys.stderr)
