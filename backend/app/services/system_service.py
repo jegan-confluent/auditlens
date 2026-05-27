@@ -64,6 +64,10 @@ def _shape_forwarder_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "db_last_error": db_writer.get("db_last_error"),
         "db_last_cleanup_at": db_writer.get("db_last_cleanup_at"),
         "db_last_cleanup_deleted_count": int(db_writer.get("db_last_cleanup_deleted_count") or 0),
+        # Producer-side SR/serialization state from /health; consumed by
+        # _build_schema_registry_status so the /system/status SR block
+        # reflects what the forwarder is actually emitting.
+        "serialization": payload.get("serialization") or {},
     }
 
 
