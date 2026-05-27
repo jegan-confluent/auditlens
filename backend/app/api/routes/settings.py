@@ -220,7 +220,13 @@ async def get_sr_status(
         async with httpx.AsyncClient(auth=auth, timeout=_SR_TIMEOUT_SECONDS) as client:
             resp = await client.get(f"{base}/subjects")
             resp.raise_for_status()
-            subject_names: list[str] = resp.json() or []
+            all_subject_names: list[str] = resp.json() or []
+            # Filter to AuditLens-owned subjects. An SR cluster shared with
+            # other apps can list dozens of unrelated subjects; surfacing
+            # them in the UI made the registered-subjects table noisy and
+            # broke the "is audit.enriched.v1-value registered?" check
+            # downstream consumers do against subjects[].
+            subject_names = [s for s in all_subject_names if s.startswith("audit.")]
 
             subjects: list[dict] = []
             enriched_registered_schema_str: str | None = None

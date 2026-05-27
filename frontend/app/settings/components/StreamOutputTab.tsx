@@ -29,6 +29,12 @@ type StreamOutputInfo = {
   };
 };
 
+// Minimal slice of /settings/schema_registry/status we need here.
+// The full payload has more fields; we only consume subjects[].
+type SrStatusLite = {
+  subjects: Array<{ name: string }>;
+};
+
 type Props = {
   onGotoSchemaRegistry: () => void;
   onGotoTableflow: () => void;
@@ -47,6 +53,7 @@ const TOPIC_ROWS: Array<{ key: keyof StreamOutputInfo["topics"]; description: st
 export function StreamOutputTab({ onGotoSchemaRegistry, onGotoTableflow }: Props) {
   const [info, setInfo] = useState<StreamOutputInfo | null>(null);
   const [health, setHealth] = useState<ForwarderHealth | null>(null);
+  const [srStatus, setSrStatus] = useState<SrStatusLite | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
@@ -54,16 +61,23 @@ export function StreamOutputTab({ onGotoSchemaRegistry, onGotoTableflow }: Props
   useEffect(() => {
     let aborted = false;
     setLoading(true);
-    // Fetch both in parallel — the format badge needs the forwarder's live
-    // serialization state, not just SR registration.
+    // Fetch all three in parallel:
+    //  - stream_output/info → topics + Confluent ids + Flink link
+    //  - forwarder /health  → live producer-side Avro vs JSON state
+    //  - schema_registry/status → filtered subjects[] (AuditLens-owned
+    //    only, after the audit.* filter); used for the "Schemas
+    //    registered" prereq so it derives from the same source-of-truth
+    //    table the SR tab shows.
     Promise.all([
       apiGet("/settings/stream_output/info").catch((e: Error) => { throw e; }),
       getForwarderHealth().catch(() => null as ForwarderHealth | null),
+      apiGet("/settings/schema_registry/status").catch(() => null as SrStatusLite | null),
     ])
-      .then(([infoData, healthData]) => {
+      .then(([infoData, healthData, srStatusData]) => {
         if (aborted) return;
         setInfo(infoData as StreamOutputInfo);
         if (healthData) setHealth(healthData);
+        if (srStatusData) setSrStatus(srStatusData as SrStatusLite);
       })
       .catch((e: Error) => { if (!aborted) setError(e.message); })
       .finally(() => { if (!aborted) setLoading(false); });
@@ -85,7 +99,14 @@ export function StreamOutputTab({ onGotoSchemaRegistry, onGotoTableflow }: Props
   if (!info) return null;
 
   const srConfigured = info.schema_registry.configured;
-  const schemasRegistered = info.schema_registry.enriched_avro_ready;
+  // Derive from the filtered subject list (audit.* only) returned by
+  // /settings/schema_registry/status — same source the SR tab shows.
+  // Falls back to info.schema_registry.enriched_avro_ready if SR status
+  // failed to load (so a transient SR error doesn't drop the checkmark
+  // when registration actually succeeded earlier).
+  const schemasRegistered =
+    srStatus?.subjects?.some((s) => s.name === info.enriched_subject) ??
+    info.schema_registry.enriched_avro_ready;
   const flinkUrl = info.confluent.flink_workspace_url;
   const allPrereqsReady = srConfigured && schemasRegistered;
   const enrichedTopic = info.topics.enriched;
