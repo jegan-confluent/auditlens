@@ -226,3 +226,7 @@ updated.sh
 *_bootstrap.sh
 .dev-scratch/
 scratch/
+
+# Internal session docs
+docs/2025-*/
+docs/2026-*/
