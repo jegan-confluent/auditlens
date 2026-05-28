@@ -218,3 +218,11 @@ FEATURES.md
 claude-addon.sh
 frontend/.next/
 frontend/node_modules/
+
+# Scratch bootstrap scripts (may contain real credentials)
+setup.sh
+create.sh
+updated.sh
+*_bootstrap.sh
+.dev-scratch/
+scratch/

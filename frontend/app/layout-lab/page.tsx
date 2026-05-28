@@ -2,7 +2,7 @@ import type React from "react";
 import { notFound } from "next/navigation";
 
 const mockEvents = [
-  { time: "10:28", decision: "Action Needed", who: "u-75rw9o", action: "Topic deleted", resource: "jegan-testing", source: "10.10.0.11" },
+  { time: "10:28", decision: "Action Needed", who: "u-demo01", action: "Topic deleted", resource: "jegan-testing", source: "10.10.0.11" },
   { time: "10:24", decision: "Review", who: "sa-prod-admin", action: "Connector config updated", resource: "payment-sink", source: "lkc-prod" },
   { time: "10:18", decision: "Info", who: "u-reader", action: "Workspace listed", resource: "env-prod", source: "Confluent Cloud" }
 ];

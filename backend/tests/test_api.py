@@ -582,7 +582,7 @@ def test_events_list_uses_persisted_source_ip_for_request_metadata(client):
                 "methodName": "GetStatement",
                 "principal": "u-0jwz56",
                 "cloudResources": {
-                    "scope": {"resources": [{"resourceType": "ENVIRONMENT", "resourceId": "env-mkr6ww"}, {"resourceType": "FLINK_REGION", "resourceId": "aws.us-east-1"}]},
+                    "scope": {"resources": [{"resourceType": "ENVIRONMENT", "resourceId": "env-abc123"}, {"resourceType": "FLINK_REGION", "resourceId": "aws.us-east-1"}]},
                     "resource": {"resourceType": "STATEMENT", "resourceId": "c360-loyalty-revenue-job"},
                 },
             },
@@ -595,7 +595,7 @@ def test_events_list_uses_persisted_source_ip_for_request_metadata(client):
     assert list_response.status_code == 200
     item = list_response.json()["items"][0]
     assert item["source_ip"] == "165.1.202.190"
-    assert item["source_context"] == "env-mkr6ww"
+    assert item["source_context"] == "env-abc123"
     assert item["resource_type"] == "statement"
     assert item["resource_name"] == "c360-loyalty-revenue-job"
     assert item["flink_region"] == "aws.us-east-1"
@@ -624,7 +624,7 @@ def test_events_include_resource_intelligence_fields_and_catalog_entry(client):
                     "scope": {
                         "resources": [
                             {"resourceType": "ORGANIZATION", "resourceId": "org-1"},
-                            {"resourceType": "ENVIRONMENT", "resourceId": "env-mkr6ww"},
+                            {"resourceType": "ENVIRONMENT", "resourceId": "env-abc123"},
                             {"resourceType": "FLINK_REGION", "resourceId": "aws.us-east-1"},
                         ]
                     },
@@ -644,7 +644,7 @@ def test_events_include_resource_intelligence_fields_and_catalog_entry(client):
     assert response.status_code == 200
     item = response.json()["items"][0]
     assert item["resource_display_name"] == "Statement: c360-loyalty-revenue-job"
-    assert item["resource_scope"].startswith("environment:env-mkr6ww")
+    assert item["resource_scope"].startswith("environment:env-abc123")
     assert item["resource_criticality"] == "medium"
     assert item["blast_radius_hint"] == "environment-scoped"
 
@@ -652,8 +652,8 @@ def test_events_include_resource_intelligence_fields_and_catalog_entry(client):
     assert detail_response.status_code == 200
     detail = detail_response.json()
     assert detail["resource_display_name"] == "Statement: c360-loyalty-revenue-job"
-    assert detail["parent_resource"] == "environment:env-mkr6ww"
-    assert detail["resource_scope"].startswith("environment:env-mkr6ww")
+    assert detail["parent_resource"] == "environment:env-abc123"
+    assert detail["resource_scope"].startswith("environment:env-abc123")
 
 
 def test_event_triage_lifecycle_basic(client, monkeypatch, tmp_path):

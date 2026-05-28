@@ -45,7 +45,7 @@ def test_extract_resource_context_for_flink_statement():
             "scope": {
                 "resources": [
                     {"resourceType": "ORGANIZATION", "resourceId": "org-1"},
-                    {"resourceType": "ENVIRONMENT", "resourceId": "env-mkr6ww"},
+                    {"resourceType": "ENVIRONMENT", "resourceId": "env-abc123"},
                     {"resourceType": "FLINK_REGION", "resourceId": "aws.us-east-1"},
                 ]
             },
@@ -56,9 +56,9 @@ def test_extract_resource_context_for_flink_statement():
     assert context.resource_type == "statement"
     assert context.resource_name == "c360-loyalty-revenue-job"
     assert context.resource_display_name == "Statement: c360-loyalty-revenue-job"
-    assert context.environment_id == "env-mkr6ww"
-    assert context.parent_resource == "environment:env-mkr6ww"
-    assert context.resource_scope.startswith("environment:env-mkr6ww")
+    assert context.environment_id == "env-abc123"
+    assert context.parent_resource == "environment:env-abc123"
+    assert context.resource_scope.startswith("environment:env-abc123")
     assert context.resource_criticality == "medium"
     assert context.blast_radius_hint == "environment-scoped"
     assert context.production_hint == "unknown"

@@ -328,7 +328,7 @@ audit-forwarder-feb/
 │  │ Strategy:     latest                                     │  │
 │  │ Consumer Grp: audit-fwd-v3-feb                           │  │
 │  │ Topic:        confluent-audit-log-events                 │  │
-│  │ Bootstrap:    pkc-4ywp7...                               │  │
+│  │ Bootstrap:    pkc-xxxxx...                               │  │
 │  │ Dry Run:      false                                      │  │
 │  │ User:         forwarder                                  │  │
 │  │ Host:         audit-forwarder                            │  │

@@ -247,7 +247,7 @@ DOCKER_BUILDKIT := 1
 export DOCKER_BUILDKIT
 
 # EC2 deployment config — update before running make deploy
-EC2_IP    ?= 98.95.144.160
+EC2_IP    ?= your-ec2-ip-here
 EC2_USER  ?= ec2-user
 PEM       ?= ~/.ssh/auditlens.pem
 REMOTE     = $(EC2_USER)@$(EC2_IP):~/AuditLens/

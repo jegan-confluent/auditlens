@@ -135,7 +135,7 @@ def generate_access_transparency_event(org_id: str) -> dict:
         "time": datetime.now(timezone.utc).isoformat() + "Z",
         "data": {
             "authenticationInfo": {
-                "principal": "confluent-support@confluent.io"
+                "principal": "support@example.com"
             },
             "methodName": "SupportAccess",
             "serviceName": "support",
@@ -145,7 +145,7 @@ def generate_access_transparency_event(org_id: str) -> dict:
             "accessTransparency": {
                 "reason": "Customer-initiated support ticket",
                 "caseNumber": f"CS-2025-{random.randint(10000, 99999)}",
-                "accessedBy": "support-engineer@confluent.io"
+                "accessedBy": "engineer@example.com"
             }
         }
     }

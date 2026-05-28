@@ -21,7 +21,7 @@ export function normalizeActorDisplay(value: string): string {
 
 /**
  * Strip a Confluent CRN to its meaningful terminal ID component.
- * crn://confluent.cloud/.../environment=env-mkr6ww  →  env-mkr6ww
+ * crn://confluent.cloud/.../environment=env-abc123  →  env-abc123
  * crn://confluent.cloud/.../cloud-cluster=lkc-abc   →  lkc-abc
  * Non-CRN strings are returned unchanged; null/undefined returns "—".
  */

@@ -6,7 +6,7 @@ Resolves Confluent Cloud principal IDs to human-readable names/emails.
 Usage:
     enricher = IdentityEnricher(cloud_api_key, cloud_api_secret)
     name = enricher.resolve("sa-abc123")  # → "payments-service (sa-abc123)"
-    name = enricher.resolve("User:u-75rw9o")  # → "jegan@confluent.io (u-75rw9o)"
+    name = enricher.resolve("User:u-abc123")  # → "alice@example.com (u-abc123)"
 
 API Endpoints:
     - GET https://api.confluent.cloud/iam/v2/service-accounts

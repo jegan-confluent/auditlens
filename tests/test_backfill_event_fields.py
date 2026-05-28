@@ -59,7 +59,7 @@ def test_source_backfill_updates_missing_source_ip_and_context():
                     "methodName": "kafka.Authentication",
                     "principal": "u-source",
                     "requestMetadata": {"clientAddress": [{"ip": "165.1.202.190"}]},
-                    "cloudResources": {"scope": {"resources": [{"resourceType": "ENVIRONMENT", "resourceId": "env-mkr6ww"}]}},
+                    "cloudResources": {"scope": {"resources": [{"resourceType": "ENVIRONMENT", "resourceId": "env-abc123"}]}},
                 },
             )
             event.source_ip = None
@@ -69,7 +69,7 @@ def test_source_backfill_updates_missing_source_ip_and_context():
             db.refresh(event)
             assert result["updated"] == 1
             assert event.source_ip == "165.1.202.190"
-            assert event.source_context == "env-mkr6ww"
+            assert event.source_context == "env-abc123"
     finally:
         tmp.cleanup()
 

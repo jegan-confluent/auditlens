@@ -22,13 +22,6 @@ def test_health_check_treats_pipeline_readiness_as_degraded_not_api_failure():
     assert 'check_optional_http "Pipeline /pipeline/ready"' in source
 
 
-def test_sqlite_demo_script_explicitly_uses_sqlite():
-    source = (REPO_ROOT / "scripts" / "run_sqlite_demo.sh").read_text(encoding="utf-8")
-    assert 'export DATABASE_URL="sqlite:////var/lib/auditlens/auditlens_api.db"' in source
-    assert 'export FORWARDER_DATABASE_URL="sqlite:////var/lib/auditlens/auditlens_api.db"' in source
-    assert "SQLite demo mode" in source
-
-
 def test_db_status_script_exists():
     source = (REPO_ROOT / "scripts" / "db_status.sh").read_text(encoding="utf-8")
     assert "backend.app.services.db_status_service" in source

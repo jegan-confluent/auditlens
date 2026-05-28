@@ -1193,8 +1193,8 @@ docs.confluent.io/tableflow
 #csta-enablement
 
 📧 Contact
-Your CSTA: [name@confluent.io]
-Tableflow PM: [pm@confluent.io]
+Your CSTA: [your-csta@company.com]
+Tableflow PM: [pm@company.com]
 
 📚 Resources
 Tableflow Main Deck v1.2

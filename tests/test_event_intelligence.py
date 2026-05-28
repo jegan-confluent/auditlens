@@ -44,7 +44,7 @@ def flink_statement_payload(result="FAILURE"):
             "scope": {
                 "resources": [
                     {"resourceType": "ORGANIZATION", "resourceId": "org-1"},
-                    {"resourceType": "ENVIRONMENT", "resourceId": "env-mkr6ww"},
+                    {"resourceType": "ENVIRONMENT", "resourceId": "env-abc123"},
                     {"resourceType": "FLINK_REGION", "resourceId": "aws.us-east-1"},
                 ]
             },
@@ -61,14 +61,14 @@ def test_flink_statement_primary_resource_and_source_context():
 
     assert normalized["resource_type"] == "statement"
     assert normalized["resource_name"] == "c360-loyalty-revenue-job"
-    assert normalized["environment_id"] == "env-mkr6ww"
+    assert normalized["environment_id"] == "env-abc123"
     assert normalized["flink_region"] == "aws.us-east-1"
     assert normalized["source_ip"] == "165.1.202.190"
-    assert normalized["source_context"] == "env-mkr6ww"
+    assert normalized["source_context"] == "env-abc123"
     assert normalized["resource_display_name"] == "Statement: c360-loyalty-revenue-job"
-    assert normalized["resource_scope"].startswith("environment:env-mkr6ww")
+    assert normalized["resource_scope"].startswith("environment:env-abc123")
     assert normalized["resource_criticality"] == "medium"
-    assert source["source_context"] == "env-mkr6ww"
+    assert source["source_context"] == "env-abc123"
     assert digest["resource_family"] == "flink"
     assert digest["resource_display_short"] == "c360-loyalty-revenue-job"
     assert digest["change_type"] == "read/listed"

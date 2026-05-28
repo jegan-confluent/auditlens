@@ -327,7 +327,7 @@ Timestamp:        2025-02-19T10:30:00Z
 Strategy:         latest
 Consumer Group:   audit-fwd-v3-feb
 Topic:            confluent-audit-log-events
-Bootstrap:        pkc-4ywp7.us-west-2.aws.confluent.cloud:9092
+Bootstrap:        pkc-xxxxx.us-west-2.aws.confluent.cloud:9092
 Dry Run:          false
 User:             forwarder
 Host:             audit-forwarder
