@@ -138,7 +138,17 @@ class _ExemptingMiddleware(SlowAPIMiddleware):
 
 def create_app() -> FastAPI:
     settings = get_settings()
-    app = FastAPI(title=settings.api_title, version=settings.api_version, lifespan=_lifespan)
+    # redirect_slashes=False: FastAPI's default 307 for trailing-slash
+    # mismatches generates Location headers without the Caddy /api
+    # prefix, redirecting clients to the Next.js frontend instead of
+    # the API. Disabling it makes trailing-slash requests return 404
+    # cleanly rather than silently routing through the wrong service.
+    app = FastAPI(
+        title=settings.api_title,
+        version=settings.api_version,
+        lifespan=_lifespan,
+        redirect_slashes=False,
+    )
 
     try:
         from prometheus_fastapi_instrumentator import Instrumentator  # type: ignore[import-untyped]

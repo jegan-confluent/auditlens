@@ -2031,11 +2031,11 @@ def main():
                 daemon=True,
             ).start()
             logger.info(
-                "pipeline watchdog: started (threshold=%dm, check every 5m)",
+                "Pipeline health watchdog started (threshold=%d min)",
                 notifier.pipeline_silence_threshold_minutes,
             )
         except Exception as exc:
-            logger.warning("pipeline watchdog: failed to start (%s)", exc)
+            logger.warning("Pipeline health watchdog: failed to start (%s)", exc)
 
     # Create clients. Hook the librdkafka stats callback so per-partition
     # consumer_lag flows in via stats.json, not synchronous watermark polls.

@@ -227,6 +227,13 @@ _EXPORT_COLUMNS = (
     "environment_id", "cluster_id", "event_title",
 )
 
+# CSV header overrides — keep the internal field name on the row dict (so the
+# JSON branch stays backward compatible) but emit the spec/README column name
+# in the CSV header row.
+_CSV_HEADER_RENAMES = {
+    "actor_display_name": "actor_name",
+}
+
 
 def _export_row_dict(evt: Any) -> dict[str, Any]:
     """Materialise one event into the export-column dict, computing
@@ -248,7 +255,7 @@ def _export_row_dict(evt: Any) -> dict[str, Any]:
 def events_export(
     request: Request,
     _auth: None = Depends(_require_exporter),
-    format: str = Query(default="json", pattern="^(csv|json)$"),
+    format: str = Query(default="csv", pattern="^(csv|json)$"),
     limit: int = Query(default=1000, ge=1, le=EXPORT_MAX_ROWS),
     time_window: str | None = Query(default=None, pattern=r"^[1-9][0-9]*[mh]$"),
     mode: str = Query(default="decision"),
@@ -309,7 +316,7 @@ def events_export(
                 "narrow the filters to export a smaller window.\n"
             )
         writer = csv.writer(buf)
-        writer.writerow(_EXPORT_COLUMNS)
+        writer.writerow([_CSV_HEADER_RENAMES.get(col, col) for col in _EXPORT_COLUMNS])
         for evt in items:
             row_data = _export_row_dict(evt)
             writer.writerow([
