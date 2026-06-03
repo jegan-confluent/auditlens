@@ -21,6 +21,14 @@
 # Example: app_base_url: "https://auditlens.example.com"
 app_base_url: ""
 
+# Pipeline health watchdog: when enabled, a daemon thread inside the
+# forwarder polls Postgres every 5 minutes for the most recent audit
+# event and fires a Slack/Teams system alert if the silence exceeds
+# pipeline_silence_threshold_minutes. The alert dispatches once at
+# onset and once on recovery — it does not flood the channel.
+pipeline_health_check_enabled: true
+pipeline_silence_threshold_minutes: 30
+
 destinations:
   - name: "security-alerts"          # human label for logs
     type: slack                      # slack | teams | webhook | pagerduty

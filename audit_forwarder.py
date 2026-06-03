@@ -1670,6 +1670,85 @@ def _backfill_batched(conn_factory, where_clause: str, set_clause: str, params: 
     return total
 
 
+def _pipeline_watchdog_loop(
+    notifier: AuditLensNotifier,
+    threshold_minutes: int,
+    check_interval_seconds: int = 300,
+) -> None:
+    """Background daemon: poll Postgres for the most recent audit_events
+    timestamp every `check_interval_seconds`. If it lags behind the wall
+    clock by more than `threshold_minutes`, fire one Slack/Teams system
+    alert via the notifier. Fire one more on recovery, then go quiet.
+
+    Designed to be cheap and self-contained: it owns its own state (no
+    shared mutex), survives DB outages by retrying, and never raises.
+    """
+    from sqlalchemy import text as sa_text  # noqa: PLC0415
+
+    alerted = False
+    while not _shutdown_requested:
+        # Wait up to `check_interval_seconds`, but break early on shutdown.
+        for _ in range(max(1, check_interval_seconds)):
+            if _shutdown_requested:
+                return
+            time.sleep(1)
+
+        if db_writer is None:
+            # DB not yet initialised (or down). Stay silent — the
+            # forwarder's own /health endpoint already reports this.
+            continue
+
+        try:
+            with db_writer.engine.connect() as conn:
+                row = conn.execute(
+                    sa_text("SELECT MAX(timestamp) FROM audit_events")
+                ).first()
+            latest = row[0] if row is not None else None
+        except Exception as exc:
+            logger.warning("pipeline watchdog: db query failed (%s)", exc)
+            continue
+
+        if latest is None:
+            # Empty table. Skip rather than alert — a fresh install has
+            # no events yet and that is not a pipeline problem.
+            continue
+
+        # Normalise naive datetimes coming back from sqlite/test envs.
+        if latest.tzinfo is None:
+            latest = latest.replace(tzinfo=timezone.utc)
+        silence_seconds = (datetime.now(timezone.utc) - latest).total_seconds()
+        threshold_seconds = threshold_minutes * 60
+
+        if silence_seconds > threshold_seconds and not alerted:
+            minutes = int(silence_seconds // 60)
+            title = "⚠️ AuditLens pipeline silence detected"
+            body = (
+                f"No events ingested for {minutes} minutes. "
+                f"Last event: {latest.isoformat()}. "
+                f"Check: `docker compose ps auditlens-forwarder`"
+            )
+            try:
+                count = notifier.send_system_alert(title, body)
+                logger.warning(
+                    "pipeline watchdog: silence %dm exceeded threshold %dm, alerted %d destination(s)",
+                    minutes, threshold_minutes, count,
+                )
+            except Exception as exc:
+                logger.warning("pipeline watchdog: alert dispatch failed (%s)", exc)
+            alerted = True
+        elif silence_seconds <= threshold_seconds and alerted:
+            title = "✅ AuditLens pipeline recovered"
+            body = f"Events are flowing again. Latest event: {latest.isoformat()}"
+            try:
+                count = notifier.send_system_alert(title, body)
+                logger.info(
+                    "pipeline watchdog: recovery alert sent to %d destination(s)", count,
+                )
+            except Exception as exc:
+                logger.warning("pipeline watchdog: recovery dispatch failed (%s)", exc)
+            alerted = False
+
+
 def _run_startup_display_name_backfill() -> None:
     """One-time backfill of historical enrichment gaps — runs once in a daemon
     thread after startup so it never blocks the consume loop.
@@ -1935,6 +2014,28 @@ def main():
             "Notification layer init failed (%s) — continuing without it", exc
         )
         notifier = None
+
+    # Pipeline-health watchdog: fires a Slack/Teams alert when no events
+    # have landed in audit_events for longer than the configured threshold.
+    # Daemon thread so it dies with the process; never crashes the loop.
+    if (
+        notifier is not None
+        and notifier.has_destinations()
+        and notifier.pipeline_health_check_enabled
+    ):
+        try:
+            threading.Thread(
+                target=_pipeline_watchdog_loop,
+                args=(notifier, notifier.pipeline_silence_threshold_minutes),
+                name="auditlens-pipeline-watchdog",
+                daemon=True,
+            ).start()
+            logger.info(
+                "pipeline watchdog: started (threshold=%dm, check every 5m)",
+                notifier.pipeline_silence_threshold_minutes,
+            )
+        except Exception as exc:
+            logger.warning("pipeline watchdog: failed to start (%s)", exc)
 
     # Create clients. Hook the librdkafka stats callback so per-partition
     # consumer_lag flows in via stats.json, not synchronous watermark polls.

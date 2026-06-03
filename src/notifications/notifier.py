@@ -247,6 +247,10 @@ class AuditLensNotifier:
         # Slack/Teams alerts get a "View event →" link pointing at
         # /events?event_id=<id> on this host. Empty string = no link.
         self._app_base_url: str = ""
+        # Pipeline-health watchdog config (top-level notifications.yml
+        # keys). The forwarder reads these via the public properties.
+        self._pipeline_health_check_enabled: bool = True
+        self._pipeline_silence_threshold_minutes: int = 30
         self._dedup: dict[tuple[str, str], float] = {}
         self._dedup_lock = threading.Lock()
         self._call_count = 0
@@ -272,6 +276,61 @@ class AuditLensNotifier:
     def has_destinations(self) -> bool:
         """True if at least one enabled destination is configured."""
         return any(d.enabled for d in self._destinations)
+
+    @property
+    def pipeline_health_check_enabled(self) -> bool:
+        return self._pipeline_health_check_enabled
+
+    @property
+    def pipeline_silence_threshold_minutes(self) -> int:
+        return self._pipeline_silence_threshold_minutes
+
+    def send_system_alert(self, title: str, body: str) -> int:
+        """Fire a system-level Slack/Teams alert that bypasses event
+        filtering (used by the pipeline-health watchdog). Returns the
+        number of destinations a message was sent to. PagerDuty and
+        generic webhook destinations are skipped — system alerts go to
+        operator chat channels only.
+        """
+        sent = 0
+        text = f"{title}\n{body}" if body else title
+        for dest in self._destinations:
+            if not dest.enabled:
+                continue
+            if dest.type == "slack":
+                payload = {
+                    "blocks": [
+                        {
+                            "type": "header",
+                            "text": {"type": "plain_text", "text": title[:150], "emoji": True},
+                        },
+                        {
+                            "type": "section",
+                            "text": {"type": "mrkdwn", "text": body or " "},
+                        },
+                    ],
+                    "text": text,
+                }
+                try:
+                    if self._post_json(dest.webhook_url, payload):
+                        sent += 1
+                except Exception as exc:
+                    logger.warning("system-alert post to %s failed: %s", dest.name, exc)
+            elif dest.type == "teams":
+                payload = {
+                    "@type": "MessageCard",
+                    "@context": "http://schema.org/extensions",
+                    "summary": title,
+                    "themeColor": "FF0000",
+                    "title": title,
+                    "text": body or "",
+                }
+                try:
+                    if self._post_json(dest.webhook_url, payload):
+                        sent += 1
+                except Exception as exc:
+                    logger.warning("system-alert post to %s failed: %s", dest.name, exc)
+        return sent
 
     def _load_config(self) -> None:
         """Load/reload notifications.yml. Safe to call at any time; never raises."""
@@ -310,8 +369,21 @@ class AuditLensNotifier:
                 self._app_base_url = base_url.strip().rstrip("/")
             else:
                 self._app_base_url = ""
+            # Watchdog config — defaults preserve current behaviour if
+            # operators have not added the keys yet.
+            wd_enabled = raw.get("pipeline_health_check_enabled")
+            self._pipeline_health_check_enabled = (
+                True if wd_enabled is None else bool(wd_enabled)
+            )
+            wd_threshold = raw.get("pipeline_silence_threshold_minutes")
+            if isinstance(wd_threshold, int) and wd_threshold > 0:
+                self._pipeline_silence_threshold_minutes = wd_threshold
+            else:
+                self._pipeline_silence_threshold_minutes = 30
         else:
             self._app_base_url = ""
+            self._pipeline_health_check_enabled = True
+            self._pipeline_silence_threshold_minutes = 30
 
         destinations: list[NotificationDestination] = []
         for entry in entries:
