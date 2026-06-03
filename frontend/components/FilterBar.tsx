@@ -65,7 +65,6 @@ export default function FilterBar({ filters, options, hierarchy, onChange, onRes
   const methodOptions = activeCategory ? activeCategory.methods : [];
 
   const secondaryCount = [
-    filters.actor,
     filters.resource,
     filters.cluster_name,
     filters.environment_name,
@@ -77,7 +76,7 @@ export default function FilterBar({ filters, options, hierarchy, onChange, onRes
   ].filter(Boolean).length;
 
   const [moreOpen, setMoreOpen] = useState(
-    () => [filters.actor, filters.resource, filters.cluster_name, filters.environment_name, filters.resource_type, filters.result, filters.production_hint, filters.plane, filters.action].some(Boolean)
+    () => [filters.resource, filters.cluster_name, filters.environment_name, filters.resource_type, filters.result, filters.production_hint, filters.plane, filters.action].some(Boolean)
   );
 
   const [presets, setPresets] = useState<FilterPreset[]>(() => {
@@ -192,6 +191,18 @@ export default function FilterBar({ filters, options, hierarchy, onChange, onRes
           <button type="button" className="actor-search-clear" aria-label="Clear search" onClick={onQClear}>×</button>
         ) : null}
       </span>
+      <span className="actor-search" style={{ display: "block", marginBottom: 12 }}>
+        <input
+          value={actorDraft}
+          onChange={(e) => onActorInput(e.target.value)}
+          placeholder="Actor / email — filter by ID (u-xxx, sa-xxx) or address"
+          aria-label="Actor / email"
+          style={{ width: "100%", paddingRight: 32 }}
+        />
+        {actorDraft ? (
+          <button type="button" className="actor-search-clear" aria-label="Clear actor filter" onClick={onActorClear}>×</button>
+        ) : null}
+      </span>
       <div className="quick-filter-row" aria-label="Quick filters">
         {quickFilters.map((filter) => (
           <button
@@ -304,20 +315,6 @@ export default function FilterBar({ filters, options, hierarchy, onChange, onRes
 
       {moreOpen ? (
         <div className="filter-secondary-panel">
-          <div>
-            <span className="actor-search">
-              <input
-                value={actorDraft}
-                onChange={(e) => onActorInput(e.target.value)}
-                placeholder="Actor ID or email..."
-                aria-label="Actor filter"
-              />
-              {actorDraft ? (
-                <button type="button" className="actor-search-clear" aria-label="Clear actor filter" onClick={onActorClear}>×</button>
-              ) : null}
-            </span>
-            <div style={{ fontSize: "0.72em", color: "var(--muted)", marginTop: 2 }}>Search by ID (u-xxx, sa-xxx) or email address</div>
-          </div>
           <input
             value={filters.resource}
             onChange={(e) => update("resource", e.target.value)}
