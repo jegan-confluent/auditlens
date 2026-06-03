@@ -24,7 +24,7 @@ from backend.app.services.triage_service import attach_triage_snapshots, get_tri
 from src.product.event_normalization import canonical_resource_type
 
 MAX_EVENT_LIMIT = 500
-EXPORT_MAX_ROWS = 10_000
+EXPORT_MAX_ROWS = 50_000
 
 _DATA_PLANE_PREFIXES: tuple[str, ...] = (
     "kafka.",

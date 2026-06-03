@@ -15,6 +15,7 @@ from backend.app.db.database import get_db
 from backend.app.schemas.event import AuditEventDetailOut, AuditEventListOut, AuditNoiseListOut
 from backend.app.schemas.response import EventListNoiseResponse, EventListResponse
 from backend.app.services.event_service import EXPORT_MAX_ROWS, get_event, list_deletions, list_events_result, list_failures
+from src.product.ip_baseline_tracker import detect_cloud_provider
 from backend.app.services.noise_service import (
     NOISE_EVENTS_MAX_LIMIT,
     UNSUPPORTED_NOISE_FILTERS,
@@ -221,9 +222,25 @@ def events(
 
 _EXPORT_COLUMNS = (
     "timestamp", "actor_display_name", "actor", "action", "resource_name",
-    "resource_type", "result", "signal_type", "risk_level", "source_ip",
-    "client_tool", "environment_id", "cluster_id", "event_title",
+    "resource_type", "result", "signal_type", "decision_reason", "risk_level",
+    "source_ip", "cloud_provider", "granted", "client_tool",
+    "environment_id", "cluster_id", "event_title",
 )
+
+
+def _export_row_dict(evt: Any) -> dict[str, Any]:
+    """Materialise one event into the export-column dict, computing
+    derived fields (cloud_provider, granted) that don't live on the
+    AuditEventListOut schema."""
+    base = AuditEventListOut.model_validate(evt).model_dump()
+    ip = base.get("source_ip")
+    if ip:
+        provider, _region = detect_cloud_provider(str(ip))
+        base["cloud_provider"] = provider or ""
+    else:
+        base["cloud_provider"] = ""
+    base["granted"] = not bool(base.get("is_denied"))
+    return base
 
 
 @router.get("/events/export")
@@ -232,7 +249,7 @@ def events_export(
     request: Request,
     _auth: None = Depends(_require_exporter),
     format: str = Query(default="json", pattern="^(csv|json)$"),
-    limit: int = Query(default=1000, ge=1, le=10000),
+    limit: int = Query(default=1000, ge=1, le=EXPORT_MAX_ROWS),
     time_window: str | None = Query(default=None, pattern=r"^[1-9][0-9]*[mh]$"),
     mode: str = Query(default="decision"),
     resource_type: str | None = None,
@@ -286,10 +303,15 @@ def events_export(
 
     if format == "csv":
         buf = io.StringIO()
+        if result_set.result_limit_reached:
+            buf.write(
+                f"# Truncated to EXPORT_MAX_ROWS={EXPORT_MAX_ROWS}; "
+                "narrow the filters to export a smaller window.\n"
+            )
         writer = csv.writer(buf)
         writer.writerow(_EXPORT_COLUMNS)
         for evt in items:
-            row_data = AuditEventListOut.model_validate(evt).model_dump()
+            row_data = _export_row_dict(evt)
             writer.writerow([
                 "" if row_data.get(col) is None else str(row_data[col])
                 for col in _EXPORT_COLUMNS
@@ -304,7 +326,7 @@ def events_export(
     # JSON
     rows = []
     for evt in items:
-        row_data = AuditEventListOut.model_validate(evt).model_dump()
+        row_data = _export_row_dict(evt)
         rows.append({col: row_data.get(col) for col in _EXPORT_COLUMNS})
     content = json.dumps(rows, default=str)
     return StreamingResponse(

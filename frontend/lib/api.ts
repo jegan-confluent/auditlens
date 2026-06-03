@@ -130,7 +130,7 @@ export async function exportEvents(
 ): Promise<string> {
   const exportParams = new URLSearchParams(params);
   exportParams.set("format", format);
-  exportParams.set("limit", "10000");
+  exportParams.set("limit", "50000");
   // remove pagination params not relevant to export
   exportParams.delete("offset");
   const response = await fetch(`${API_BASE}/events/export?${exportParams.toString()}`, {

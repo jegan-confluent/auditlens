@@ -452,7 +452,7 @@ function EventsPageInner() {
       ) : null}
       <RecurringPatterns defaultExpanded={true} filters={filters} />
       <div className="toolbar" style={{ marginBottom: 8, gap: 8 }}>
-        <span className="muted" style={{ fontSize: "0.82em" }}>Download current filters (up to 10k rows):</span>
+        <span className="muted" style={{ fontSize: "0.82em" }}>Download current filters (up to 50k rows):</span>
         <button
           className="btn-suppress"
           disabled={downloading !== null}
