@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from backend.app.db.database import get_db
 from backend.app.schemas.event import AuditEventDetailOut, AuditEventListOut, AuditNoiseListOut
 from backend.app.schemas.response import EventListNoiseResponse, EventListResponse
-from backend.app.services.event_service import EXPORT_MAX_ROWS, get_event, list_deletions, list_events_result, list_failures
+from backend.app.services.event_service import EXPORT_MAX_ROWS, compare_periods, get_event, list_deletions, list_events_result, list_failures
 from src.product.ip_baseline_tracker import detect_cloud_provider
 from backend.app.services.noise_service import (
     NOISE_EVENTS_MAX_LIMIT,
@@ -334,6 +334,24 @@ def events_export(
         media_type="application/json",
         headers={"Content-Disposition": f'attachment; filename="auditlens-events-{date_str}.json"'},
     )
+
+
+@router.get("/events/compare")
+@limiter.limit("30/minute")
+def events_compare(
+    request: Request,
+    _auth: None = Depends(_require_viewer),
+    period_a: str = Query(..., pattern=r"^[1-9][0-9]*[mh]$"),
+    period_b: str = Query(..., pattern=r"^[1-9][0-9]*[mh]$"),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Side-by-side stats for two time windows.
+
+    Returns {period_a: {window, total, by_signal_type, top_actors,
+    top_methods}, period_b: {same}}. Time windows use the same Nm/Nh
+    grammar as the main /events `time_window` param.
+    """
+    return compare_periods(db, period_a=period_a, period_b=period_b)
 
 
 @router.get("/events/{event_id}", response_model=AuditEventDetailOut)

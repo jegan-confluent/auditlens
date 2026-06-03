@@ -11,6 +11,7 @@ import LoadingState from "../../components/LoadingState";
 import DecisionBanner from "../../components/DecisionBanner";
 import EventDetailDrawer from "../../components/EventDetailDrawer";
 import RecurringPatterns from "../../components/RecurringPatterns";
+import ComparePeriodsPanel from "../../components/ComparePeriodsPanel";
 import {
   exportEvents,
   getEvent,
@@ -475,6 +476,7 @@ function EventsPageInner() {
       {summaryLoading ? null : summaryError ? (
         <p className="active-filters">Decision summary unavailable: {summaryError}</p>
       ) : null}
+      <ComparePeriodsPanel />
       <RecurringPatterns defaultExpanded={true} filters={filters} />
       <div className="toolbar" style={{ marginBottom: 8, gap: 8 }}>
         <span className="muted" style={{ fontSize: "0.82em" }}>Download current filters (up to 50k rows):</span>

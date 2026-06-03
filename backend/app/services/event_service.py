@@ -701,6 +701,79 @@ def list_deletions(db: Session, *, limit: int = 100, offset: int = 0) -> tuple[l
     return list_events(db, limit=limit, offset=offset, action_category="Delete")
 
 
+def _period_stats(db: Session, time_window: str) -> dict[str, Any]:
+    """Four lightweight aggregations (total, by_signal_type, top_actors,
+    top_methods) over one Nm/Nh time window.
+
+    Each aggregation is a single GROUP BY query; the route caller runs
+    this twice and returns both periods. Kept narrow on purpose — the
+    summary endpoint already does the heavy single-pass aggregation
+    for the main dashboard."""
+    since = parse_time_window(time_window)
+    if since is None:
+        return {
+            "window": time_window,
+            "total": 0,
+            "by_signal_type": {},
+            "top_actors": [],
+            "top_methods": [],
+        }
+    base_filter = AuditEvent.timestamp >= since
+
+    total = int(db.scalar(select(func.count(AuditEvent.id)).where(base_filter)) or 0)
+
+    by_signal_rows = db.execute(
+        select(AuditEvent._signal_type, func.count(AuditEvent.id))
+        .where(base_filter)
+        .group_by(AuditEvent._signal_type)
+    ).all()
+    by_signal_type: dict[str, int] = {
+        (row[0] or "noise"): int(row[1]) for row in by_signal_rows
+    }
+
+    top_actor_rows = db.execute(
+        select(AuditEvent._actor_display_name, func.count(AuditEvent.id))
+        .where(base_filter)
+        .group_by(AuditEvent._actor_display_name)
+        .order_by(func.count(AuditEvent.id).desc())
+        .limit(5)
+    ).all()
+    top_actors = [
+        {"name": (row[0] or "Unknown"), "count": int(row[1])}
+        for row in top_actor_rows
+    ]
+
+    top_method_rows = db.execute(
+        select(AuditEvent.action, func.count(AuditEvent.id))
+        .where(base_filter)
+        .group_by(AuditEvent.action)
+        .order_by(func.count(AuditEvent.id).desc())
+        .limit(5)
+    ).all()
+    top_methods = [
+        {"action": row[0], "count": int(row[1])}
+        for row in top_method_rows
+    ]
+
+    return {
+        "window": time_window,
+        "total": total,
+        "by_signal_type": by_signal_type,
+        "top_actors": top_actors,
+        "top_methods": top_methods,
+    }
+
+
+def compare_periods(db: Session, *, period_a: str, period_b: str) -> dict[str, Any]:
+    """Side-by-side stats for two time windows. Each window must match
+    the Nm/Nh grammar accepted by parse_time_window; callers should
+    validate via the route's Query pattern."""
+    return {
+        "period_a": _period_stats(db, period_a),
+        "period_b": _period_stats(db, period_b),
+    }
+
+
 def cleanup_retention(
     db: Session,
     retention_days: int,

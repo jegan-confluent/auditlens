@@ -124,6 +124,28 @@ export async function markPatternExpected(id: number, reason: string = ""): Prom
   return response.json() as Promise<{ status: string; id: number }>;
 }
 
+export type PeriodStats = {
+  window: string;
+  total: number;
+  by_signal_type: Record<string, number>;
+  top_actors: Array<{ name: string; count: number }>;
+  top_methods: Array<{ action: string; count: number }>;
+};
+
+export type CompareResponse = {
+  period_a: PeriodStats;
+  period_b: PeriodStats;
+};
+
+export function compareEvents(
+  periodA: string,
+  periodB: string,
+  signal?: AbortSignal
+) {
+  const params = new URLSearchParams({ period_a: periodA, period_b: periodB });
+  return request<CompareResponse>(`/events/compare?${params.toString()}`, signal);
+}
+
 export async function exportEvents(
   params: URLSearchParams,
   format: "csv" | "json"
