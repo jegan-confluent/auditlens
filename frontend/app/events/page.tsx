@@ -294,6 +294,31 @@ function EventsPageInner() {
     return () => controller.abort();
   }, []);
 
+  // Deep-link from Slack alert (?event_id=N): fetch the single event and
+  // open the detail drawer immediately. One-shot on mount — later filter
+  // mutations clear the URL via router.replace, but the drawer state
+  // persists until the user closes it.
+  useEffect(() => {
+    const raw = searchParams.get("event_id");
+    if (!raw) return;
+    const id = Number.parseInt(raw, 10);
+    if (!Number.isFinite(id) || id <= 0) return;
+    getEvent(id)
+      .then((evt) => {
+        setSelectedEvent(evt);
+        setExpandedId(evt.id);
+        setExpandedDetail(evt);
+        setExpandedError(null);
+        setExpandedLoading(false);
+      })
+      .catch((err: Error) => {
+        if (isAbortError(err)) return;
+        setExpandedError(`Could not load event ${id}: ${err.message}`);
+      });
+    // Intentionally not in deps: this is a one-shot deep-link hydrator.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   useEffect(() => {
     const controller = new AbortController();
     setError(null);
@@ -514,6 +539,14 @@ function EventsPageInner() {
           setExpandedId(null);
           setExpandedDetail(null);
           setExpandedError(null);
+          // Strip event_id from the URL on close so refresh doesn't
+          // reopen the same drawer.
+          if (searchParams.get("event_id")) {
+            const next = new URLSearchParams(searchParams.toString());
+            next.delete("event_id");
+            const qs = next.toString();
+            router.replace(qs ? `?${qs}` : "?", { scroll: false });
+          }
         }}
         onTriage={handleTriage}
       />

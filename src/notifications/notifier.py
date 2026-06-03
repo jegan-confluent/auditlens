@@ -243,6 +243,10 @@ class AuditLensNotifier:
     def __init__(self, config_path: str = "notifications.yml") -> None:
         self._config_path = config_path
         self._destinations: list[NotificationDestination] = []
+        # Optional base URL for the AuditLens UI. When set, real-time
+        # Slack/Teams alerts get a "View event →" link pointing at
+        # /events?event_id=<id> on this host. Empty string = no link.
+        self._app_base_url: str = ""
         self._dedup: dict[tuple[str, str], float] = {}
         self._dedup_lock = threading.Lock()
         self._call_count = 0
@@ -301,6 +305,13 @@ class AuditLensNotifier:
                 self._destinations = []
                 self._mtime = mtime
                 return
+            base_url = raw.get("app_base_url")
+            if isinstance(base_url, str):
+                self._app_base_url = base_url.strip().rstrip("/")
+            else:
+                self._app_base_url = ""
+        else:
+            self._app_base_url = ""
 
         destinations: list[NotificationDestination] = []
         for entry in entries:
@@ -1127,7 +1138,40 @@ class AuditLensNotifier:
                 }
             )
 
+        event_url = self._event_deep_link(event)
+        if event_url:
+            blocks.append(
+                {
+                    "type": "actions",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": {"type": "plain_text", "text": "View event →"},
+                            "url": event_url,
+                        }
+                    ],
+                }
+            )
+
         return {"blocks": blocks, "text": header_text}
+
+    def _event_deep_link(self, event: dict) -> str:
+        """Build the AuditLens UI URL for an event, or '' if not configured.
+
+        Requires both app_base_url (top-level notifications.yml key) and
+        an integer event id on the event payload. Anything else returns
+        empty string — caller decides whether to render the link block.
+        """
+        if not self._app_base_url:
+            return ""
+        evt_id = event.get("id")
+        try:
+            evt_id_int = int(evt_id)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return ""
+        if evt_id_int <= 0:
+            return ""
+        return f"{self._app_base_url}/events?event_id={evt_id_int}"
 
     def _format_teams(self, event: dict) -> dict:
         signal_type = (event.get("signal_type") or "informational").lower()

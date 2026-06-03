@@ -14,6 +14,13 @@
 # Risk-level ordering: informational=0, low=1, medium=2, high=3, critical=4
 # min_risk_level: high  → only events with risk_level >= high pass.
 
+# Public base URL of your AuditLens UI. When set, real-time Slack/Teams
+# alerts include a "View event →" button that links to
+# {app_base_url}/events?event_id=<id>. Leave empty (or omit) to send
+# alerts without a link. No trailing slash required.
+# Example: app_base_url: "https://auditlens.example.com"
+app_base_url: ""
+
 destinations:
   - name: "security-alerts"          # human label for logs
     type: slack                      # slack | teams | webhook | pagerduty
