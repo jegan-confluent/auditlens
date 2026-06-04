@@ -1874,6 +1874,17 @@ def main():
         sys.exit(1)
     logger.info("Startup configuration validated successfully")
 
+    # Surface the IAM kill-switch loudly at WARNING level so operators (and
+    # `make diagnose-ingest`) can tell at a glance whether catch-up mode is
+    # active. Logged once during startup; the bypass itself runs in-process
+    # in src/product/actor_enrichment.py:enrich_actor.
+    if os.getenv("IAM_ENRICHMENT_ENABLED", "true").strip().lower() == "false":
+        logger.warning(
+            "IAM enrichment disabled (IAM_ENRICHMENT_ENABLED=false). "
+            "Actor names will show raw principal IDs. "
+            "Re-enable after catch-up lag clears."
+        )
+
     initialize_product_store_or_exit()
     _health_server_module.product_store = product_store  # propagate to health server DI
     start_storage_monitor()

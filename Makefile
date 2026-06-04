@@ -1,7 +1,7 @@
 # Makefile for Audit Forwarder
 # Production-ready build, test, and deployment tasks
 
-.PHONY: help build build-alpine build-distroless test scan clean deploy deploy-check migrate setup start stop restart status monitoring logs health ps sync backup backup-list backup-list-remote backup-restore update update-check repair diagnose diagnose-ai register-schemas check-schemas sync-schemas
+.PHONY: help build build-alpine build-distroless test scan clean deploy deploy-check migrate setup start stop restart status monitoring logs health ps sync backup backup-list backup-list-remote backup-restore update update-check repair diagnose diagnose-ai diagnose-ingest register-schemas check-schemas sync-schemas
 
 ##############################################################################
 # Quickstart Lifecycle (Phase 3 — single-command install + service control)
@@ -86,6 +86,9 @@ diagnose: ## Diagnose deployment issues (basic + AI if a key is found)
 
 diagnose-ai: ## Force AI-powered diagnosis (requires an LLM API key)
 	@.venv/bin/python scripts/diagnose.py --ai
+
+diagnose-ingest: ## 60-second forwarder ingest sample — rate, lag trend, bottleneck
+	@python3 scripts/diagnose.py --ingest-only
 
 ##############################################################################
 # Update flow for an already-running deployment

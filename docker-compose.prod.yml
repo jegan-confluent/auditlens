@@ -71,6 +71,12 @@ services:
       - SCHEMA_REGISTRY_URL=${SCHEMA_REGISTRY_URL:-}
       - SCHEMA_REGISTRY_API_KEY=${SCHEMA_REGISTRY_API_KEY:-}
       - SCHEMA_REGISTRY_API_SECRET=${SCHEMA_REGISTRY_API_SECRET:-}
+      # Catch-up kill-switch for actor enrichment. Default `true` keeps IAM /
+      # manual / audit-event / metrics lookups active (the normal path); set
+      # to `false` in .env to hard-bypass enrich_actor on the processor
+      # thread when ingesting a large backlog. Reflected at start by a
+      # WARNING log line and surfaced by `make diagnose-ingest`.
+      - IAM_ENRICHMENT_ENABLED=${IAM_ENRICHMENT_ENABLED:-true}
     volumes:
       - ./audit_forwarder.py:/app/audit_forwarder.py:ro
       - ./src:/app/src:ro

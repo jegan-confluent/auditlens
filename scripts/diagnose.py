@@ -28,6 +28,7 @@ import socket
 import subprocess
 import sys
 import textwrap
+import time
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -957,6 +958,271 @@ def apply_fix(commands: list[str], *, force: bool) -> int:
     return failures
 
 
+# ───── ingest health (60s sliding sample) ───────────────────────────────────
+FORWARDER_HEALTH_URL_DEFAULT = "http://localhost:8003/health"
+INGEST_SAMPLE_SECONDS = 60
+
+
+def _fetch_forwarder_health(url: str, timeout: float = 5.0) -> dict[str, Any] | None:
+    """Single /health probe. Returns the parsed JSON or None on any failure.
+
+    Never raises — caller distinguishes "unreachable" from "live" purely by
+    the None / dict return. JSON parse failures are also collapsed to None
+    so a partial response cannot break the rate calculation downstream.
+    """
+    try:
+        req = Request(url, method="GET")
+        with urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except (HTTPError, URLError, OSError, json.JSONDecodeError, socket.timeout):
+        return None
+
+
+def _read_env_value(name: str, default: str = "") -> str:
+    """Read a single value from REPO_ROOT/.env without sourcing it.
+
+    Returns `default` when .env is absent or the key is missing. Strips
+    surrounding quotes so `KEY="value"` and `KEY=value` both work.
+    """
+    env_path = REPO_ROOT / ".env"
+    if not env_path.exists():
+        return default
+    try:
+        for raw in env_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            if key.strip() == name:
+                return value.strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return default
+
+
+def _ingest_status_icon(level: str) -> str:
+    return {"ok": green("✓"), "warn": yellow("⚠"), "bad": red("❌")}.get(level, dim("—"))
+
+
+def _classify_bottleneck(
+    rate: float,
+    lag_delta: int,
+    iam_hit_rate: float | None,
+    db_write_p95_ms: float | None,
+    ceiling_msgs_per_sec: float | None,
+    iam_enrichment_enabled: bool,
+) -> tuple[str, str]:
+    """Decide the single most-actionable bottleneck label + recommendation.
+
+    Order matters — first match wins. Positive case first so a healthy
+    forwarder isn't mis-labelled by a coincidental config ceiling.
+    """
+    healthy_threshold = 200.0
+    if rate >= healthy_threshold and lag_delta <= 0:
+        return (
+            "HEALTHY",
+            "Ingest is healthy — no action needed.",
+        )
+
+    # Forwarder keeping up but topic producing faster than ingest.
+    if lag_delta > 0 and rate > 100.0:
+        return (
+            "KAFKA",
+            "Forwarder healthy but topic publishing faster than ingest. "
+            "Consider a second forwarder instance.",
+        )
+
+    slow = rate < 50.0
+    if not slow:
+        return ("UNKNOWN", "Share output of: docker compose logs auditlens-forwarder --tail=50")
+
+    # Slow AND configured ceiling is the obvious culprit. Check this first
+    # because it's the cheapest fix and rules out config before we point
+    # the operator at IAM or DB.
+    if ceiling_msgs_per_sec is not None and ceiling_msgs_per_sec < 100.0:
+        return (
+            "CONFIG",
+            "Increase KAFKA_CONSUME_BATCH_SIZE=500 and "
+            "CONSUMER_BATCH_SLEEP_SECONDS=0.05 in .env for catch-up mode.",
+        )
+
+    # IAM rule: rate < 50 AND (iam_hit_rate < 50% OR iam field missing).
+    # Field is currently always missing (no /health instrumentation), so
+    # this fires whenever IAM is enabled and we're slow.
+    iam_field_missing = iam_hit_rate is None
+    iam_below_threshold = iam_hit_rate is not None and iam_hit_rate < 50.0
+    if iam_enrichment_enabled and (iam_below_threshold or iam_field_missing):
+        return (
+            "IAM_ENRICHMENT",
+            "Add IAM_ENRICHMENT_ENABLED=false to .env and restart forwarder "
+            "for catch-up. Re-enable once lag clears.",
+        )
+
+    if db_write_p95_ms is not None and db_write_p95_ms > 500.0:
+        return (
+            "DB_WRITE",
+            "Check Postgres I/O: docker compose exec postgres psql "
+            "-U auditlens -c 'SELECT * FROM pg_stat_bgwriter;'",
+        )
+
+    return ("UNKNOWN", "Share output of: docker compose logs auditlens-forwarder --tail=50")
+
+
+def diagnose_ingest(url: str = FORWARDER_HEALTH_URL_DEFAULT) -> int:
+    """Sample the forwarder /health endpoint twice 60s apart and classify
+    the bottleneck from the delta. Returns process exit code.
+
+    Returns 0 on a successful sample (regardless of whether the diagnosis
+    flagged a problem) and 2 when the forwarder is unreachable — the
+    operator can't get a diagnosis if the data plane is offline.
+    """
+    print()
+    print(cyan("→ Forwarder ingest diagnostic"))
+    print(dim(f"   Probing {url}"))
+    first = _fetch_forwarder_health(url)
+    if first is None:
+        print(red("  ❌ Forwarder not reachable — is it running? Try: docker compose ps"))
+        return 2
+
+    # 60-second sample window with a tick every 5s so the operator can
+    # confirm the script is alive (no progress feedback during a silent
+    # 60s wait reads as "hung").
+    print(dim(f"   Sampling forwarder for {INGEST_SAMPLE_SECONDS}s..."))
+    tick = 5
+    elapsed = 0
+    while elapsed < INGEST_SAMPLE_SECONDS:
+        time.sleep(min(tick, INGEST_SAMPLE_SECONDS - elapsed))
+        elapsed += tick
+        if elapsed <= INGEST_SAMPLE_SECONDS:
+            print(dim(f"   …{elapsed}/{INGEST_SAMPLE_SECONDS}s"))
+
+    second = _fetch_forwarder_health(url)
+    if second is None:
+        print(red("  ❌ Forwarder went away mid-sample — likely crashed during the 60s window."))
+        return 2
+
+    # Extract counters from both samples. Default to 0 so a missing field
+    # (older forwarder build) computes as 0 instead of raising.
+    processed_a = int(first.get("processed_total") or 0)
+    processed_b = int(second.get("processed_total") or 0)
+    lag_a = int(first.get("consumer_lag") or 0)
+    lag_b = int(second.get("consumer_lag") or 0)
+
+    rate = max(0.0, (processed_b - processed_a) / float(INGEST_SAMPLE_SECONDS))
+    lag_delta = lag_b - lag_a
+
+    queues_b = second.get("queues") or {}
+    bulk_q = int(queues_b.get("bulk") or 0)
+    record_q = int(second.get("record_queue_depth") or 0)
+    bulk_q_cap = 50000
+    record_q_cap = 10000
+
+    # Optional fields the current forwarder build does NOT emit; included so
+    # adding instrumentation later starts populating diagnose-ingest with no
+    # further script changes.
+    iam_hit_rate_val = second.get("iam_cache_hit_rate_60s")
+    iam_hit_rate = (
+        float(iam_hit_rate_val)
+        if isinstance(iam_hit_rate_val, (int, float))
+        else None
+    )
+    db_p95_val = second.get("db_write_p95_ms_60s")
+    db_p95 = (
+        float(db_p95_val)
+        if isinstance(db_p95_val, (int, float))
+        else None
+    )
+
+    # Compute the .env-derived theoretical ceiling.
+    try:
+        batch_size = int(_read_env_value("KAFKA_CONSUME_BATCH_SIZE", "100"))
+    except ValueError:
+        batch_size = 100
+    try:
+        sleep_s = float(_read_env_value("CONSUMER_BATCH_SLEEP_SECONDS", "0.25"))
+    except ValueError:
+        sleep_s = 0.25
+    ceiling = batch_size / sleep_s if sleep_s > 0 else None
+
+    iam_env = _read_env_value("IAM_ENRICHMENT_ENABLED", "true").strip().lower()
+    iam_enabled = iam_env != "false"
+
+    # ── Per-row severity classification ─────────────────────────────────
+    rate_level = "ok" if rate >= 200 else ("warn" if rate >= 50 else "bad")
+    if lag_delta <= 0:
+        lag_level = "ok"
+    elif lag_delta < 1000:
+        lag_level = "warn"
+    else:
+        lag_level = "bad"
+    db_level = "—"
+    if db_p95 is not None:
+        db_level = "ok" if db_p95 <= 200 else ("warn" if db_p95 <= 500 else "bad")
+    bulk_pct = bulk_q / bulk_q_cap if bulk_q_cap else 0
+    bulk_level = "ok" if bulk_pct < 0.5 else ("warn" if bulk_pct < 0.9 else "bad")
+    record_pct = record_q / record_q_cap if record_q_cap else 0
+    record_level = "ok" if record_pct < 0.5 else ("warn" if record_pct < 0.9 else "bad")
+    iam_level = "—"
+    if iam_hit_rate is not None:
+        iam_level = "ok" if iam_hit_rate >= 80 else ("warn" if iam_hit_rate >= 50 else "bad")
+
+    label, action = _classify_bottleneck(
+        rate=rate,
+        lag_delta=lag_delta,
+        iam_hit_rate=iam_hit_rate,
+        db_write_p95_ms=db_p95,
+        ceiling_msgs_per_sec=ceiling,
+        iam_enrichment_enabled=iam_enabled,
+    )
+
+    # ── Render ──────────────────────────────────────────────────────────
+    def _row(label_text: str, value_text: str, level: str) -> None:
+        icon = _ingest_status_icon(level) if level != "—" else dim("—")
+        print(f"  {label_text:<26} {value_text:<14} [{icon}]")
+
+    def _fmt_signed(n: int) -> str:
+        sign = "+" if n > 0 else ("" if n == 0 else "")
+        return f"{sign}{n:,}"
+
+    print()
+    print(cyan("Forwarder ingest health (60s sample)"))
+    print(cyan("─" * 60))
+    _row("Rate (60s sliding):", f"{rate:.1f} msg/s", rate_level)
+    _row("Lag trend (Δ60s):", f"{_fmt_signed(lag_delta)} msgs", lag_level)
+    _row("DB write p95:", "—" if db_p95 is None else f"{db_p95:.0f} ms", db_level)
+    _row("bulk_queue depth:", f"{bulk_q} / {bulk_q_cap}", bulk_level)
+    _row("record_queue depth:", f"{record_q} / {record_q_cap}", record_level)
+    _row(
+        "IAM cache hit rate:",
+        "—" if iam_hit_rate is None else f"{iam_hit_rate:.0f}%",
+        iam_level,
+    )
+    print(cyan("─" * 60))
+
+    bottleneck_colour = {
+        "HEALTHY": green,
+        "KAFKA": yellow,
+        "CONFIG": yellow,
+        "IAM_ENRICHMENT": red,
+        "DB_WRITE": red,
+        "UNKNOWN": dim,
+    }.get(label, dim)
+    print(f"  Active bottleneck:         {bottleneck_colour(label)}")
+    print(f"  Recommended action:        {action}")
+    print()
+
+    # Surface the inputs the classifier used so an operator who disagrees
+    # can audit the decision. Dim so they don't compete with the main row.
+    print(dim(
+        f"   inputs: rate={rate:.1f} lag_delta={lag_delta} "
+        f"ceiling={'n/a' if ceiling is None else f'{ceiling:.0f}'} "
+        f"iam_enabled={iam_enabled} batch_size={batch_size} "
+        f"sleep_s={sleep_s}"
+    ))
+    print()
+    return 0
+
+
 # ───── main ──────────────────────────────────────────────────────────────────
 def main() -> int:
     parser = argparse.ArgumentParser(
@@ -972,7 +1238,15 @@ def main() -> int:
     parser.add_argument("--basic", action="store_true", help="basic only, skip AI even with a key")
     parser.add_argument("--ai", action="store_true", help="force AI; error if no key")
     parser.add_argument("--fix", action="store_true", help="basic + AI + auto-apply commands without confirmation")
+    parser.add_argument(
+        "--ingest-only",
+        action="store_true",
+        help="run only the 60-second ingest sample (rate + lag trend + bottleneck) and exit",
+    )
     args = parser.parse_args()
+
+    if args.ingest_only:
+        return diagnose_ingest()
 
     if args.basic and args.ai:
         print(red("--basic and --ai are mutually exclusive."))

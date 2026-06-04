@@ -219,7 +219,14 @@ def test_actor_enrichment_manual_mapping_service_account(monkeypatch):
 
 def test_actor_enrichment_audit_event_and_raw_fallbacks(monkeypatch):
     monkeypatch.delenv("ACTOR_IDENTITY_MAP_JSON", raising=False)
-    monkeypatch.setenv("IAM_ENRICHMENT_ENABLED", "false")
+    # Behavioural assertion change (2026-06-04): IAM_ENRICHMENT_ENABLED=false
+    # now triggers the top-of-enrich_actor kill-switch (added to disable
+    # cold-cache REST storms during catch-up of large backlogs) instead of
+    # only disabling the confluent_api source. To exercise the audit_event
+    # + raw-ID fallback paths this test was designed for, keep IAM enabled
+    # and rely on the absence of CONFLUENT_CLOUD_API_KEY to keep
+    # confluent_api off.
+    monkeypatch.setenv("IAM_ENRICHMENT_ENABLED", "true")
     monkeypatch.setenv("METRICS_ENRICHMENT_ENABLED", "false")
     clear_actor_enrichment_cache()
     display = enrich_actor("Jane Admin")
@@ -326,9 +333,35 @@ def test_actor_enrichment_failure_falls_back_without_logging_secrets(monkeypatch
     assert "sensitive-secret" not in caplog.text
 
 
-def test_metrics_correlation_is_not_high_confidence_by_default(monkeypatch):
+def test_enrichment_kill_switch_bypasses_all_sources(monkeypatch):
+    """IAM_ENRICHMENT_ENABLED=false → enrich_actor returns the raw principal
+    with NO cache, IAM, audit-event, or metrics lookups. Used during
+    catch-up of large backlogs; surfaces as a startup WARNING in the
+    forwarder and as the IAM_ENRICHMENT bottleneck in `make diagnose-ingest`."""
     clear_actor_enrichment_cache()
     monkeypatch.setenv("IAM_ENRICHMENT_ENABLED", "false")
+    # Configure every other source so that, were the kill-switch NOT
+    # firing, this principal would resolve to a real display name.
+    monkeypatch.setenv("METRICS_ENRICHMENT_ENABLED", "true")
+    monkeypatch.setenv(
+        "IAM_METRICS_IDENTITY_MAP_JSON",
+        '{"u-bypass":{"display_name":"Would Resolve"}}',
+    )
+    result = enrich_actor("u-bypass")
+    assert result["actor_display_name"] == "u-bypass"
+    assert result["actor_source"] == "fallback"
+    assert result["actor_email"] is None
+    assert result["actor_confidence"] == "low"
+
+
+def test_metrics_correlation_is_not_high_confidence_by_default(monkeypatch):
+    clear_actor_enrichment_cache()
+    # Behavioural assertion change (2026-06-04): IAM_ENRICHMENT_ENABLED=false
+    # is now a hard bypass at the top of enrich_actor (catch-up kill-switch).
+    # The metrics source we want to exercise here only runs when the
+    # kill-switch is NOT active; confluent_api stays off because
+    # CONFLUENT_CLOUD_API_KEY is not set in this test.
+    monkeypatch.setenv("IAM_ENRICHMENT_ENABLED", "true")
     monkeypatch.setenv("METRICS_ENRICHMENT_ENABLED", "true")
     monkeypatch.setenv("METRICS_ENRICHMENT_SOURCE", "correlation")
     monkeypatch.setenv("IAM_METRICS_IDENTITY_MAP_JSON", '{"u-metrics123":{"display_name":"Metrics User"}}')

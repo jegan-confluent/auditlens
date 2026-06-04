@@ -616,7 +616,37 @@ def _bulk_prefetch_identities(config: "EnrichmentConfig | None" = None) -> int:
     return loaded
 
 
+def _enrichment_kill_switch_active() -> bool:
+    """Return True iff the operator has explicitly set IAM_ENRICHMENT_ENABLED=false.
+
+    Default is "active" (i.e. NOT killed) — only the literal string "false"
+    triggers the bypass. This preserves behaviour for every existing
+    operator while giving a single, well-known flag to flip during a
+    large-backlog catch-up: a cold IAM cache + 200ms-per-miss HTTPS round
+    trips on the processor thread is the dominant catch-up bottleneck, so
+    bypassing enrich_actor entirely turns a 4-5 msg/s catch-up into a
+    short-circuit-only ingest that runs at the per-write ceiling. Re-enable
+    once consumer lag returns to near-zero.
+    """
+    return os.getenv("IAM_ENRICHMENT_ENABLED", "true").strip().lower() == "false"
+
+
 def enrich_actor(actor: str, subject: str = "", subject_type: str = "") -> dict[str, str | None]:
+    if _enrichment_kill_switch_active():
+        # Hard bypass: no cache lookup, no IAM HTTP call, no Postgres lookup,
+        # no metrics correlation. Return the raw principal as the display name
+        # so downstream UI / CSV export still renders something useful.
+        raw = _normalize_raw_actor(actor, subject)
+        return {
+            "actor_id": raw or None,
+            "actor_display_name": raw or None,
+            "actor_email": None,
+            "actor_type": infer_actor_type(raw, subject_type) if raw else "unknown",
+            "actor_raw_id": raw or None,
+            "actor_source": "fallback",
+            "actor_confidence": "low",
+            "actor_enriched_at": datetime.now(timezone.utc),
+        }
     config = EnrichmentConfig.from_env()
     raw = _normalize_raw_actor(actor, subject)
     cache_key = (raw, subject, subject_type)
