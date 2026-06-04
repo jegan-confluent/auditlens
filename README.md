@@ -10,108 +10,105 @@ No data leaves your deployment. No telemetry. No phone-home.
 
 ## Features
 
-### A. Ingestion & Forwarding
+Every row below is verified against the live codebase (see `Where` column for the file backing each capability). Items marked _opt-in_ require an env-var or YAML toggle; everything else is on by default.
 
-- Kafka consumer reads the Confluent Cloud audit log topic using native consumer group offset tracking
-- Bulk-noise short circuit bypasses full pipeline for high-volume routine methods (mds.Authorize, kafka.Fetch, schema-registry.Authentication, etc.) — saves ~83% of processor work
-- Two-table storage split routes noise to a lean `audit_events_noise` table and signal events to `audit_events`
-- Multi-topic Kafka routing writes classified events to `audit.raw.v1`, `audit.enriched.v1`, `audit.signals.*`, `audit.dlq.v1`
-- Avro serialization for `audit.enriched.v1` with FORWARD compatibility when Schema Registry is configured; falls back to JSON when SR is absent or unreachable
-- Event fingerprinting prevents duplicate writes on consumer replay
-- Priority queue lanes (critical / normal / bulk / catalog) with configurable sizes
-- Resource snapshot extracted at ingest time — type, name, cluster, environment, blast radius hint
+### 1. Filtering & Search
 
-### B. Signal Classification
+| Feature | Notes | Where |
+|---|---|---|
+| Time-window filter (Nm / Nh, `7d`/`30d` translated to hours client-side) | Required-pattern validation at the backend; UI exposes 30m / 2h / 4h / 12h / 24h / 7d / 30d | `backend/app/services/event_service.py` `parse_time_window`; `frontend/components/FilterBar.tsx` |
+| Service / Category / Method hierarchical filter | Three-level dropdown driven by `/filters/hierarchy`, derived from the live distinct method set | `backend/app/services/filter_options_service.py:196` (`_SERVICE_LABELS`) |
+| Result filter (Success / Failure / Denied) | "Denied" maps to `is_denied=true`; everything else maps to the canonical `result` column | `frontend/lib/eventFilters.ts:63` (`RESULT_TO_QUERY`) |
+| Actor / email search — case-insensitive, 300 ms debounce | Server-side `ILIKE` on `actor`; if the input contains `@`, the LIKE also covers `actor_email` | `frontend/components/FilterBar.tsx:8` (`ACTOR_DEBOUNCE_MS=300`); `backend/app/services/event_service.py:362-372` |
+| Free-text search across event title, actor, resource_name, request_id (`q` parameter) | `max_length=200`, debounced 300 ms | `backend/app/services/event_service.py:385-395` |
+| Production / non-production environment pill | `production_hint` column populated at ingest from resource intelligence | `frontend/components/FilterBar.tsx:359-374` |
+| Control-plane / Data-plane pill | Resolution order: resource_family → action_category="data" → action prefix | `backend/app/services/event_service.py:45-68` `derive_plane_type` |
+| Flink / Tableflow service quick-filter pills | One-click `action` substring match (`flink` / `tableflow`); covers dotted (`flink.X`) and bare-name (`FlinkJobFailed`) methods | `frontend/components/FilterBar.tsx:15-25` |
+| Period-over-period comparison (`/api/events/compare`) | Side-by-side stats for two time windows: total, by signal, top actors, top methods | `backend/app/api/routes/events.py:346-361`; `backend/app/services/event_service.py:704-774` |
+| Saveable filter presets (per browser, localStorage) | Up to 5 named filter combinations per operator | `frontend/components/FilterBar.tsx:82-128` |
+| Deep link to a specific event (`?event_id=N` opens the detail drawer) | One-shot URL hydrator; drawer state survives until close | `frontend/app/events/page.tsx:302-321` |
 
-- Four-tier classification: every event is `action_required`, `attention`, `informational`, or `noise`
-- Signal reason codes: `denied_access`, `destructive_change`, `failure_detected`, `security_sensitive_change`, `access_changed`, `config_changed`, `auth_noise`, and more
-- Internal Confluent topic suppression — `error-lcc-*`, `_confluent*`, `__consumer_*`, `_schemas` classified as noise
-- Confluent platform automation detected and classified separately from customer activity
-- Schema registry compatibility failures reclassified as `attention` instead of `action_required`
-- Plain-English event title and summary derived from method and resource
-- Data / control / management plane tagging
+**Not a filter:** source IP. The `source_ip` column is populated and visible in the event detail drawer and CSV/JSON export, but there is no dedicated IP filter — the free-text `q` field does not cover the IP column. Filter by IP indirectly via the actor pivot from the actor activity panel.
 
-### C. Actor & Identity Enrichment
+### 2. Enrichment & Intelligence
 
-- Manual actor mapping overrides via `actor_mappings.yml` (opt-in) — highest priority in resolution chain
-- IAM display name resolution via Confluent Cloud API — resolves principal IDs to names and email (opt-in)
-- Actor type detection: human user, service account, or Confluent platform automation
-- IP baseline tracking — records source IPs per actor, detects new or unexpected IPs
-- Actor activity narrative — per-actor timeline grouped by action category with anomaly detection (off-hours activity, deletion spikes, multi-tool usage)
-- Display name backfill — admin endpoint repairs legacy rows retroactively
-- Actor Mappings CRUD in Settings UI — view, add, edit, and delete name overrides in-product
+| Feature | Notes | Where |
+|---|---|---|
+| 4-tier signal classification: `action_required`, `attention`, `informational`, `noise` | Every event lands in exactly one tier | `src/product/event_signals.py:151` `classify_signal` |
+| Decision-reason prose + recommended-action stored per event | Specific reasons override the generic mapping for Flink runtime events and RTCE | `src/product/event_intelligence.py:474-496` `_SIGNAL_REASON_DECISION_REASON` |
+| IAM actor name resolution (CRN → display name + email) — opt-in | 1-hour TTL cache, 55-minute proactive refresh; falls back to manual `actor_mappings.yml`, then raw ID | `src/identity/enricher.py:91` (`refresh_interval_seconds = 55 * 60`) |
+| Manual actor overrides via `actor_mappings.yml` | Hot-reloaded on mtime change; highest priority in the resolution chain | `src/product/actor_enrichment.py` `ActorMappingFile` |
+| Client tool detection: **Confluent Console / VS Code / CLI**, **librdkafka SDK**, **Confluent Python SDK**, **Java Kafka SDK**, **Go Sarama SDK**, **Kafka Admin Client** | Pattern-matched on `clientId` (`proxy:`, `rdkafka/`, `confluent-kafka-`, `Apache Kafka`, `sarama/`, `adminclient-`). Terraform provider clients fall through to raw `clientId` — no friendly mapping | `src/product/event_normalization.py:790-806` `_map_client_tool` |
+| Cloud-provider IP tagging — AWS, GCP, Azure, Confluent management plane | Static CIDR table, no external API call | `src/product/ip_baseline_tracker.py:51-68` `_CLOUD_CIDRS` |
+| Per-actor IP baseline tracking + new-IP detection | Thread-safe in-memory set seeded from Postgres on startup | `src/product/ip_baseline_tracker.py:106-184` |
+| Internal Confluent system actor exclusion from "most active" / "recent activity" narrative | Skips `externalAccount`-prefixed JSON-blob actors and the `Confluent (internal)` display name | `frontend/lib/utils.ts:35` `isConfluentInternalActor` |
+| Two-table noise split (`audit_events` vs `audit_events_noise`) | Bulk-noise methods (mds.Authorize, kafka.Fetch, schema-registry.Authentication, etc.) write to the lean noise table — ~83% volume saving on the main table | `src/product/event_normalization.py:27-40` `BULK_NOISE_METHODS` |
+| Confluent platform automation override | Demoted to `informational` unless the method contains a security-mutation verb (grant/revoke/bind/unbind/deleteapi/…) | `src/product/event_signals.py:194-210` |
+| Access Transparency events — always `action_required`, fires before all other rules | Matches CloudEvents `type` containing `"access-transparency"` at the very top of `classify_signal` | `src/product/event_signals.py:156-173` |
+| Tableflow event classification — Create/Delete (CRITICAL/HIGH) + 6 explicit read-helper methods | `_ALWAYS_INFORMATIONAL_METHODS` covers `tableflowgettable`, `tableflowlisttables`, `tableflowcatalogconfig`, `listtableflowcatalog`, `tableflowgetcatalog`, `tableflowlistcatalogs` | `src/product/event_signals.py:67-76`; `src/classification/methods.py:180,433-435` |
+| Flink control-plane CRUD classification | `CreateStatement` / `CreateFlinkCompute` etc → `attention`; `DeleteStatement` / `DeleteFlinkCompute` → `action_required/destructive_change` | `src/product/event_signals.py` generic cascade + `src/classification/methods.py:147-151, 414-422` |
+| Flink job-lifecycle classification — Failed / Started / Cancelled / Checkpoint / Savepoint | Failures (`FlinkJobFailed`, `CheckpointFailed`, `FlinkRestartFailed`, `FlinkStatementFailed`, `FlinkJobException`) → `action_required`. Lifecycle (`Started`, `Finished`, `Restarting`, `CheckpointCompleted`, `SavepointCreated`, `SavepointRestored`) → `attention`. `FlinkJobCancelled` splits on `is_failure`. Heartbeats / metrics → `informational` | `src/product/event_signals.py:67-110` (3 frozensets + cascade) |
+| Real-Time Context Engine (RTCE) classification — CRUD-aware dispatch | Substring match on methodName / serviceName (`contextengine`, `realtimecontext`, `rtce`); deletes → `action_required`, get/list/describe → `informational`, default → `attention`. First-encounter WARNING per unique method | `src/product/event_signals.py:113-170` (`_is_rtce_event` + dispatch) |
+| Recurring-pattern panel — surfaces high-frequency (actor, action, resource) combinations | Configurable threshold; suppressed combos optionally excluded from decision-mode listing | `backend/app/services/pattern_service.py` |
+| Actor activity narrative — per-actor 24h timeline with anomaly hints (off-hours, deletion spikes, multi-tool) | Drawer panel from any event row's actor link | `frontend/components/ActorActivityPanel.tsx` |
 
-### D. Dashboard & UI
+### 3. Dashboard & Analytics
 
-- Dashboard with decision banner, signal breakdown, top actors, and hourly event volume chart
-- Dashboard cards and actor entries are clickable — navigate to a pre-filtered event list
-- Events page with 15+ filter dimensions: time window, signal type, actor, action, resource, result, plane, free-text search
-- Event detail drawer — full metadata, auth and authz context, resource snapshot, source IP, raw payload
-- Triage controls in every event drawer — mark reviewed, resolved, or escalated with a free-text note
-- CSV and JSON event export (up to 10,000 rows per request)
-- Hierarchical method filter — three-level Service → Category → Method picker
-- Resource Catalog page — searchable inventory of all resources seen in audit events, grouped by type
-- System page — consumer lag, DB writer state, pipeline lag, queue depths, storage usage, effective retention
-- Settings page — tabs for retention, cold storage, notifications, schema registry, tableflow, actor mappings
-- Stream Output tab in Settings: lists every output topic with its live serialization mode (Avro vs JSON) and provides a Flink SQL quickstart with pre-filled DDL and copy-ready sample queries
-- Action alert banner when `action_required` events are present in the current window
-- Pipeline lag banner when forwarder → DB write lag is detected
-- Recurring patterns panel — surfaces high-frequency (actor, action, resource) combinations automatically
+| Feature | Notes | Where |
+|---|---|---|
+| Live dashboard — narrative strip, signal summary, top actors, hourly heatmap | 24-bin UTC hourly chart (last 7d) shaded by event count | `frontend/app/dashboard/page.tsx:97-118, 187-233` |
+| Time-window toggle on dashboard (1h / 6h / 24h / 7d) | Persisted to `localStorage` | `frontend/app/dashboard/page.tsx:131-136` |
+| Environment breakdown bars | Hidden when only one environment is in view | `frontend/app/dashboard/page.tsx:78-95` |
+| Authentication Analytics page at **`/auth-analytics`** | Top API keys + source IPs by `kafka.Authentication` volume; 1d / 7d toggle; cloud-provider column | `frontend/app/auth-analytics/page.tsx`; `backend/app/api/routes/auth_analytics.py:60` |
+| Resource Catalog page — searchable inventory of every resource seen in audit events | Grouped by type; preserves last-seen timestamp | `frontend/app/resources/page.tsx`; `backend/app/services/resource_service.py` |
+| System page — consumer lag, DB writer state, pipeline lag, queue depths, storage usage, effective retention | Polled at 30 s via a single shared subscriber | `frontend/app/system/page.tsx`; `frontend/lib/hooks/useSystemStatus.ts` |
+| Settings page — tabs for Retention, Cold Storage, Notifications, Schema Registry, Tableflow, Actor Mappings, Stream Output | All admin-only writes go through the bearer-token auth chain | `frontend/app/settings/page.tsx` |
+| Action alert banner when `action_required` events are present | Picks the top non-Confluent-system actor + most-recent event timestamp | `frontend/components/ActionAlertBanner.tsx` |
+| Pipeline-lag banner when forwarder → DB write lag exceeds a threshold | Distinct from the Confluent-Cloud-to-forwarder lag shown on System | `frontend/components/PipelineLagBanner.tsx` |
+| Schema-deletion warning in the **event detail drawer** | Renders on `schema-registry.DeleteSubject` or `DeleteSchemaVersion`; not a top-level page banner | `frontend/components/EventDetailDrawer.tsx:121-125` |
+| Triage controls in every event drawer — Acknowledge / Approved / Investigating / Resolved / False Positive | Triage failures surface inline ("Failed to save — please try again") if the PATCH does not succeed; local state is NOT updated on failure | `frontend/components/EventDetailDrawer.tsx:198-205`; `frontend/app/events/page.tsx:380-395` |
+| Raw payload preview in event drawer (8 KB cap) | Larger payloads truncate to the first 8 000 chars with a `[truncated — full payload available via CSV export]` marker; full payload available via the export endpoint | `frontend/components/EventDetailDrawer.tsx:94-110` |
+| Group similar consecutive events (session-only toggle) | Collapses runs of `(actor, action, resource, env, signal, result)` with a 60-min ceiling from the first event | `frontend/components/AuditEventTable.tsx:130-163` |
 
-### E. Alerting & Notifications
+### 4. Export & Alerting
 
-- Slack, Teams, PagerDuty, and custom webhook destinations (opt-in) — configured via `notifications.yml` or the Settings UI
-- Per-destination digest mode (daily summary) and per-destination rate limiting with burst suppression
-- Per-signal-type and per-action-category filter rules
-- Alert deduplication and retry on transient failures
-- Test notification button in Settings UI — fires real messages to every enabled destination (not just a module-import check) so operators can verify wiring before relying on alerts
-- AlertManager in production compose for metric-based alerting rules
+| Feature | Notes | Where |
+|---|---|---|
+| Filter-aware CSV / JSON export — up to **50 000** rows per request | CSV header for the actor column is `actor_name` (resolved display name), backed by the internal `actor_display_name` field. Cloud-provider tag derived from `source_ip` at export time | `backend/app/services/event_service.py:27` `EXPORT_MAX_ROWS = 50_000`; `backend/app/api/routes/events.py:223-235` (`_EXPORT_COLUMNS`, `_CSV_HEADER_RENAMES`) |
+| Slack notifications — realtime (per event) and daily digest modes — opt-in | Mode selectable per destination in `notifications.yml`; digest delivers a single Block Kit summary at `HH:MM` UTC | `src/notifications/notifier.py:133` `VALID_MODES`; `:834-947` `_digest_loop` / `_send_digest` |
+| Microsoft Teams notifications (Adaptive Card) | Same filter + retry + dedup logic as Slack | `src/notifications/notifier.py:1248-1321` `_format_teams` |
+| PagerDuty Events API v2 — severity routing + deduplication key | `action_required + critical` → critical, `action_required + other` → error, `attention` → warning, else → info. `dedup_key = event_fingerprint` so PagerDuty collapses duplicates within its own window | `src/notifications/notifier.py:147-167` (`_pagerduty_severity`); `:1115-1153` (`_format_pagerduty`) |
+| Generic webhook destination (operator-supplied URL, SSRF-validated) | HTTPS-only; rejects URLs that resolve to private / loopback / link-local / reserved IPs | `src/notifications/notifier.py:201-218` `_validate_webhook_url` |
+| Deep link in Slack alert ("View event →") | When `app_base_url` is set in `notifications.yml`, every realtime Slack/Teams alert renders a button to `{app_base_url}/events?event_id=<id>` | `src/notifications/notifier.py:1213-1246` `_event_deep_link` |
+| Per-destination filters: signal_type, min_risk_level, action_category include-list, exclude_actions | All filters AND-combined; signal_type is required | `src/notifications/notifier.py:522-548` `should_notify` |
+| Per-destination rate limiting with burst summarisation | Sliding 60 s window; excess events collapse into one "N events suppressed" summary per minute | `src/notifications/notifier.py:670-756` |
+| Dedup across destinations — 5-minute fingerprint window | Per-destination dedup so the same event still reaches every channel exactly once | `src/notifications/notifier.py:111` `DEDUP_WINDOW_SECONDS` |
+| Pipeline-silence watchdog — Slack/Teams alert at 30 min silence, **recovery alert** when events flow again | One alert on onset, one on recovery, then quiet. Default threshold is 30 min; configurable via `pipeline_silence_threshold_minutes` in `notifications.yml` | `audit_forwarder.py:1673-1751` `_pipeline_watchdog_loop` |
+| `auditlens alerts test` CLI — fires a real test notification to every enabled destination | Bypasses dedup + rate limit but uses real formatters | `cli/auditlens.py:504`; `backend/app/api/routes/settings.py:99` |
+| AlertManager included in production compose for metric-based alerting | Receives from Prometheus, separate from the audit-event notifier | `docker-compose.prod.yml:476-498` |
 
-### F. Storage & Retention
+### 5. Infrastructure
 
-- Configurable retention per tier: signal events (default 7d), raw payloads (default 7d), noise events (default 3d)
-- Retention values set in Settings UI take effect at runtime — no container restart required
-- Automatic daily cleanup loop in the API process
-- Cold storage archival to AWS S3 or Google Cloud Storage before deletion (opt-in)
-- Archive-before-delete enforced — no silent data loss when cold storage is configured
-- Postgres auto-tuning at container start — sets `shared_buffers`, `work_mem`, etc. based on available RAM
-
-### G. Observability
-
-- Forwarder `/health` endpoint reports consumer state, queue depths per lane, write stats, enrichment cache size
-- Prometheus metrics on API `/metrics` endpoint
-- Grafana pre-provisioned dashboards — processing rate, consumer lag, queue depths, write latency, error rates (started by default)
-- Loki + Promtail log aggregation (opt-in, `observability` compose profile)
-- Pipeline lag and consumer lag visible on the System page without external tooling
-
-### H. Security
-
-- Bearer token auth with three roles: `viewer`, `responder`, `admin` (opt-in, recommended for any non-local use)
-- AES-256-GCM encryption for all secrets stored in the database; never returned in plaintext from any endpoint
-- HMAC constant-time token comparison prevents timing attacks
-- Admin audit log: every admin action (setting change, schema register, backfill, retention edit) is written to the `admin_audit_log` table automatically — SOC2-ready trail
-- Content-Security-Policy, X-Frame-Options, Referrer-Policy headers on every response
-- Per-IP rate limiting on all endpoints
-- All container ports bound to `127.0.0.1` by default — not externally reachable without explicit configuration
-- Forwarder container runs with `read_only: true` and `cap_drop: ALL`
-- TLS via Caddy automatic certificate management in production compose
-- No telemetry — only outbound connections are your Kafka endpoint and optionally `api.confluent.cloud`
-
-### I. Setup & Configuration
-
-- Interactive `./setup` wizard with checkpoint / resume — collects credentials, validates Kafka connectivity, generates `.env` and `.secrets`, starts services
-- Optional Confluent Cloud API key step lists the Standard / Dedicated clusters in your org for reference (Basic clusters are filtered out) — informational only; the audit-log cluster bootstrap is sourced from the Confluent Cloud audit-logs page
-- `make start / stop / restart / status / deploy / migrate / test / help`
-- Profile-based Docker Compose — `postgres`, `observability`, `dev` profiles for optional services
-- EC2 / VM deployment via `make deploy` (rsync + rebuild)
-- All service ports overridable via environment variables
-
-### J. Integrations
-
-- Schema Registry — endpoint and credentials configurable in Settings with live status check (opt-in)
-- Schema Registry self-service: register the AuditLens Avro schemas (`audit.enriched.v1` plus signal / alert / DLQ subjects) and detect drift between on-disk `.avsc` and the registered version — all from the Settings UI, no SSH required
-- Tableflow — Iceberg / Delta Lake export with in-UI prerequisite checking; AWS + Azure clusters (Dedicated, Enterprise, or Freight) with Schema Registry enabled
-- Confluent Cloud Admin API for IAM lookups and cluster discovery (opt-in, requires `CONFLUENT_CLOUD_API_KEY`)
+| Feature | Notes | Where |
+|---|---|---|
+| FastAPI backend + Next.js (App Router) frontend | Backend at port 8080, frontend at 3000; both behind Caddy on prod | `backend/app/main.py:8`; `frontend/app/page.tsx` (redirects to `/dashboard`) |
+| Docker Compose with Caddy reverse proxy on **`:80` / `:443`** in production (`docker-compose.prod.yml`) | `:8088` fallback for macOS dev where `:80` may be taken | `docker-compose.prod.yml:259-293` |
+| Single-host EC2 deploy via `make deploy` (rsync + remote rebuild + migrations) | Image tags + `docker compose up -d --build --force-recreate --remove-orphans`; alembic upgrade head runs in the api container | `Makefile` (deploy target) |
+| Postgres connection pool with explicit limits — `pool_size=5, max_overflow=10, pool_timeout=30, pool_recycle=1800` | Prevents silent stalls under load when all four DB-writer threads contend for connections | `src/product/db_writer.py:222-256` |
+| Postgres tuning script runs at container start (`shared_buffers`, `work_mem`, etc. sized to available RAM) | Entrypoint override on the postgres service | `docker-compose.prod.yml:325` (`tune.sh` mount) |
+| TimescaleDB hypertable conversion if the extension is detected | Idempotent; falls back to standard tables when the extension is absent | `src/product/db_writer.py:243-298` |
+| Configurable retention per tier — signal events (default 7d), raw payloads (default 7d), noise events (default 3d) — minimum 1 day enforced | Daily background loop in the API process; runtime changes apply without restart | `backend/app/services/event_service.py:785-982` `cleanup_retention`; `backend/app/main.py:33-61` |
+| Cold-storage archival to S3 or GCS before deletion — opt-in | Archive-before-delete is enforced — no silent data loss when cold storage is configured | `backend/app/services/cold_storage_service.py` |
+| Bearer-token auth — `viewer` / `responder` / `exporter` / `admin` roles | Onboarding endpoints require `admin`. `_require_admin` adds an admin-audit-log row on every privileged write | `backend/app/api/routes/patterns.py:118-131`; `backend/app/api/routes/admin.py:52-79` |
+| `postgres-exporter` reads its password from a Docker secret (`DATA_SOURCE_PASS_FILE`) | The DB password is never visible via `docker inspect` | `docker-compose.prod.yml:576-605` |
+| Forwarder runs `read_only: true`, `cap_drop: ALL`, non-root | Other services drop capabilities except where strictly required | `docker-compose.prod.yml:108-117` |
+| Per-IP rate limiting on every route, with admin endpoints capped tighter | `60/min` on `/events`; `10/min` on export; `5/min` on onboarding | `backend/app/core/limiter.py` |
+| CLI: `events list`, `events export`, `events get`, `stats compare`, `pipeline status`, `pipeline indexes`, `alerts test`, `config set/show` | Configuration via `~/.auditlens.conf` (chmod 600) or `AUDITLENS_*` env vars | `cli/auditlens.py` |
+| Flink SQL — **6 pre-materialized tables** maintained continuously: `audit_deletions`, `audit_creations`, `audit_api_keys`, `audit_security`, `audit_clusters`, `audit_topics` (+ the `audit_events_source` base table) | Pre-filtered queries against typed Flink tables — orders of magnitude cheaper than scanning the raw 1.5M-event topic. Deploy via `flink/deploy_tables.sh` | `flink/create_audit_tables.sql`; `flink/deploy_tables.sh` |
+| Prometheus + Grafana pre-provisioned dashboards (processing rate, consumer lag, queue depths, write latency, error rates) | Login: `admin` / generated `GRAFANA_ADMIN_PASSWORD` | `docker-compose.prod.yml:408-475`; `grafana/dashboards/` |
+| Loki + Promtail log aggregation — opt-in via the `observability` compose profile | Off by default | `docker-compose.prod.yml:500-575` |
+| All container host ports bound to `127.0.0.1` by default | Caddy `:80`/`:443` are the only public binds; API and frontend are localhost-only for direct probes | `docker-compose.prod.yml` (port mappings) |
+| Schema Registry integration — register the AuditLens Avro schemas (`audit.enriched.v1` + signal/alert/DLQ subjects), detect drift between `.avsc` and the registered version | All from the Settings UI; no SSH required | `backend/app/api/routes/settings.py:200-650` |
 
 ---
 
@@ -119,7 +116,7 @@ No data leaves your deployment. No telemetry. No phone-home.
 
 The forwarder (`auditlens-forwarder`, port 8003) consumes the Confluent Cloud audit log topic, runs each event through signal classification and actor enrichment, then writes to PostgreSQL. The FastAPI backend (`auditlens-api`, port 8080) serves `/events`, `/summary`, `/filters`, `/system`, `/settings`, and admin endpoints from that database. The Next.js frontend (`auditlens-frontend`, port 3000) renders the dashboard, events, and settings pages.
 
-Signal classification assigns every event a `signal_type` (`noise` → `informational` → `attention` → `action_required`) and a `signal_reason` code. The dashboard and events page filter and surface events by these signals; `noise` events are stored separately and hidden by default.
+Signal classification assigns every event a `signal_type` (`noise` → `informational` → `attention` → `action_required`) and a `signal_reason` code. The dashboard and events page filter and surface events by these signals; `noise` events are stored separately in `audit_events_noise` and hidden by default.
 
 ---
 
@@ -227,9 +224,9 @@ Secrets generated for you: API admin token, `POSTGRES_PASSWORD`, `GRAFANA_ADMIN_
 | Prometheus | `audit-prometheus` | 9090 | Metric scraping |
 | Grafana | `audit-grafana` | 3001 | Pre-provisioned dashboards (login: admin / generated `GRAFANA_ADMIN_PASSWORD`) |
 | AlertManager | `audit-alertmanager` | 9093 | Metric-based alert routing |
-| Postgres exporter | `auditlens-postgres-exporter` | 9187 | Postgres metrics for Prometheus |
+| Postgres exporter | `auditlens-postgres-exporter` | 9187 | Postgres metrics for Prometheus (password from Docker secret) |
 
-All host ports bind to `127.0.0.1` by default. The legacy Streamlit dashboard (formerly 8503) and the standalone landing page (formerly 8088) were removed — the Next.js frontend on 3000 is the only UI.
+All host ports bind to `127.0.0.1` by default. Caddy `:80` / `:443` are the only externally-reachable bindings in production.
 
 ---
 
@@ -266,7 +263,7 @@ docker compose -f docker-compose.prod.yml up -d --build
 git pull origin main && docker compose -f docker-compose.prod.yml up -d --build
 ```
 
-`./setup` itself also self-updates on launch: if the local clone is behind `origin/main`, it pulls and re-execs before the wizard starts. Disable with `--no-update` (or `AUDITLENS_NO_UPDATE=1`) for offline / CI runs. The wizard also runs the same `.env` migration as `make repair` on every invocation, so a re-run is a strict superset of a repair.
+`./setup` itself also self-updates on launch: if the local clone is behind `origin/main`, it pulls and re-execs before the wizard starts. Disable with `--no-update` (or `AUDITLENS_NO_UPDATE=1`) for offline / CI runs.
 
 `make deploy` does the same flow remotely (rsync + rebuild) — see [docs/Deployment_Guide.md](docs/Deployment_Guide.md). Image updates are controlled rather than automatic: `make update` / `make deploy` pulls and recreates containers on demand. There is no background updater (no watchtower) because uncontrolled image pulls have surprised us on schema-incompatible upstream releases in the past.
 
@@ -309,7 +306,7 @@ The most important variables in `.env`. The wizard writes all of these for you; 
 | `API_AUTH_ENABLED` | `true` | Bearer token auth on every API endpoint |
 | `EVENT_RETENTION_DAYS` | `7` | Days of signal events to keep |
 | `NOISE_RETENTION_DAYS` | `3` | Days of noise events to keep |
-| `IAM_ENRICHMENT_ENABLED` | `false` | Resolve actor display names via the Confluent Cloud IAM API |
+| `IAM_ENRICHMENT_ENABLED` | `false` | Resolve actor display names via the Confluent Cloud IAM API (55-min refresh) |
 | `CONFLUENT_CLOUD_API_KEY` / `_SECRET` | — | Cloud-scoped key for IAM lookups + Tableflow + the wizard's cluster picker |
 | `SCHEMA_REGISTRY_URL` / `_API_KEY` / `_API_SECRET` | — | Schema Registry endpoint + credentials (required for Tableflow) |
 
@@ -325,6 +322,24 @@ Settings → Tableflow shows a live prerequisite checklist before exposing the e
 - **Region** eligibility follows the cloud provider (AWS = all Flink-supported regions, Azure GA).
 
 The UI calls `GET /cmk/v2/clusters/{cluster_id}` with your `CONFLUENT_CLOUD_API_KEY`, evaluates each prerequisite, and only shows the enable form when all four pass. If the cloud API key isn't set, the UI shows a one-line hint and degrades to the form with a banner (the operator can still try, just without verification).
+
+---
+
+## Flink SQL Pre-Materialized Tables
+
+`flink/create_audit_tables.sql` defines 6 pre-materialized tables (plus a source table) that Flink continuously maintains from `audit_events_flattened`:
+
+| Table | Purpose |
+|---|---|
+| `audit_events_source` | Base CDC table watching the audit topic with watermarks and primary-key dedup |
+| `audit_deletions` | Every delete operation across the org — most critical for incident review |
+| `audit_creations` | Every create operation across the org |
+| `audit_api_keys` | All API-key lifecycle events (create, delete, rotate) |
+| `audit_security` | Auth, RBAC, and access-denied events |
+| `audit_clusters` | Kafka / ksqlDB / Schema Registry / Flink cluster operations |
+| `audit_topics` | Topic-lifecycle operations across the org |
+
+Deploy with `flink/deploy_tables.sh` after setting `DEST_ENV_ID`, `FLINK_POOL_ID`, and `DEST_CLUSTER_ID`. Each `CREATE TABLE` is idempotent under the configured version suffix; re-running the script is safe.
 
 ---
 
@@ -346,26 +361,44 @@ Terraform configurations for AWS and GCP are in `deploy/`. They're provided as s
 
 ## Security
 
-- All container ports are bound to `127.0.0.1` by default — no traffic is reachable from other machines without explicit configuration.
-- API authentication (`API_AUTH_ENABLED=true`) is required before any external exposure. The wizard enables it by default and generates an admin token.
-- `.env` and `.secrets` are gitignored and never committed. Credentials stay on the host where AuditLens is deployed. The wizard refuses to overwrite `.env` if required credentials are empty, so a partial run can't clobber a working config.
+- All container host ports are bound to `127.0.0.1` by default — Caddy on `:80` / `:443` is the only externally-reachable binding in production.
+- API authentication (`API_AUTH_ENABLED=true`) is on by default. Three viewer roles plus an admin role; the onboarding endpoints require admin.
+- The Postgres password lives in a Docker secret (`./secrets/postgres_password.txt`, chmod 600, gitignored) and is mounted into both the postgres and postgres-exporter containers via `_FILE` env var indirections — it is never visible in `docker inspect`.
+- `.env` and `.secrets` are gitignored and never committed. Credentials stay on the host where AuditLens is deployed.
 - AuditLens has no telemetry and no phone-home. The only outbound connections are to your Confluent Kafka endpoint and (when explicitly enabled) `api.confluent.cloud`.
+- Admin audit log: every privileged write is appended to the `admin_audit_log` table automatically — auditor-ready trail.
 
-See [SECURITY.md](SECURITY.md) for the full hardening guide, including reverse-proxy configuration, network firewall rules, secrets management, and container hardening notes.
+See [SECURITY.md](SECURITY.md) for the full hardening guide.
 
 ---
 
 ## Roadmap
 
+**Recently shipped (this session)**
+
+- Flink job-lifecycle classification (Failed / Started / Cancelled / Checkpoint / Savepoint)
+- Real-Time Context Engine (RTCE) CRUD-aware dispatch with first-encounter logging
+- Flink + Tableflow service quick-filter pills in FilterBar
+- Internal Confluent system actor excluded from "most active" and recent-activity narratives
+- Triage-failure inline error surfaced in the event drawer (no more silent PATCH failures)
+- Raw payload preview capped at 8 KB in the event drawer
+- Postgres-exporter password moved to Docker secret (`DATA_SOURCE_PASS_FILE`)
+- DB-writer connection pool given explicit limits (`pool_size=5`, `max_overflow=10`, `pool_timeout=30`, `pool_recycle=1800`)
+- Onboarding endpoints now require admin auth + upstream error bodies sanitized
+- `get_watermark_offsets` removed from the on-assign callback (per-partition lag already covered by `stats_cb`, removing the synchronous broker round-trip avoids cross-region rebalance hangs)
+- Prose `decision_reason` strings wired for `flink_job_failure`, `flink_job_lifecycle`, `rtce_destructive_change`, `rtce_config_changed`
+
 **Coming next**
 
-- Flink SQL downstream analytics — sliding-window denial rate and cross-environment actor correlation using `audit.enriched.v1` (Avro schema already registered in Schema Registry)
-- Tableflow / Iceberg archival — long-term retention queryable from Snowflake, Athena, and Databricks (endpoints wired, prerequisites UI live)
+- `make rollback` target — alembic downgrade + previous image tag in a single command
+- Postgres-password rotation runbook (ALTER USER + `.env` + `DATABASE_URL` aligned in one step)
+- OIDC / SSO authentication — current auth is bearer-token; OIDC upgrade planned
 
 **Later**
 
 - MCP server — expose AuditLens data to LLM agents via 9 defined tools
-- OIDC / SSO authentication — current auth is bearer-token; OIDC upgrade planned
+- Tableflow / Iceberg long-term retention queryable from Snowflake, Athena, Databricks
+- Sliding-window denial-rate and cross-environment actor correlation as Flink SQL views over `audit.enriched.v1`
 
 ---
 
