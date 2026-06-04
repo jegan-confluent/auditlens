@@ -696,3 +696,53 @@ work only.
 - notifier-state.md — Slack webhook on EC2 only; gate is action_required + attention
 - auditlens-roadmap.md — top 8 features prioritised; Auth Analytics validated by Anji Narra
 - ec2-deployment-target.md — host, key, compose file
+
+## [2026-05-27] Session [15]
+
+### Fixed
+- /system/status `schema_registry.connected` was always false and `serialization_mode` was always "unknown" even when the forwarder was happily Avro-producing
+  Why: `_shape_forwarder_payload()` stripped the top-level `serialization` block from the cached forwarder /health snapshot before passing it to `_build_schema_registry_status()`. The function itself read `forwarder_status.get("serialization")` correctly — the upstream shape function was the actual bug
+  Files: backend/app/services/system_service.py (commit ee20748)
+
+- All four SR endpoints in the API container were broken at runtime
+  Why: `backend/app/api/routes/settings.py` imported `confluent_kafka.schema_registry` in 4 places (register / status / test_sr / stream_output_info). `backend/requirements.txt` ships `httpx==0.28.1` but NOT confluent-kafka — the import raised. `register` blew up with HTTPException 500; the other three silently caught ImportError and returned `error: "confluent-kafka not installed"` so SR drift / Avro-ready / status / test all degraded
+  Files: backend/app/api/routes/settings.py — rewrote all 4 endpoints to call SR REST API via `httpx.AsyncClient`; added helpers `_sr_base`, `_sr_auth`, `_canonical_avro` and async per-subject helpers `_register_one_subject`, `_maybe_set_compat`; dropped now-orphan `_sr_not_found` helper (commit d463236)
+
+- Settings → Schema Registry tab listed ALL subjects in the SR cluster (including unrelated apps' subjects); Stream Output tab "Schemas registered" prereq stayed unchecked even after successful registration
+  Why: GET /settings/schema_registry/status returned the raw `GET /subjects` list with no filter; StreamOutputTab read `info.schema_registry.enriched_avro_ready` from a separate direct probe instead of looking at the filtered subject list
+  Files: backend/app/api/routes/settings.py (filter `subjects = [s for s in all_subjects if s.startswith("audit.")]`), frontend/app/settings/components/StreamOutputTab.tsx (fetch `/settings/schema_registry/status` in parallel; derive `schemasRegistered = srStatus?.subjects?.some(s => s.name === info.enriched_subject) ?? info.schema_registry.enriched_avro_ready` — keeps the old field as a fallback if the SR status fetch itself fails) (commit 93ac890)
+
+### Added
+- README: `**Repo:** https://github.com/jegan-confluent/auditlens` line in the hero section
+- README: new `## Roadmap` section before Contributing (Flink SQL analytics + Tableflow/Iceberg as "Coming next"; MCP server + OIDC/SSO as "Later")
+- README: 5 new feature bullets across the existing sections — Avro serialization with FORWARD compatibility (section A), Stream Output tab with Flink SQL DDL/queries (section D), Notifications test fires real messages (section E), Admin audit log table writes (section H), SR self-service register + drift detection (section J)
+  Why: docs lagged behind work from Sessions 13–14
+  Files: README.md (commit 0b11708)
+
+### Removed
+- `scripts/run_sqlite_demo.sh` entirely (49 lines, git-tracked)
+- README: Quick Start `**No Kafka? SQLite demo mode:**` teaser, feature-list bullet `- SQLite demo mode with seeded sample events`, plus a short-lived `## Try it without Kafka credentials` section that was added and then reverted in the same session
+- INSTALL.md: phrase edit on the `DATABASE_URL` row — `Default: SQLite for demo, PostgreSQL for product mode` → `PostgreSQL (required)`
+  Why: SQLite demo path is broken by design — `backend/alembic/env.py:1–9` is explicit that migrations were never written for SQLite (Postgres-specific column types / DDL); also `backend/docker_entrypoint.py:_prepare_runtime_dir` chowns existing SQLite files but never re-chowns files created by the just-run alembic migration, so even if migration succeeded, the root-owned `.db` file is unwritable by the UID-1000 uvicorn process after `_drop_privileges()`. Net effect: demo 503s reliably on first run
+  Files: scripts/run_sqlite_demo.sh (deleted), README.md, INSTALL.md (commit 0b11708)
+
+### Architecture Decisions
+- API-container SR calls go through the SR REST API via httpx, NOT via `confluent_kafka.schema_registry`
+  Why: API container ships httpx only; the forwarder container is where confluent-kafka lives. Eliminates the silent-ImportError fall-through that hid SR breakage for 4 endpoints
+  Impact: `scripts/register_sr_schemas.py` (forwarder-side CLI) intentionally still uses confluent_kafka — both code paths produce canonical JSON so SR content-hash dedup means re-running either reports SKIPPED rather than creating a spurious new version
+
+- `subjects[]` returned by `/settings/schema_registry/status` is filtered to `s.startswith("audit.")`
+  Why: an SR cluster shared with other apps had dozens of unrelated subjects polluting the UI; downstream consumers using `subjects[]` for "is `audit.enriched.v1-value` registered?" checks were getting incorrect answers when the cluster had many subjects
+  Impact: any future AuditLens-produced topic MUST be named with the `audit.` prefix or it won't appear in the Settings UI and won't tick the Stream Output prereq. Hard-coded prefix is a known limitation if a customer rebases their topic names via `AUDIT_*_TOPIC` env vars
+
+- SQLite demo mode is removed as a supported install path
+  Why: alembic-on-SQLite path is broken by design + the entrypoint root/UID-1000 chown gap. Keeping it was a footgun
+  Impact: Postgres is the only supported DB. `DATABASE_URL` must point at Postgres. README Quick Start no longer offers a no-Kafka path. Any future demo must use Postgres-in-Docker, not SQLite
+
+### Known Issues / Not Done
+- `.git/hooks/commit-msg` uses GNU `sed -i '...' file` syntax, which fails on macOS BSD sed (`invalid command code .`). First commit attempt this session aborted because of it. Workaround used: omit the `Co-Authored-By` trailer from the message (hook strips it anyway, same end result). Portable fix is `sed -i '' '...' file` or `sed -i.bak`. Not committed
+- `backend.app.db.database._ensure_audit_event_columns()` (referenced in `backend/alembic/env.py:5` as the SQLite schema-bootstrap path) is now orphan code if SQLite demo isn't coming back. Not removed this session
+- Pre-existing Pyright "unused" diagnostics in `backend/app/api/routes/settings.py` (`Request` import, `_api_key`/`_api_secret` in `_get_sr_creds` consumers, `body`/`db` in `test_notification`) — not in scope this session
+- The audit.* subject filter is a string-prefix check, not config-driven. If `AUDIT_*_TOPIC` env vars are rewritten to a non-`audit.` prefix, the UI subject list will be empty even though SR is healthy
+- Untracked at repo root: `create.sh`, `setup.sh`, `updated.sh` and `docs/2025-02-15/`, `docs/2025-12-06/`. Pre-existing at session start; not investigated, not committed
+- Pre-commit commit `bafabab` (initial commit attempt this session for the docs scrub) appears to have been rewritten out-of-band into `0b11708` with a wider commit message. Final tree state is consistent — flagging only because it didn't come from my Bash calls

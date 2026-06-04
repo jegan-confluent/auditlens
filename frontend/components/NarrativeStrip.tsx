@@ -15,6 +15,12 @@ function resolveProductionQualifier(summary: SummaryResponse): string | null {
   return null;
 }
 
+function isConfluentInternalActor(subject: string, display: string): boolean {
+  if (subject.includes("externalAccount")) return true;
+  if (display === "Confluent" || display === "Confluent (internal)") return true;
+  return false;
+}
+
 function resolveTopActor(summary: SummaryResponse): { display: string; count: number } | null {
   const groups = summary.flow_groups ?? [];
   const byActor = new Map<string, { display: string; count: number }>();
@@ -27,8 +33,11 @@ function resolveTopActor(summary: SummaryResponse): { display: string; count: nu
       existing.count += g.event_count;
     }
   }
-  const top = [...byActor.values()].sort((a, b) => b.count - a.count)[0];
-  if (!top || !top.display || top.display.startsWith("{")) return null;
+  const ranked = [...byActor.entries()]
+    .map(([subject, v]) => ({ subject, display: v.display, count: v.count }))
+    .sort((a, b) => b.count - a.count);
+  const top = ranked.find(r => r.display && !r.display.startsWith("{") && !isConfluentInternalActor(r.subject, r.display));
+  if (!top) return null;
   const d = top.display.startsWith("User:") ? top.display.slice(5)
     : top.display.startsWith("ServiceAccount:") ? top.display.slice(15)
     : top.display;
