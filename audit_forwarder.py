@@ -980,15 +980,17 @@ def safe_produce(p: Producer, topic: str, key: bytes, value: bytes):
 def on_assign(consumer, partitions):
     """Handle partition assignment - offsets managed by Kafka consumer groups."""
     metrics.record_rebalance()
-    # Let Kafka consumer group handle offsets automatically
-    # On first join: starts from auto.offset.reset (latest)
-    # On rejoins: resumes from last committed offset
-    for tp in partitions:
-        try:
-            low, high = consumer.get_watermark_offsets(tp, timeout=5.0)
-            logger.info("Assigned partition %d: watermarks low=%d high=%d", tp.partition, low, high)
-        except Exception as e:
-            logger.warning("Could not get watermarks for partition %d: %s", tp.partition, e)
+    # Let Kafka consumer group handle offsets automatically.
+    # On first join: starts from auto.offset.reset (latest).
+    # On rejoins: resumes from last committed offset.
+    #
+    # Watermark polling was removed from this callback. consumer.get_watermark_offsets()
+    # is a synchronous broker round-trip per partition; with cross-region clusters
+    # (US West → AP South) the 5s timeout × N partitions could block the rebalance
+    # callback long enough for the broker to time it out and trigger another rebalance,
+    # producing a rebalance loop. Per-partition lag is already published by the
+    # rdkafka stats_cb path (see make_rdkafka_stats_callback) on a 10s cadence, so
+    # the on_assign log line is sufficient context for operators.
     logger.info("Assigned %d partitions: %s", len(partitions), [p.partition for p in partitions])
 
 

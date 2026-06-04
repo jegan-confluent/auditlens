@@ -234,7 +234,24 @@ class AuditEventDbWriter:
         self.last_cleanup_deleted_count = 0
         self._last_cleanup_monotonic = 0.0
         connect_args = {"check_same_thread": False} if self.database_url.startswith("sqlite") else {}
-        self.engine = create_engine(self.database_url, future=True, pool_pre_ping=True, connect_args=connect_args)
+        # Explicit pool params (rather than SQLAlchemy silent defaults) so an
+        # operator can reason about behaviour under load. Four writer threads
+        # (critical / normal / bulk / catalog) share this engine; with the
+        # default pool_size=5 a slow Postgres can serialise all four threads
+        # behind connection acquisition, which delays the consumer heartbeat
+        # and risks a broker-initiated rebalance. Five pooled + ten overflow
+        # gives each writer headroom; 30s timeout fails fast instead of
+        # hanging; 1800s recycle dodges stale-connection corner cases.
+        self.engine = create_engine(
+            self.database_url,
+            future=True,
+            pool_pre_ping=True,
+            pool_size=5,
+            max_overflow=10,
+            pool_timeout=30,
+            pool_recycle=1800,
+            connect_args=connect_args,
+        )
         metadata.create_all(self.engine)
         self._ensure_columns()
         self._ensure_indexes()

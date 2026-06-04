@@ -90,10 +90,29 @@ const triageActions = [
   { status: "false_positive", label: "Mark False Positive" }
 ];
 
-export default function EventDetailDrawer({ event, onClose, onTriage }: {
+// Raw payload preview cap. Larger payloads truncate to keep the drawer
+// responsive and avoid surfacing arbitrary upstream content verbatim;
+// the full payload is still available via the CSV/JSON export route.
+const RAW_PAYLOAD_PREVIEW_CHARS = 8000;
+
+function truncateRawPayload(raw: string | null | undefined): string {
+  if (!raw) return "Raw payload is available only from the detail endpoint.";
+  try {
+    if (raw.length > RAW_PAYLOAD_PREVIEW_CHARS) {
+      return raw.slice(0, RAW_PAYLOAD_PREVIEW_CHARS) +
+        "\n\n... [truncated — full payload available via CSV export]";
+    }
+    return raw;
+  } catch {
+    return "Raw payload could not be displayed.";
+  }
+}
+
+export default function EventDetailDrawer({ event, onClose, onTriage, triageError }: {
   event: AuditEvent | null;
   onClose: () => void;
   onTriage?: (status: string) => void;
+  triageError?: string | null;
 }) {
   if (!event) return null;
   const actor = displayActor(event);
@@ -200,6 +219,11 @@ export default function EventDetailDrawer({ event, onClose, onTriage }: {
           <button key={action.status} onClick={() => onTriage?.(action.status)}>{action.label}</button>
         ))}
       </div>
+      {triageError ? (
+        <p className="panel-error" role="alert" style={{ marginTop: 4 }}>
+          {triageError}
+        </p>
+      ) : null}
 
       <details className="technical-details">
         <summary>Technical details</summary>
@@ -237,7 +261,7 @@ export default function EventDetailDrawer({ event, onClose, onTriage }: {
         <div className="raw-actions">
           <button onClick={() => copyText(event.raw_payload_json || "")}>Copy raw payload</button>
         </div>
-        <pre>{event.raw_payload_json || "Raw payload is available only from the detail endpoint."}</pre>
+        <pre>{truncateRawPayload(event.raw_payload_json)}</pre>
       </details>
     </aside>
   );

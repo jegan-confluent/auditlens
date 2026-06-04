@@ -21,9 +21,10 @@ import os
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
+from backend.app.api.routes.patterns import _require_admin
 from backend.app.core.limiter import limiter
 
 logger = logging.getLogger("auditlens.backend.onboarding")
@@ -50,7 +51,11 @@ class ValidateClusterRequest(BaseModel):
 
 @router.post("/onboarding/discover")
 @limiter.limit("5/minute")
-async def discover(request: Request, body: DiscoverRequest) -> dict[str, Any]:
+async def discover(
+    request: Request,
+    body: DiscoverRequest,
+    _auth: None = Depends(_require_admin),
+) -> dict[str, Any]:
     base = _confluent_base()
     auth = (body.api_key, body.api_secret)
 
@@ -60,17 +65,22 @@ async def discover(request: Request, body: DiscoverRequest) -> dict[str, Any]:
             audit_task = client.get(f"{base}/audit-log/v1/config")
             envs_resp, audit_resp = await asyncio.gather(envs_task, audit_task, return_exceptions=True)
         except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"Confluent API error: {exc}")
+            logger.warning("onboarding upstream error: %s", exc)
+            raise HTTPException(status_code=502, detail="Upstream validation failed")
 
     if isinstance(envs_resp, Exception):
-        raise HTTPException(status_code=502, detail=f"Environments fetch failed: {envs_resp}")
+        logger.warning("onboarding upstream error (environments): %s", envs_resp)
+        raise HTTPException(status_code=502, detail="Upstream validation failed")
     if isinstance(audit_resp, Exception):
-        raise HTTPException(status_code=502, detail=f"Audit config fetch failed: {audit_resp}")
+        logger.warning("onboarding upstream error (audit config): %s", audit_resp)
+        raise HTTPException(status_code=502, detail="Upstream validation failed")
 
     if not envs_resp.is_success:
-        raise HTTPException(status_code=envs_resp.status_code, detail=envs_resp.text)
+        logger.warning("onboarding upstream error: %s", envs_resp.text)
+        raise HTTPException(status_code=envs_resp.status_code, detail="Upstream validation failed")
     if not audit_resp.is_success:
-        raise HTTPException(status_code=audit_resp.status_code, detail=audit_resp.text)
+        logger.warning("onboarding upstream error: %s", audit_resp.text)
+        raise HTTPException(status_code=audit_resp.status_code, detail="Upstream validation failed")
 
     environments_raw = (envs_resp.json().get("data") or [])[:10]
 
@@ -159,7 +169,11 @@ async def discover(request: Request, body: DiscoverRequest) -> dict[str, Any]:
 
 @router.post("/onboarding/validate-cluster")
 @limiter.limit("5/minute")
-async def validate_cluster(request: Request, body: ValidateClusterRequest) -> dict[str, Any]:
+async def validate_cluster(
+    request: Request,
+    body: ValidateClusterRequest,
+    _auth: None = Depends(_require_admin),
+) -> dict[str, Any]:
     try:
         from confluent_kafka.admin import AdminClient  # type: ignore[import-untyped]
 
@@ -180,4 +194,5 @@ async def validate_cluster(request: Request, body: ValidateClusterRequest) -> di
     except ImportError:
         return {"valid": True, "audit_topic_exists": None, "note": "topic check skipped"}
     except Exception as exc:
-        return {"valid": False, "error": str(exc), "audit_topic_exists": None}
+        logger.warning("onboarding upstream error (validate-cluster): %s", exc)
+        return {"valid": False, "error": "Upstream validation failed", "audit_topic_exists": None}

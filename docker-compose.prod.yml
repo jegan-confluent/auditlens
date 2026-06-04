@@ -577,8 +577,17 @@ services:
     image: prometheuscommunity/postgres-exporter:v0.15.0@sha256:31bdf410910646a05c7edde8d95ab771c9d78fbfbc26b50a52548707496c284d
     container_name: auditlens-postgres-exporter
     restart: always
-    environment:
-      - DATA_SOURCE_NAME=postgresql://${POSTGRES_USER:-auditlens}:${POSTGRES_PASSWORD:-changeme_set_in_env}@postgres:5432/${POSTGRES_DB:-auditlens}?sslmode=disable
+    # Build DATA_SOURCE_NAME at container start from the Docker secret so the
+    # password is never visible via `docker inspect`. The prior form
+    # ${POSTGRES_PASSWORD:-changeme_set_in_env} embedded the production
+    # password in the container env. `$$(cat …)` escapes from compose's
+    # variable interpolation, leaving `$(cat …)` for sh to evaluate at start.
+    command:
+      - sh
+      - -c
+      - 'export DATA_SOURCE_NAME="postgresql://${POSTGRES_USER:-auditlens}:$$(cat /run/secrets/postgres_password)@postgres:5432/${POSTGRES_DB:-auditlens}?sslmode=disable"; exec /bin/postgres_exporter'
+    secrets:
+      - postgres_password
     ports:
       - "127.0.0.1:9187:9187"
     mem_limit: 64m

@@ -377,11 +377,20 @@ function EventsPageInner() {
       .finally(() => setExpandedLoading(false));
   };
 
+  const [triageError, setTriageError] = useState<string | null>(null);
   const handleTriage = async (status: string) => {
     if (!selectedEvent) return;
-    const updated = await updateEventTriage(selectedEvent.id, status);
-    setSelectedEvent(updated);
-    setData((prev) => prev ? { ...prev, items: prev.items.map((e) => e.id === updated.id ? updated : e) } : prev);
+    setTriageError(null);
+    try {
+      const updated = await updateEventTriage(selectedEvent.id, status);
+      setSelectedEvent(updated);
+      setData((prev) => prev ? { ...prev, items: prev.items.map((e) => e.id === updated.id ? updated : e) } : prev);
+    } catch (err) {
+      // Surface the failure in the drawer near the triage buttons so the
+      // operator knows the click did NOT persist. Local-state update is
+      // intentionally skipped so the UI does not show the event as triaged.
+      setTriageError("Failed to save — please try again");
+    }
   };
 
   const updateFilters = (next: EventFilters) => {
@@ -536,11 +545,13 @@ function EventsPageInner() {
       />
       <EventDetailDrawer
         event={selectedEvent}
+        triageError={triageError}
         onClose={() => {
           setSelectedEvent(null);
           setExpandedId(null);
           setExpandedDetail(null);
           setExpandedError(null);
+          setTriageError(null);
           // Strip event_id from the URL on close so refresh doesn't
           // reopen the same drawer.
           if (searchParams.get("event_id")) {
