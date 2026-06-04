@@ -17,6 +17,11 @@ const quickFilters: Array<{ label: string; patch: Partial<EventFilters> }> = [
   { label: "Destructive", patch: { mode: "decision", impact_type: "destructive", hide_noise: "false" } },
   { label: "Access Changes", patch: { mode: "decision", impact_type: "access_change", hide_noise: "false" } },
   { label: "Config Changes", patch: { mode: "decision", impact_type: "configuration_change", hide_noise: "false" } },
+  // Service quick-filters: action is a case-insensitive LIKE %X% match in
+  // event_service._event_filter_conditions, so a single substring patch
+  // covers both dotted (flink.X) and bare-name (FlinkJobFailed) methods.
+  { label: "Flink", patch: { action: "flink" } },
+  { label: "Tableflow", patch: { action: "tableflow" } },
   { label: "All Activity", patch: { mode: "audit_trail", time_window: "7d", signal: "", hide_noise: "false", impact_type: "" } },
 ];
 

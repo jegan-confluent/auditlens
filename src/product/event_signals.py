@@ -65,7 +65,8 @@ _ALWAYS_NOISE_METHODS: frozenset[str] = BULK_NOISE_METHODS - frozenset({
 })
 
 # Read-only methods that don't fit the Get*/List* prefix rule below but are
-# still pure reads (Tableflow's table-listing helpers).
+# still pure reads (Tableflow's table-listing helpers) or low-signal Flink
+# runtime heartbeats/metrics that emit continuously while a job runs.
 _ALWAYS_INFORMATIONAL_METHODS = frozenset({
     "tableflowgettable",
     "tableflowlisttables",
@@ -73,7 +74,70 @@ _ALWAYS_INFORMATIONAL_METHODS = frozenset({
     "listtableflowcatalog",
     "tableflowgetcatalog",
     "tableflowlistcatalogs",
+    # Flink runtime data plane: periodic, low-signal events that aren't
+    # CRUD on the statement itself.
+    "flinkjobrunning",
+    "flinkmetrics",
+    "flinkheartbeat",
 })
+
+
+# Flink statement / job runtime events that signal an execution-time
+# failure (not a control-plane CRUD failure on the statement object).
+# Routed to action_required with a domain-specific signal_reason so the
+# UI can render "Flink job execution failure detected" rather than the
+# generic "failure_detected" surfaced for read/destructive failures.
+_FLINK_FAILURE_METHODS = frozenset({
+    "flinkjobfailed",
+    "flinkstatementfailed",
+    "flinkjobexception",
+    "checkpointfailed",
+    "flinkrestartfailed",
+})
+
+# Flink lifecycle transitions — notable but not failure. Surfaced as
+# attention so operators see them in the decision feed without alert
+# pressure on every job start/finish.
+_FLINK_LIFECYCLE_METHODS = frozenset({
+    "flinkjobstarted",
+    "flinkjobfinished",
+    "flinkjobrestarting",
+    "checkpointcompleted",
+    "savepointcreated",
+    "savepointrestored",
+})
+
+# FlinkJobCancelled splits on result: result=Failure routes to
+# _FLINK_FAILURE_METHODS-style action_required; result=Success routes to
+# lifecycle attention. Kept in a separate set so the cascade can branch.
+_FLINK_CANCELLED_METHODS = frozenset({
+    "flinkjobcancelled",
+})
+
+
+# Real-Time Context Engine (RTCE) — Confluent early-access feature.
+# Substring markers checked against methodName AND serviceName so events
+# without a stable method-name convention still route correctly. Match
+# is case-insensitive (caller lowercases before lookup).
+_RTCE_MARKERS: tuple[str, ...] = ("contextengine", "realtimecontext", "rtce")
+
+# Bounded per-method warning seen-set for RTCE encounters. Mirrors
+# `_unknown_methods_seen` but kept separate so RTCE telemetry surfaces
+# even for methods that have an RTCE-specific rule (we want to learn
+# the surface as Confluent ships the feature). Eviction at 512 prevents
+# unbounded growth from a misconfigured method-name explosion.
+_rtce_methods_seen: LRUCache = LRUCache(maxsize=512)
+
+
+def _is_rtce_event(event_or_fields: Any, method_name_lower: str) -> bool:
+    """True when methodName or serviceName contains an RTCE marker."""
+    if any(marker in method_name_lower for marker in _RTCE_MARKERS):
+        return True
+    service = _as_text(
+        _field(event_or_fields, "serviceName")
+        or _field(event_or_fields, "service_name")
+    ).lower()
+    return any(marker in service for marker in _RTCE_MARKERS)
 
 # Confluent platform automation: these org-level operations stay action_required
 # even when performed by Confluent's own service account.
@@ -279,6 +343,71 @@ def _classify_signal_core(event_or_fields: Any) -> dict[str, str]:
             "recommended_action": "No action needed",
             "decision_label": "Noise",
         }
+    # RTCE (Real-Time Context Engine) dispatch. Runs before the generic
+    # Get/List read-only short-circuit so RTCE reads get the rtce_read
+    # signal_reason rather than the generic read_only_lookup — same
+    # signal_type, more specific telemetry.
+    if _is_rtce_event(event_or_fields, method_name):
+        if method_name not in _rtce_methods_seen:
+            _rtce_methods_seen[method_name] = True
+            logger.warning(
+                "rtce_method_encountered method=%s action=%s",
+                method_name or "<missing>",
+                action or "<missing>",
+            )
+        if any(marker in method_name for marker in ("delete", "remove", "drop", "destroy")):
+            return {
+                "signal_type": "action_required",
+                "signal_reason": "rtce_destructive_change",
+                "recommended_action": "Confirm Real-Time Context Engine deletion was approved",
+                "decision_label": "Action Needed",
+            }
+        if method_name.startswith(("get", "list", "describe")):
+            return {
+                "signal_type": "informational",
+                "signal_reason": "rtce_read",
+                "recommended_action": "No action needed",
+                "decision_label": "Info",
+            }
+        return {
+            "signal_type": "attention",
+            "signal_reason": "rtce_config_changed",
+            "recommended_action": "Verify Real-Time Context Engine change",
+            "decision_label": "Review",
+        }
+    # Flink runtime execution-time failures. Routed here (before generic
+    # is_failure) so the signal_reason is the domain-specific
+    # "flink_job_failure" instead of the generic "failure_detected".
+    # FlinkJobCancelled requires is_failure to qualify as a failure;
+    # successful cancels fall through to the lifecycle bucket below.
+    if (
+        method_name in _FLINK_FAILURE_METHODS
+        or (method_name in _FLINK_CANCELLED_METHODS and is_failure)
+    ):
+        return {
+            "signal_type": "action_required",
+            "signal_reason": "flink_job_failure",
+            "recommended_action": "Investigate Flink job execution failure",
+            "decision_label": "Action Needed",
+        }
+    # Flink job lifecycle transitions (and successful cancels). Notable but
+    # not alerting — surfaced as attention so operators see them in the
+    # decision feed.
+    if (
+        method_name in _FLINK_LIFECYCLE_METHODS
+        or method_name in _FLINK_CANCELLED_METHODS
+    ):
+        return {
+            "signal_type": "attention",
+            "signal_reason": "flink_job_lifecycle",
+            "recommended_action": "Review Flink job lifecycle event",
+            "decision_label": "Review",
+        }
+    # Generic Get/List read-only short-circuit + _ALWAYS_INFORMATIONAL_METHODS
+    # (Tableflow read helpers and Flink runtime heartbeats/metrics). Runs
+    # AFTER the RTCE + Flink failure/lifecycle dispatches so RTCE-specific
+    # reasons win and Flink failure methods don't get demoted by a stray
+    # "get"/"list" substring at the method-name start.
     if (
         method_name.startswith("get")
         or method_name.startswith("list")

@@ -183,6 +183,8 @@ export function activeFilterLabels(filters: EventFilters) {
     if (key === "production_hint" && value === "non_production") return "Non-production only";
     if (key === "plane" && value === "control_plane") return "Control plane";
     if (key === "plane" && value === "data_plane") return "Data plane";
+    if (key === "action" && value.toLowerCase() === "flink") return "Flink service";
+    if (key === "action" && value.toLowerCase() === "tableflow") return "Tableflow service";
     if (key === "action") return `Method: ${value.split(".").pop() ?? value}`;
     return `${key.replace("_", " ")}: ${value}`;
   };

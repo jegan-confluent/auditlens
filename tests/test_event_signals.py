@@ -80,6 +80,57 @@ def test_unknown_event_has_safe_informational_fallback():
     assert result["signal_reason"] == "unknown"
 
 
+def test_flink_job_failure_methods_are_action_required():
+    for method in ("FlinkJobFailed", "FlinkStatementFailed", "FlinkJobException", "CheckpointFailed", "FlinkRestartFailed"):
+        result = signal({"type": "io.confluent.flink.server/request", "methodName": method, "resultStatus": "SUCCESS"})
+        assert result["signal_type"] == "action_required", method
+        assert result["signal_reason"] == "flink_job_failure", method
+
+
+def test_flink_lifecycle_methods_are_attention():
+    for method in ("FlinkJobStarted", "FlinkJobFinished", "FlinkJobRestarting", "CheckpointCompleted", "SavepointCreated", "SavepointRestored"):
+        result = signal({"type": "io.confluent.flink.server/request", "methodName": method, "resultStatus": "SUCCESS"})
+        assert result["signal_type"] == "attention", method
+        assert result["signal_reason"] == "flink_job_lifecycle", method
+
+
+def test_flink_runtime_heartbeats_are_informational():
+    for method in ("FlinkJobRunning", "FlinkMetrics", "FlinkHeartbeat"):
+        result = signal({"type": "io.confluent.flink.server/request", "methodName": method, "resultStatus": "SUCCESS"})
+        assert result["signal_type"] == "informational", method
+        assert result["signal_reason"] == "read_only_lookup", method
+
+
+def test_flink_job_cancelled_splits_on_result():
+    succeeded = signal({"type": "io.confluent.flink.server/request", "methodName": "FlinkJobCancelled", "resultStatus": "SUCCESS"})
+    assert succeeded["signal_type"] == "attention"
+    assert succeeded["signal_reason"] == "flink_job_lifecycle"
+    failed = signal({"type": "io.confluent.flink.server/request", "methodName": "FlinkJobCancelled", "resultStatus": "FAILURE"})
+    assert failed["signal_type"] == "action_required"
+    assert failed["signal_reason"] == "flink_job_failure"
+
+
+def test_rtce_method_name_dispatches_by_verb():
+    delete = signal({"methodName": "DeleteContextEngine", "resultStatus": "SUCCESS"})
+    assert delete["signal_type"] == "action_required"
+    assert delete["signal_reason"] == "rtce_destructive_change"
+
+    read = signal({"methodName": "GetRealTimeContext", "resultStatus": "SUCCESS"})
+    assert read["signal_type"] == "informational"
+    assert read["signal_reason"] == "rtce_read"
+
+    create = signal({"methodName": "CreateContextEngine", "resultStatus": "SUCCESS"})
+    assert create["signal_type"] == "attention"
+    assert create["signal_reason"] == "rtce_config_changed"
+
+
+def test_rtce_matches_via_service_name_when_method_is_generic():
+    # Method name without an RTCE marker still routes via serviceName.
+    result = signal({"methodName": "UpdateConfiguration", "serviceName": "rtce", "resultStatus": "SUCCESS"})
+    assert result["signal_type"] == "attention"
+    assert result["signal_reason"] == "rtce_config_changed"
+
+
 def _summary_for(payloads: list[dict]) -> dict:
     with TemporaryDirectory() as tmp:
         engine = build_engine(f"sqlite:///{Path(tmp) / 'auditlens.db'}")
