@@ -1,5 +1,6 @@
 import Link from "next/link";
 import type { SummaryResponse } from "../lib/types";
+import { isConfluentInternalActor } from "../lib/utils";
 
 function formatAge(iso: string): string {
   const ts = Date.parse(iso);
@@ -34,6 +35,7 @@ export default function ActionAlertBanner({ summary }: { summary: SummaryRespons
 
   const topActionFlow = summary.flow_groups
     .filter((g) => g.signal_type === "action_required")
+    .filter((g) => !isConfluentInternalActor(g.subject, g.subject_display_name || g.subject || ""))
     .sort((a, b) => b.event_count - a.event_count)[0] ?? null;
 
   const actorLabel = topActionFlow

@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import type { SummaryResponse } from "../lib/types";
+import { isConfluentInternalActor } from "../lib/utils";
 
 function resolveProductionQualifier(summary: SummaryResponse): string | null {
   const groups = (summary.flow_groups ?? []).filter(g => g.signal_type === "action_required");
@@ -13,12 +14,6 @@ function resolveProductionQualifier(summary: SummaryResponse): string | null {
   });
   if (hasBroadBlast) return "with broad blast radius";
   return null;
-}
-
-function isConfluentInternalActor(subject: string, display: string): boolean {
-  if (subject.includes("externalAccount")) return true;
-  if (display === "Confluent" || display === "Confluent (internal)") return true;
-  return false;
 }
 
 function resolveTopActor(summary: SummaryResponse): { display: string; count: number } | null {

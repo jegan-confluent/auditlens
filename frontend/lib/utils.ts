@@ -20,6 +20,25 @@ export function normalizeActorDisplay(value: string): string {
 }
 
 /**
+ * Identify Confluent's own platform-automation service account.
+ *
+ * These events (e.g. ScheduledJwksRefresh) are system-internal, not human or
+ * customer-service-account activity. UI surfaces that highlight "most active"
+ * or "most recent" actors should skip them — they're noise as actor attribution,
+ * even when the underlying signal classification is action_required.
+ *
+ * Triggers on:
+ *   - raw subject containing "externalAccount" (JSON-blob form pre-parse)
+ *   - display name exactly "Confluent" (parsed externalAccount.subject)
+ *   - display name exactly "Confluent (internal)" (normalized form)
+ */
+export function isConfluentInternalActor(subject: string, display: string): boolean {
+  if (subject.includes("externalAccount")) return true;
+  if (display === "Confluent" || display === "Confluent (internal)") return true;
+  return false;
+}
+
+/**
  * Strip a Confluent CRN to its meaningful terminal ID component.
  * crn://confluent.cloud/.../environment=env-abc123  →  env-abc123
  * crn://confluent.cloud/.../cloud-cluster=lkc-abc   →  lkc-abc
