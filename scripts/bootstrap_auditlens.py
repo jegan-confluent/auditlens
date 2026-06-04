@@ -340,6 +340,26 @@ def prompt_text(
         # braces: replace newlines with a single space, drop carriage
         # returns, then re-trim edge whitespace.
         value = value.replace("\n", " ").replace("\r", "").strip()
+        # Visual confirmation for masked input. getpass.getpass() echoes
+        # nothing to the terminal, so without this an operator pasting an
+        # API key has no signal whether the paste was received at all,
+        # received truncated, or received twice (a common bracketed-paste
+        # accident). 200-char ceiling reflects observed Confluent API key
+        # + secret sizes — anything materially longer is almost always a
+        # double-paste. Emitted to stderr so log-capturing wrappers that
+        # tee stdout to a file don't accidentally archive the length.
+        if secret and value:
+            chars = len(value)
+            print(f"  ✓ Received ({chars} chars)", file=sys.stderr)
+            if chars > 200:
+                print(
+                    f"  ⚠ Input looks long ({chars} chars) — did you paste multiple times?",
+                    file=sys.stderr,
+                )
+                print(
+                    "    Press Ctrl+C to restart, then paste once.",
+                    file=sys.stderr,
+                )
         if not value and default is not None:
             value = default
         if value or not required:
