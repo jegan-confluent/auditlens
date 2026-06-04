@@ -131,6 +131,26 @@ def test_rtce_matches_via_service_name_when_method_is_generic():
     assert result["signal_reason"] == "rtce_config_changed"
 
 
+def test_decision_snapshot_overrides_decision_reason_for_new_signal_reasons():
+    from src.product.event_intelligence import decision_snapshot
+
+    snap = decision_snapshot({"methodName": "FlinkJobFailed", "resultStatus": "SUCCESS"})
+    assert snap["signal_reason"] == "flink_job_failure"
+    assert snap["decision_reason"] == "Flink job execution failure detected"
+
+    snap = decision_snapshot({"methodName": "FlinkJobStarted", "resultStatus": "SUCCESS"})
+    assert snap["signal_reason"] == "flink_job_lifecycle"
+    assert snap["decision_reason"] == "Flink job lifecycle event"
+
+    snap = decision_snapshot({"methodName": "DeleteContextEngine", "resultStatus": "SUCCESS"})
+    assert snap["signal_reason"] == "rtce_destructive_change"
+    assert snap["decision_reason"] == "Real-Time Context Engine resource deleted"
+
+    snap = decision_snapshot({"methodName": "CreateContextEngine", "resultStatus": "SUCCESS"})
+    assert snap["signal_reason"] == "rtce_config_changed"
+    assert snap["decision_reason"] == "Real-Time Context Engine configuration change"
+
+
 def _summary_for(payloads: list[dict]) -> dict:
     with TemporaryDirectory() as tmp:
         engine = build_engine(f"sqlite:///{Path(tmp) / 'auditlens.db'}")

@@ -471,13 +471,29 @@ def event_digest_from_model(event: Any) -> dict[str, str]:
     return event_digest(_payload_from_event(event), event)
 
 
+_SIGNAL_REASON_DECISION_REASON: dict[str, str] = {
+    "flink_job_failure": "Flink job execution failure detected",
+    "flink_job_lifecycle": "Flink job lifecycle event",
+    "rtce_destructive_change": "Real-Time Context Engine resource deleted",
+    "rtce_config_changed": "Real-Time Context Engine configuration change",
+}
+
+
 def decision_snapshot(payload: dict[str, Any], event: Any | None = None) -> dict[str, str]:
     digest = event_digest(payload, event)
     signal_input = {**payload, **digest}
     from src.product.event_signals import classify_signal
 
     signal = classify_signal(signal_input)
-    return {**digest, **signal}
+    snapshot = {**digest, **signal}
+    # signal_reason is set by classify_signal AFTER event_digest computed
+    # decision_reason from impact/change/family. For signal_reasons that
+    # carry a more specific prose explanation than the generic mapping in
+    # decision_reason_for() (Flink runtime events, RTCE), override here.
+    override = _SIGNAL_REASON_DECISION_REASON.get(snapshot.get("signal_reason", ""))
+    if override:
+        snapshot["decision_reason"] = override
+    return snapshot
 
 
 def decision_snapshot_from_model(event: Any) -> dict[str, str]:
