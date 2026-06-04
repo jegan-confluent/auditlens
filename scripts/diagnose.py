@@ -1117,16 +1117,17 @@ def diagnose_ingest(url: str = FORWARDER_HEALTH_URL_DEFAULT) -> int:
     bulk_q_cap = 50000
     record_q_cap = 10000
 
-    # Optional fields the current forwarder build does NOT emit; included so
-    # adding instrumentation later starts populating diagnose-ingest with no
-    # further script changes.
-    iam_hit_rate_val = second.get("iam_cache_hit_rate_60s")
+    # 60s rolling-window stats added by src/product/{actor_enrichment,db_writer}.py.
+    # Both forwarder builds since 2026-06 emit these; older builds return
+    # None (or omit the field entirely) and the classifier degrades to
+    # "field missing" handling — same behaviour as the rate-only path.
+    iam_hit_rate_val = second.get("iam_cache_hit_rate")
     iam_hit_rate = (
         float(iam_hit_rate_val)
         if isinstance(iam_hit_rate_val, (int, float))
         else None
     )
-    db_p95_val = second.get("db_write_p95_ms_60s")
+    db_p95_val = second.get("db_write_p95_ms")
     db_p95 = (
         float(db_p95_val)
         if isinstance(db_p95_val, (int, float))

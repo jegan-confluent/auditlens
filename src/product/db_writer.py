@@ -1,6 +1,8 @@
 import json
 import logging
+import threading
 import time
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -49,6 +51,64 @@ from src.product.event_normalization import (
 from src.product.resource_intelligence import build_resource_catalog_entry
 
 logger = logging.getLogger(__name__)
+
+# ──────────── DB write latency observability (60s rolling window) ────────────
+# Module-level ring buffer of (monotonic_ts, latency_ms) tuples. Pruned lazily
+# on every record + read so memory stays bounded. Surfaced via /health as
+# `db_write_p50_ms` / `db_write_p95_ms` and consumed by `make diagnose-ingest`
+# for the DB_WRITE bottleneck rule. Both write_batch (signal lane) and
+# write_noise_batch (bulk lane) feed the same buffer — both compete for the
+# same Postgres connection pool, so a single percentile is the right shape.
+_LATENCY_WINDOW_SECONDS = 60.0
+_LATENCY_HARD_CAP = 50_000  # defence against runaway growth
+_LATENCY_LOCK = threading.Lock()
+_LATENCY_SAMPLES: deque = deque()
+
+
+def _record_db_latency_ms(ms: float) -> None:
+    """Append a single batch INSERT latency to the rolling 60s window."""
+    if ms is None or ms < 0:
+        return
+    now = time.monotonic()
+    cutoff = now - _LATENCY_WINDOW_SECONDS
+    with _LATENCY_LOCK:
+        _LATENCY_SAMPLES.append((now, float(ms)))
+        while _LATENCY_SAMPLES and _LATENCY_SAMPLES[0][0] < cutoff:
+            _LATENCY_SAMPLES.popleft()
+        while len(_LATENCY_SAMPLES) > _LATENCY_HARD_CAP:
+            _LATENCY_SAMPLES.popleft()
+
+
+def get_db_write_percentiles() -> dict[str, float | int | None]:
+    """Return p50 / p95 of batch INSERT latency (ms) over the last 60 s.
+
+    Returns {"p50": float|None, "p95": float|None, "count": int}. Both
+    percentiles are None when no samples are in the window. p95 uses the
+    nearest-rank method (no interpolation) which is well-defined even on
+    very small samples and avoids surprises around the off-by-one edge.
+    """
+    now = time.monotonic()
+    cutoff = now - _LATENCY_WINDOW_SECONDS
+    with _LATENCY_LOCK:
+        while _LATENCY_SAMPLES and _LATENCY_SAMPLES[0][0] < cutoff:
+            _LATENCY_SAMPLES.popleft()
+        samples = [ms for _ts, ms in _LATENCY_SAMPLES]
+    if not samples:
+        return {"p50": None, "p95": None, "count": 0}
+    samples.sort()
+    n = len(samples)
+    p50 = samples[n // 2]
+    # Nearest-rank p95: index = ceil(0.95 * n) - 1, clamped to [0, n-1].
+    p95_idx = max(0, min(n - 1, -(-95 * n // 100) - 1))
+    p95 = samples[p95_idx]
+    return {"p50": p50, "p95": p95, "count": n}
+
+
+def reset_db_write_latency_stats() -> None:
+    """Clear the latency ring buffer. Test helper; never called in prod."""
+    with _LATENCY_LOCK:
+        _LATENCY_SAMPLES.clear()
+
 
 # Delete audit_events in 5 K-row batches during retention cleanup.
 # Prevents long lock windows and autovacuum spikes on large tables.
@@ -388,6 +448,7 @@ class AuditEventDbWriter:
             result = conn.execute(statement)
             inserted = len(result.fetchall()) if self.mode == "postgres" else int(result.rowcount or 0)
         pg_insert_ms = (time.perf_counter() - pg_insert_started) * 1000
+        _record_db_latency_ms(pg_insert_ms)
 
         catalog_upsert_ms = 0.0
         deferred_catalog_rows = None
@@ -450,6 +511,7 @@ class AuditEventDbWriter:
                 # Some drivers return -1 for executemany without RETURNING.
                 inserted = len(rows)
         pg_insert_ms = (time.perf_counter() - pg_insert_started) * 1000
+        _record_db_latency_ms(pg_insert_ms)
         return DbWriteResult(
             attempted=len(rows),
             inserted=inserted,

@@ -175,6 +175,38 @@ def _serialization_status_safe() -> dict:
         return {"enriched_topic": "unknown", "sr_connected": False, "sr_url": None}
 
 
+def _safe_iam_cache_hit_rate() -> float | None:
+    """Pull the 60s IAM cache hit rate from src.product.actor_enrichment.
+
+    None when no samples are in the window OR the module is missing — the
+    diagnose-ingest classifier treats None as "field missing" and uses it
+    as a signal for the IAM_ENRICHMENT bottleneck rule.
+    """
+    try:
+        from src.product.actor_enrichment import get_iam_cache_hit_rate
+        return get_iam_cache_hit_rate()
+    except Exception:  # pragma: no cover — defensive only
+        return None
+
+
+def _safe_db_write_percentiles() -> dict[str, float | None]:
+    """Return {"db_write_p50_ms": …, "db_write_p95_ms": …} over the last 60s.
+
+    Both values are None when no samples are in the window. Defensive
+    import so a forwarder build without the product module still serves
+    /health rather than 500-ing on ImportError.
+    """
+    try:
+        from src.product.db_writer import get_db_write_percentiles
+        pct = get_db_write_percentiles()
+        return {
+            "db_write_p50_ms": pct.get("p50"),
+            "db_write_p95_ms": pct.get("p95"),
+        }
+    except Exception:  # pragma: no cover — defensive only
+        return {"db_write_p50_ms": None, "db_write_p95_ms": None}
+
+
 # ──────────── metrics server ────────────
 class MetricsHandler(BaseHTTPRequestHandler):
     def _send_json(self, status_code: int, payload: dict, headers: dict | None = None):
@@ -352,6 +384,14 @@ class MetricsHandler(BaseHTTPRequestHandler):
             "noise_short_circuited_total": metrics_data.get("noise_short_circuited_total", 0),
             "noise_persist_wait_timeouts_total": metrics_data.get("noise_persist_wait_timeouts_total", 0),
             "dry_run_suppressed_total": metrics_data.get("dry_run_suppressed_total", 0),
+            # Ingest-bottleneck diagnostics (consumed by `make diagnose-ingest`).
+            # Both reads pull from module-level 60s rolling windows that are
+            # pruned lazily on every record + read; cost is a single list-sort
+            # bounded by the per-second event rate. Imports are deferred so a
+            # bare /health on a minimal forwarder build (no product/ modules)
+            # still serves rather than 500-ing on ImportError.
+            "iam_cache_hit_rate": _safe_iam_cache_hit_rate(),
+            **_safe_db_write_percentiles(),
             # Producer-side serialization state for audit.enriched.v1.
             # Set by audit_forwarder at SR init via schema_registry.
             # set_serialization_status(). Surfaced here so the UI can

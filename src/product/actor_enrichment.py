@@ -5,6 +5,7 @@ import re
 import threading
 import time
 import urllib.parse as _urlparse
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -28,6 +29,51 @@ PRINCIPAL_PREFIXES = ("user:", "u-", "sa-", "api-key-", "apikey", "pool-", "org-
 _CACHE: TTLCache = TTLCache(maxsize=50000, ttl=3600)
 # cachetools.TTLCache is not thread-safe; this lock guards every read/write.
 _CACHE_LOCK = threading.Lock()
+
+# ──────────── IAM cache hit/miss observability (60s rolling window) ──────────
+# Module-level ring buffer of (monotonic_ts, is_hit) tuples. Pruned lazily on
+# every record + read so memory stays bounded. Surfaced via /health as
+# `iam_cache_hit_rate` and consumed by `make diagnose-ingest` for the IAM
+# bottleneck rule. Kill-switch bypass is NOT counted (it never touches the
+# cache), so the rate reflects only real enrichment work.
+_HIT_MISS_WINDOW_SECONDS = 60.0
+_HIT_MISS_HARD_CAP = 100_000  # defence against runaway growth
+_HIT_MISS_LOCK = threading.Lock()
+_HIT_MISS_SAMPLES: deque = deque()
+
+
+def _record_cache_event(is_hit: bool) -> None:
+    now = time.monotonic()
+    cutoff = now - _HIT_MISS_WINDOW_SECONDS
+    with _HIT_MISS_LOCK:
+        _HIT_MISS_SAMPLES.append((now, is_hit))
+        while _HIT_MISS_SAMPLES and _HIT_MISS_SAMPLES[0][0] < cutoff:
+            _HIT_MISS_SAMPLES.popleft()
+        # Belt-and-braces cap. If the prune above didn't keep us under the
+        # ceiling (clock skew, exotic queue throughput), forcibly trim.
+        while len(_HIT_MISS_SAMPLES) > _HIT_MISS_HARD_CAP:
+            _HIT_MISS_SAMPLES.popleft()
+
+
+def get_iam_cache_hit_rate() -> float | None:
+    """Hit rate (0-100) over the last 60 s, or None if no samples in window."""
+    now = time.monotonic()
+    cutoff = now - _HIT_MISS_WINDOW_SECONDS
+    with _HIT_MISS_LOCK:
+        # Prune defensively in case nothing has been recorded for a while.
+        while _HIT_MISS_SAMPLES and _HIT_MISS_SAMPLES[0][0] < cutoff:
+            _HIT_MISS_SAMPLES.popleft()
+        if not _HIT_MISS_SAMPLES:
+            return None
+        total = len(_HIT_MISS_SAMPLES)
+        hits = sum(1 for _, is_hit in _HIT_MISS_SAMPLES if is_hit)
+    return (hits / total) * 100.0
+
+
+def reset_iam_cache_stats() -> None:
+    """Clear the hit/miss ring buffer. Test helper; never called in prod."""
+    with _HIT_MISS_LOCK:
+        _HIT_MISS_SAMPLES.clear()
 
 
 def _as_text(value: Any) -> str:
@@ -655,7 +701,9 @@ def enrich_actor(actor: str, subject: str = "", subject_type: str = "") -> dict[
     with _CACHE_LOCK:
         cached = _CACHE.get(cache_key)
     if cached and now - cached[0] < config.cache_ttl_seconds:
+        _record_cache_event(is_hit=True)
         return cached[1]
+    _record_cache_event(is_hit=False)
 
     identity: dict[str, str] | None = None
     try:

@@ -333,6 +333,34 @@ def test_actor_enrichment_failure_falls_back_without_logging_secrets(monkeypatch
     assert "sensitive-secret" not in caplog.text
 
 
+def test_iam_cache_hit_miss_tracking_60s_window(monkeypatch):
+    """Module-level hit/miss ring buffer powers the iam_cache_hit_rate
+    /health field. Recording 3 hits + 1 miss → 75%. Kill-switch bypass
+    must NOT increment either counter (the cache is never touched)."""
+    from src.product.actor_enrichment import (
+        _record_cache_event,
+        get_iam_cache_hit_rate,
+        reset_iam_cache_stats,
+    )
+
+    reset_iam_cache_stats()
+    assert get_iam_cache_hit_rate() is None
+    _record_cache_event(is_hit=True)
+    _record_cache_event(is_hit=True)
+    _record_cache_event(is_hit=True)
+    _record_cache_event(is_hit=False)
+    rate = get_iam_cache_hit_rate()
+    assert rate is not None
+    assert 74.5 <= rate <= 75.5
+
+    # Kill-switch path must not record. Set false → call enrich_actor →
+    # ring buffer stays at the same length.
+    reset_iam_cache_stats()
+    monkeypatch.setenv("IAM_ENRICHMENT_ENABLED", "false")
+    enrich_actor("u-bypass-counter")
+    assert get_iam_cache_hit_rate() is None, "kill-switch must not touch hit/miss counters"
+
+
 def test_enrichment_kill_switch_bypasses_all_sources(monkeypatch):
     """IAM_ENRICHMENT_ENABLED=false → enrich_actor returns the raw principal
     with NO cache, IAM, audit-event, or metrics lookups. Used during

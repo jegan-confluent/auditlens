@@ -206,3 +206,44 @@ def test_record_db_write_success_with_no_event_timestamp_does_not_clobber():
     m.record_db_write_success(batch_size=10, max_event_timestamp_iso="2026-05-09T10:00:00Z")
     m.record_db_write_success(batch_size=0, max_event_timestamp_iso=None)
     assert m.db_last_event_timestamp_iso == "2026-05-09T10:00:00Z"
+
+
+# ──────────── DB write latency 60s rolling window ────────────────────────
+def test_db_write_latency_p50_p95_over_60s_window():
+    """Ring buffer + nearest-rank percentiles over the last 60s. Both p50
+    and p95 are None pre-population and reflect the recorded samples once
+    populated. p95 uses nearest-rank — no interpolation surprises."""
+    from src.product.db_writer import (
+        _record_db_latency_ms,
+        get_db_write_percentiles,
+        reset_db_write_latency_stats,
+    )
+
+    reset_db_write_latency_stats()
+    assert get_db_write_percentiles() == {"p50": None, "p95": None, "count": 0}
+
+    for ms in range(1, 101):  # 1..100
+        _record_db_latency_ms(float(ms))
+    pct = get_db_write_percentiles()
+    assert pct["count"] == 100
+    # samples sorted 1..100; samples[50] = 51; nearest-rank p95 idx = 94 → 95
+    assert pct["p50"] == 51
+    assert pct["p95"] == 95
+
+
+def test_db_write_latency_ignores_negative_and_none():
+    """Defensive — negative or None latencies must not pollute the ring."""
+    from src.product.db_writer import (
+        _record_db_latency_ms,
+        get_db_write_percentiles,
+        reset_db_write_latency_stats,
+    )
+
+    reset_db_write_latency_stats()
+    _record_db_latency_ms(None)  # type: ignore[arg-type]
+    _record_db_latency_ms(-1.0)
+    _record_db_latency_ms(50.0)
+    pct = get_db_write_percentiles()
+    assert pct["count"] == 1
+    assert pct["p50"] == 50.0
+    assert pct["p95"] == 50.0
