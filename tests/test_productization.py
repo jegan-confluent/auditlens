@@ -110,6 +110,174 @@ def test_dlq_poison_pill_metric_increments():
     assert m.get_metrics()["dlq_poison_pill_total"] == 4
 
 
+# ────── Fix A: writer requeue + DLQ-on-exhaust counters ──────
+def test_record_writer_batch_requeue_per_lane():
+    """Each writer lane keeps its own requeue counter."""
+    from src.forwarder.metrics import Metrics
+    m = Metrics()
+    m.record_writer_batch_requeue("critical")
+    m.record_writer_batch_requeue("critical", count=2)
+    m.record_writer_batch_requeue("normal")
+    snapshot = m.get_metrics()["writer_batch_requeue_total"]
+    assert snapshot == {"critical": 3, "normal": 1}
+
+
+def test_record_writer_batch_dlq_per_lane():
+    """DLQ counter is per-lane so SREs can tell which lane is exhausting
+    retries (critical exhaustion is a P1, bulk exhaustion is informational)."""
+    from src.forwarder.metrics import Metrics
+    m = Metrics()
+    m.record_writer_batch_dlq("critical")
+    m.record_writer_batch_dlq("bulk", count=5)
+    snapshot = m.get_metrics()["writer_batch_dlq_total"]
+    assert snapshot == {"critical": 1, "bulk": 5}
+
+
+# ────── Fix B: writer→consumer backpressure counter ──────
+def test_record_consumer_paused_writer_pressure():
+    """Counter goes up each time the consumer thread pauses Kafka due to
+    writer-queue pressure (not record_queue.Full)."""
+    from src.forwarder.metrics import Metrics
+    m = Metrics()
+    assert m.get_metrics()["consumer_paused_writer_pressure_total"] == 0
+    m.record_consumer_paused_writer_pressure()
+    m.record_consumer_paused_writer_pressure()
+    assert m.get_metrics()["consumer_paused_writer_pressure_total"] == 2
+
+
+# ────── Fix C: replay-recommended + replay_reason logic ──────
+def test_replay_recommended_triggers_on_writer_drops():
+    """Any writer drop > 0 flips replay_recommended True, regardless of
+    lag or db_behind. This is the path that catches transient PG outages
+    that silently dropped events."""
+    from src.forwarder.health_server import _is_replay_recommended, _replay_reason
+    # Healthy lag + healthy db_behind, but one drop → replay needed.
+    assert _is_replay_recommended(consumer_lag=0, db_behind_seconds=10, writer_drops_total=1) is True
+    assert _replay_reason(consumer_lag=0, db_behind_seconds=10, writer_drops_total=1) == "writer_queue_drops"
+
+
+def test_replay_recommended_when_db_behind_and_consumer_caught_up():
+    """Legacy trigger: Kafka consumed AND Postgres > 5 min behind."""
+    from src.forwarder.health_server import _is_replay_recommended, _replay_reason
+    assert _is_replay_recommended(consumer_lag=0, db_behind_seconds=301, writer_drops_total=0) is True
+    assert _replay_reason(consumer_lag=0, db_behind_seconds=301, writer_drops_total=0) == "db_behind"
+
+
+def test_replay_not_recommended_when_healthy():
+    """No lag, fresh DB, no drops → no replay needed."""
+    from src.forwarder.health_server import _is_replay_recommended, _replay_reason
+    assert _is_replay_recommended(consumer_lag=0, db_behind_seconds=10, writer_drops_total=0) is False
+    assert _replay_reason(consumer_lag=0, db_behind_seconds=10, writer_drops_total=0) is None
+
+
+def test_replay_writer_drops_takes_precedence_over_db_behind():
+    """When both conditions fire, the reason is the more severe one
+    (writer drops directly = data loss; db_behind is "we might be slow")."""
+    from src.forwarder.health_server import _replay_reason
+    # Drops AND db_behind firing — drops wins as the reason label.
+    assert _replay_reason(consumer_lag=0, db_behind_seconds=600, writer_drops_total=5) == "writer_queue_drops"
+
+
+def test_record_writer_queue_dropped_per_lane():
+    """Drops are per-lane: critical NEVER drops (returns False to block
+    commit instead). Only normal/bulk legitimately call this."""
+    from src.forwarder.metrics import Metrics
+    m = Metrics()
+    m.record_writer_queue_dropped("normal")
+    m.record_writer_queue_dropped("bulk", count=10)
+    snapshot = m.get_metrics()["writer_queue_dropped_total"]
+    assert snapshot == {"normal": 1, "bulk": 10}
+
+
+# ────── Fix D: latency percentile rolling windows ──────
+def test_commit_latency_percentiles_nearest_rank():
+    """Same deque + lazy-prune + nearest-rank shape as db_write / iam
+    lookup; here we just sanity-check the percentile shape."""
+    from src.forwarder.metrics import (
+        record_commit_latency_ms,
+        get_commit_percentiles,
+        reset_commit_latency_stats,
+    )
+    reset_commit_latency_stats()
+    assert get_commit_percentiles() == {"p50": None, "p95": None, "count": 0}
+    for ms in [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]:
+        record_commit_latency_ms(ms)
+    pct = get_commit_percentiles()
+    assert pct["count"] == 10
+    # Median sample of 10 items: index 5 → 60
+    assert pct["p50"] == 60
+    # Nearest-rank p95 on 10 items: ceil(0.95*10)=10, idx 9 → 100
+    assert pct["p95"] == 100
+    reset_commit_latency_stats()
+
+
+def test_iam_lookup_latency_percentiles_nearest_rank():
+    from src.product.actor_enrichment import (
+        _record_iam_lookup_latency_ms,
+        get_iam_lookup_percentiles,
+        reset_iam_lookup_latency_stats,
+    )
+    reset_iam_lookup_latency_stats()
+    assert get_iam_lookup_percentiles() == {"p50": None, "p95": None, "count": 0}
+    for ms in [5, 10, 15, 20, 25]:
+        _record_iam_lookup_latency_ms(ms)
+    pct = get_iam_lookup_percentiles()
+    assert pct["count"] == 5
+    assert pct["p50"] == 15
+    reset_iam_lookup_latency_stats()
+
+
+# ────── Fix F: SIGNAL_COMMIT_REQUIRES_PG persistence barrier ──────
+def test_signal_persisted_record_and_await_unblock():
+    """_record_signal_persisted advances the per-partition high-water
+    mark; _await_signal_persisted returns True once all required offsets
+    are at or above their target."""
+    import threading
+    import time as _time
+    # Reset state so prior tests don't pollute the module dict.
+    forwarder._signal_persisted_offsets.clear()
+
+    items = [
+        {"_source_topic": "t", "_source_partition": 0, "_source_offset": 100},
+        {"_source_topic": "t", "_source_partition": 1, "_source_offset": 200},
+    ]
+
+    # Spawn the await on a thread so we can advance the offset live.
+    result = {}
+
+    def _await_runner():
+        result["ok"] = forwarder._await_signal_persisted(
+            {("t", 0): 100, ("t", 1): 200}, timeout=2.0,
+        )
+
+    t = threading.Thread(target=_await_runner)
+    t.start()
+    _time.sleep(0.05)  # let the await thread acquire the CV
+    forwarder._record_signal_persisted(items)
+    t.join(timeout=3.0)
+    assert result.get("ok") is True
+    forwarder._signal_persisted_offsets.clear()
+
+
+def test_signal_persisted_await_times_out_when_not_advanced():
+    """When the writer thread never advances the high-water mark, the
+    processor must NOT wait forever — bounded by the timeout."""
+    forwarder._signal_persisted_offsets.clear()
+    started = __import__("time").monotonic()
+    ok = forwarder._await_signal_persisted({("t", 0): 999}, timeout=0.3)
+    elapsed = __import__("time").monotonic() - started
+    assert ok is False
+    assert 0.2 <= elapsed <= 1.0  # within the timeout window
+    forwarder._signal_persisted_offsets.clear()
+
+
+def test_signal_persisted_empty_required_returns_true():
+    """No-required case = True (no need to wait). This is the path taken
+    when SIGNAL_COMMIT_REQUIRES_PG is false AND signal_in_flight is empty."""
+    forwarder._signal_persisted_offsets.clear()
+    assert forwarder._await_signal_persisted({}, timeout=0.1) is True
+
+
 def test_duplicate_replay_tolerance_uses_upsert(tmp_path):
     store = _store(tmp_path)
     event = {

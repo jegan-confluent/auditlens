@@ -101,12 +101,47 @@ def _classify_db_writer_status(last_write_iso: str | None, error_count: int) -> 
     return "healthy"
 
 
-def _is_replay_recommended(consumer_lag: int | None, db_behind_seconds: int | None) -> bool:
-    """True iff Kafka is fully consumed AND Postgres is >5min behind —
-    the signal that says 'run replay to backfill the missing tail'."""
+def _is_replay_recommended(
+    consumer_lag: int | None,
+    db_behind_seconds: int | None,
+    writer_drops_total: int = 0,
+) -> bool:
+    """True when operator action (running `make replay` against Kafka
+    topics) is needed to recover events that may not be in audit_events.
+
+    Two trigger conditions:
+      - `db_behind`: Kafka fully consumed AND Postgres > 5 min behind.
+        Indicates an async-writer crash dropped a tail of events.
+      - `writer_drops`: at least one event was dropped because a writer
+        queue overflowed at backpressure timeout. Fires regardless of
+        lag/DB freshness — drops are silent data loss into audit_events
+        even when everything else looks healthy.
+    """
+    if writer_drops_total > 0:
+        return True
     if consumer_lag is None or db_behind_seconds is None:
         return False
     return consumer_lag == 0 and db_behind_seconds > 300
+
+
+def _replay_reason(
+    consumer_lag: int | None,
+    db_behind_seconds: int | None,
+    writer_drops_total: int = 0,
+) -> str | None:
+    """Operator-facing label explaining WHY replay is recommended.
+    None when replay is not recommended.
+
+    `writer_queue_drops` takes precedence — it indicates direct data loss
+    into PG, whereas `db_behind` only indicates "we may be behind".
+    """
+    if writer_drops_total > 0:
+        return "writer_queue_drops"
+    if consumer_lag is None or db_behind_seconds is None:
+        return None
+    if consumer_lag == 0 and db_behind_seconds > 300:
+        return "db_behind"
+    return None
 
 
 def _build_db_writer_block(metrics_data: dict) -> dict:
@@ -205,6 +240,40 @@ def _safe_db_write_percentiles() -> dict[str, float | None]:
         }
     except Exception:  # pragma: no cover — defensive only
         return {"db_write_p50_ms": None, "db_write_p95_ms": None}
+
+
+def _safe_commit_percentiles() -> dict[str, float | None]:
+    """p50/p95 of synchronous consumer.commit() latency over the last 60 s.
+
+    Surfaces broker-side commit slowness (e.g., group-coordinator hiccup,
+    cross-region latency spike) separately from data-path slowness."""
+    try:
+        from src.forwarder.metrics import get_commit_percentiles
+        pct = get_commit_percentiles()
+        return {
+            "commit_latency_p50_ms": pct.get("p50"),
+            "commit_latency_p95_ms": pct.get("p95"),
+        }
+    except Exception:  # pragma: no cover — defensive only
+        return {"commit_latency_p50_ms": None, "commit_latency_p95_ms": None}
+
+
+def _safe_iam_lookup_percentiles() -> dict[str, float | None]:
+    """p50/p95 of Confluent IAM HTTP-roundtrip on cache miss over 60 s.
+
+    Distinct from `iam_cache_hit_rate` (which is the hit/miss ratio) —
+    this is the latency of the misses themselves, the cost an event pays
+    on cold-cache enrichment. Catch-up tuning lives or dies on this
+    number."""
+    try:
+        from src.product.actor_enrichment import get_iam_lookup_percentiles
+        pct = get_iam_lookup_percentiles()
+        return {
+            "iam_lookup_p50_ms": pct.get("p50"),
+            "iam_lookup_p95_ms": pct.get("p95"),
+        }
+    except Exception:  # pragma: no cover — defensive only
+        return {"iam_lookup_p50_ms": None, "iam_lookup_p95_ms": None}
 
 
 # ──────────── metrics server ────────────
@@ -404,6 +473,28 @@ class MetricsHandler(BaseHTTPRequestHandler):
             # still serves rather than 500-ing on ImportError.
             "iam_cache_hit_rate": _safe_iam_cache_hit_rate(),
             **_safe_db_write_percentiles(),
+            **_safe_commit_percentiles(),
+            **_safe_iam_lookup_percentiles(),
+            # ── Writer-lane diagnostics ──
+            # Aggregated total so make status / catchup-status can read a
+            # single integer; per-lane breakdown so SREs can see WHICH
+            # lane is bleeding (critical drops are catastrophic; bulk
+            # drops are tolerable). Same shape as signal_counts.
+            "writer_queue_dropped_total": sum(
+                int(v) for v in metrics_data.get("writer_queue_dropped_total", {}).values()
+            ),
+            "writer_queue_dropped_by_lane": metrics_data.get(
+                "writer_queue_dropped_total", {},
+            ),
+            "writer_batch_requeue_by_lane": metrics_data.get(
+                "writer_batch_requeue_total", {},
+            ),
+            "writer_batch_dlq_by_lane": metrics_data.get(
+                "writer_batch_dlq_total", {},
+            ),
+            "consumer_paused_writer_pressure_total": metrics_data.get(
+                "consumer_paused_writer_pressure_total", 0,
+            ),
             # Producer-side serialization state for audit.enriched.v1.
             # Set by audit_forwarder at SR init via schema_registry.
             # set_serialization_status(). Surfaced here so the UI can
@@ -418,6 +509,12 @@ class MetricsHandler(BaseHTTPRequestHandler):
             "replay_recommended": _is_replay_recommended(
                 metrics_data.get("consumer_lag_total"),
                 _compute_db_behind_seconds(metrics_data.get("db_last_event_timestamp_iso")),
+                sum(int(v) for v in metrics_data.get("writer_queue_dropped_total", {}).values()),
+            ),
+            "replay_reason": _replay_reason(
+                metrics_data.get("consumer_lag_total"),
+                _compute_db_behind_seconds(metrics_data.get("db_last_event_timestamp_iso")),
+                sum(int(v) for v in metrics_data.get("writer_queue_dropped_total", {}).values()),
             ),
             "freshness": {
                 "last_enriched_event_time": snapshot["last_enriched_event_time"],

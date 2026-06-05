@@ -2,9 +2,64 @@
 
 import threading
 import time
+from collections import deque
 
 from src.forwarder.config import PERSISTENCE_CONFIG, KAFKA_DEGRADED_AFTER_ERRORS
 from src.forwarder.utils import utc_now_iso
+
+
+# ──────────── commit latency observability (60s rolling window) ─────────────
+# Mirrors the deque + lazy-prune + nearest-rank pattern used in db_writer.py
+# and actor_enrichment.py. Records each synchronous consumer.commit() call
+# duration in ms. Surfaced on /health as commit_latency_p50_ms /
+# commit_latency_p95_ms so SREs can detect commit-path slowdown (e.g.,
+# broker latency, group-coordinator hiccup) without polling Prometheus.
+_COMMIT_LATENCY_WINDOW_SECONDS = 60.0
+_COMMIT_LATENCY_HARD_CAP = 10_000
+_COMMIT_LATENCY_LOCK = threading.Lock()
+_COMMIT_LATENCY_SAMPLES: deque = deque()
+
+
+def record_commit_latency_ms(ms: float) -> None:
+    """Append a single consumer.commit() duration to the rolling window."""
+    if ms is None or ms < 0:
+        return
+    now = time.monotonic()
+    cutoff = now - _COMMIT_LATENCY_WINDOW_SECONDS
+    with _COMMIT_LATENCY_LOCK:
+        _COMMIT_LATENCY_SAMPLES.append((now, float(ms)))
+        while _COMMIT_LATENCY_SAMPLES and _COMMIT_LATENCY_SAMPLES[0][0] < cutoff:
+            _COMMIT_LATENCY_SAMPLES.popleft()
+        while len(_COMMIT_LATENCY_SAMPLES) > _COMMIT_LATENCY_HARD_CAP:
+            _COMMIT_LATENCY_SAMPLES.popleft()
+
+
+def get_commit_percentiles() -> dict[str, float | int | None]:
+    """Return {"p50", "p95", "count"} over the last 60 s.
+
+    Both percentiles are None when no samples sit in the window. p95 uses
+    the nearest-rank method (same as db_write); well-defined for small N.
+    """
+    now = time.monotonic()
+    cutoff = now - _COMMIT_LATENCY_WINDOW_SECONDS
+    with _COMMIT_LATENCY_LOCK:
+        while _COMMIT_LATENCY_SAMPLES and _COMMIT_LATENCY_SAMPLES[0][0] < cutoff:
+            _COMMIT_LATENCY_SAMPLES.popleft()
+        samples = [ms for _ts, ms in _COMMIT_LATENCY_SAMPLES]
+    if not samples:
+        return {"p50": None, "p95": None, "count": 0}
+    samples.sort()
+    n = len(samples)
+    p50 = samples[n // 2]
+    p95_idx = max(0, min(n - 1, -(-95 * n // 100) - 1))
+    p95 = samples[p95_idx]
+    return {"p50": p50, "p95": p95, "count": n}
+
+
+def reset_commit_latency_stats() -> None:
+    """Clear the commit-latency ring buffer. Test helper only."""
+    with _COMMIT_LATENCY_LOCK:
+        _COMMIT_LATENCY_SAMPLES.clear()
 
 
 # ──────────── metrics tracking ────────────
@@ -42,6 +97,23 @@ class Metrics:
         # to advance) from infra failures (transient, must replay). See
         # `_process_thread` exception handlers + evaluate_batch_commit.
         self.dlq_poison_pill_total = 0
+        # Writer-lane counters — keyed by lane name (critical / normal /
+        # bulk). All four are bumped in audit_forwarder.py from the writer
+        # threads and _route_to_queue:
+        #   writer_batch_requeue_total — failed batches re-enqueued for retry
+        #   writer_batch_dlq_total      — exhausted (3) retries → DLQ
+        #   writer_queue_dropped_total  — non-critical lane full → dropped
+        #   writer_signal_persisted_total — successful signal writes (Fix F)
+        # Empty dict means "no events of that lane have flowed yet", which
+        # is correct for a freshly-started forwarder.
+        self.writer_batch_requeue_total: dict[str, int] = {}
+        self.writer_batch_dlq_total: dict[str, int] = {}
+        self.writer_queue_dropped_total: dict[str, int] = {}
+        self.writer_signal_persisted_total: dict[str, int] = {}
+        # Backpressure: consumer paused because a signal/bulk writer queue
+        # crossed the 80% pressure threshold. Separate from
+        # noise_persist_wait_timeouts_total which is the bulk-only barrier.
+        self.consumer_paused_writer_pressure_total = 0
         # ── DB-writer freshness state for /health ─────────────────────
         # ISO-8601 UTC timestamp of the most-recent event time observed
         # in any successfully-written batch (signal or noise lane).
@@ -234,6 +306,45 @@ class Metrics:
         per-event ERROR log)."""
         with self.lock:
             self.dlq_poison_pill_total += int(count)
+
+    def record_writer_batch_requeue(self, lane: str, count: int = 1):
+        """Writer thread re-enqueued a failed batch item for retry."""
+        with self.lock:
+            self.writer_batch_requeue_total[lane] = (
+                self.writer_batch_requeue_total.get(lane, 0) + int(count)
+            )
+
+    def record_writer_batch_dlq(self, lane: str, count: int = 1):
+        """Writer thread sent a batch item to DLQ after exhausting retries."""
+        with self.lock:
+            self.writer_batch_dlq_total[lane] = (
+                self.writer_batch_dlq_total.get(lane, 0) + int(count)
+            )
+
+    def record_writer_queue_dropped(self, lane: str, count: int = 1):
+        """An event was dropped because the writer queue was full at
+        backpressure timeout. CRITICAL lane never drops (it blocks
+        commit instead). normal / bulk are the only legitimate
+        callers."""
+        with self.lock:
+            self.writer_queue_dropped_total[lane] = (
+                self.writer_queue_dropped_total.get(lane, 0) + int(count)
+            )
+
+    def record_writer_signal_persisted(self, lane: str, count: int = 1):
+        """Successful signal-lane write (used when SIGNAL_COMMIT_REQUIRES_PG=true
+        gates offset commit on signal persistence)."""
+        with self.lock:
+            self.writer_signal_persisted_total[lane] = (
+                self.writer_signal_persisted_total.get(lane, 0) + int(count)
+            )
+
+    def record_consumer_paused_writer_pressure(self):
+        """Backpressure trigger — consumer paused because a writer queue
+        crossed 80% capacity. Distinct from record_queue backpressure
+        (which the consumer handles internally)."""
+        with self.lock:
+            self.consumer_paused_writer_pressure_total += 1
 
     def record_db_write_success(
         self,
@@ -428,6 +539,13 @@ class Metrics:
                 "noise_short_circuited_total": int(self.noise_short_circuited_total),
                 "noise_persist_wait_timeouts_total": int(self.noise_persist_wait_timeouts_total),
                 "dlq_poison_pill_total": int(self.dlq_poison_pill_total),
+                "writer_batch_requeue_total": dict(self.writer_batch_requeue_total),
+                "writer_batch_dlq_total": dict(self.writer_batch_dlq_total),
+                "writer_queue_dropped_total": dict(self.writer_queue_dropped_total),
+                "writer_signal_persisted_total": dict(self.writer_signal_persisted_total),
+                "consumer_paused_writer_pressure_total": int(
+                    self.consumer_paused_writer_pressure_total,
+                ),
                 "dry_run_suppressed_total": int(self.dry_run_suppressed_total),
                 "last_ingested_event_time": self.last_ingested_event_time,
                 "last_committed_at": self.last_committed_at,

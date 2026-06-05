@@ -93,7 +93,7 @@ from src.product.actor_enrichment import get_actor_mapping_file, wait_for_iam_ca
 from src.notifications.notifier import AuditLensNotifier
 from src.forwarder.utils import extract_from_crn, utc_now_iso
 from src.forwarder.secrets_masking import mask_sensitive_text, mask_config_for_logging, _SENSITIVE_KEY_TOKENS
-from src.forwarder.metrics import Metrics
+from src.forwarder.metrics import Metrics, record_commit_latency_ms
 import src.forwarder.health_server as _health_server_module
 from src.forwarder.health_server import (
     start_metrics_server,
@@ -194,6 +194,83 @@ storage_monitor_thread = None
 _noise_persisted_offsets: dict[tuple[str, int], int] = {}
 _noise_persisted_lock = threading.Lock()
 _noise_persisted_cv = threading.Condition(_noise_persisted_lock)
+
+
+# ──────────── signal-lane PG durability barrier (opt-in, Fix F) ─────────
+# Mirror of _noise_persisted_offsets for the signal lanes (critical /
+# normal writer threads). Only populated when SIGNAL_COMMIT_REQUIRES_PG is
+# truthy in the environment — the default (false) preserves the legacy
+# at-most-Kafka-durable contract documented in _process_thread.
+#
+# When the flag is on:
+#  - the writer threads call _record_signal_persisted(batch) on every
+#    successful flush_db_writer_batch, advancing the per-partition
+#    high-water mark
+#  - the processor waits on _await_signal_persisted(signal_offsets)
+#    before committing the batch, the same way it already waits on
+#    _await_noise_persisted for short-circuited noise
+# When the flag is off these helpers exist but the processor never calls
+# the await — so the writer-thread updates are effectively no-ops.
+_signal_persisted_offsets: dict[tuple[str, int], int] = {}
+_signal_persisted_lock = threading.Lock()
+_signal_persisted_cv = threading.Condition(_signal_persisted_lock)
+# Read once at module import. Kept separate from a config.py setting so
+# the env flag controls behaviour without requiring a config-layer
+# rebuild — same shape as ENABLE_NOISE_SHORT_CIRCUIT.
+SIGNAL_COMMIT_REQUIRES_PG = (
+    os.getenv("SIGNAL_COMMIT_REQUIRES_PG", "false").strip().lower() == "true"
+)
+
+
+def _record_signal_persisted(items: list) -> None:
+    """Called by signal-lane writer threads on successful flush. Advances
+    the per-(topic, partition) high-water mark using the _source_topic /
+    _source_partition / _source_offset metadata the processor tagged onto
+    the enriched event before routing. Items without that metadata are
+    skipped silently (e.g. test fixtures, replay rebuilds).
+    """
+    if not items:
+        return
+    updated = False
+    with _signal_persisted_cv:
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            topic = item.get("_source_topic")
+            partition = item.get("_source_partition")
+            offset = item.get("_source_offset")
+            if topic is None or partition is None or offset is None:
+                continue
+            key = (topic, partition)
+            current = _signal_persisted_offsets.get(key, -1)
+            if offset > current:
+                _signal_persisted_offsets[key] = offset
+                updated = True
+        if updated:
+            _signal_persisted_cv.notify_all()
+
+
+def _await_signal_persisted(
+    required: dict[tuple[str, int], int],
+    *,
+    timeout: float = 30.0,
+) -> bool:
+    """Block until every (topic, partition) in ``required`` is persisted
+    to (≥) its required offset. Returns True if all caught up; False on
+    timeout. Empty ``required`` returns True immediately. Mirrors
+    _await_noise_persisted; same CV-driven wait so the processor doesn't
+    busy-spin while the writer drains."""
+    if not required:
+        return True
+    deadline = time.monotonic() + max(0.0, timeout)
+    with _signal_persisted_cv:
+        while True:
+            if all(_signal_persisted_offsets.get(k, -1) >= v for k, v in required.items()):
+                return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            _signal_persisted_cv.wait(remaining)
 
 
 # ──────────── rebalance-aware offset state ────────────
@@ -2037,6 +2114,14 @@ def main():
             "Re-enable after catch-up lag clears."
         )
 
+    if SIGNAL_COMMIT_REQUIRES_PG:
+        logger.warning(
+            "Signal-before-PG durability enabled (SIGNAL_COMMIT_REQUIRES_PG=true) — "
+            "throughput will be reduced. Offset commit blocks on signal writer "
+            "thread persisting to audit_events. Set to false to restore the "
+            "default at-least-once-into-Kafka semantics."
+        )
+
     initialize_product_store_or_exit()
     _health_server_module.product_store = product_store  # propagate to health server DI
     start_storage_monitor()
@@ -2524,10 +2609,14 @@ def main():
                     return False
                 # normal / bulk lanes still drop — informational events,
                 # acceptable loss under sustained overload. Operators see
-                # this via metrics.db_write_error_total and the WARNING log.
-                metrics.record_db_write_error(f"{target_name}_queue full", 1)
+                # this via the dedicated writer_queue_dropped_total
+                # counter (separate from generic db_write_error_total),
+                # the WARNING log, and the /health "replay_recommended"
+                # flag that flips True whenever drops > 0.
+                metrics.record_writer_queue_dropped(target_name)
                 logger.warning(
-                    "priority queue %s full — dropping event method=%s",
+                    "priority queue %s full — dropping event method=%s "
+                    "(replay_recommended will flip True on /health)",
                     target_name, method,
                 )
                 return True
@@ -2540,6 +2629,81 @@ def main():
         metrics.bulk_queue_depth = bulk_queue.qsize()
         metrics.catalog_queue_depth = catalog_queue.qsize()
 
+    _WRITER_MAX_RETRIES = 3
+
+    def _requeue_or_dlq(failed_batch: list, q: queue.Queue, lane: str) -> None:
+        """Disposition each item of a failed batch: either re-enqueue for
+        the writer to retry, or — after _WRITER_MAX_RETRIES attempts —
+        route to DLQ so the partition can keep flowing.
+
+        Failure modes:
+          - Per-item retry counter is bumped on every requeue attempt.
+            We use a private ``_retry_count`` field on the dict; it's
+            ignored by write_batch / minimal_normalize (both pick
+            specific keys, never inspect underscore-prefixed extras).
+          - If the queue is FULL at requeue time (write thread can't
+            put the item back), we DLQ immediately — keeping the item
+            in memory while drainage is failing risks OOM.
+          - Each requeue / DLQ touches a dedicated metric so SREs can
+            tell "transient retries" from "events that gave up".
+
+        DLQ source metadata comes from _source_topic / _source_partition /
+        _source_offset (signal events, tagged in _process_thread) or the
+        legacy _topic / _partition / _offset (short-circuited noise).
+        Either set may be missing on synthetic items — we fall through
+        to placeholder values so send_to_dlq never raises.
+        """
+        for item in failed_batch:
+            if not isinstance(item, dict):
+                continue
+            retry_count = int(item.get("_retry_count", 0)) + 1
+            if retry_count > _WRITER_MAX_RETRIES:
+                source_topic = (
+                    item.get("_source_topic") or item.get("_topic") or "unknown"
+                )
+                source_partition = (
+                    item.get("_source_partition")
+                    if item.get("_source_partition") is not None
+                    else item.get("_partition", -1)
+                )
+                source_offset = (
+                    item.get("_source_offset")
+                    if item.get("_source_offset") is not None
+                    else item.get("_offset", -1)
+                )
+                logger.critical(
+                    "Batch item failed %d write attempts — sending to DLQ "
+                    "lane=%s topic=%s partition=%s offset=%s",
+                    _WRITER_MAX_RETRIES, lane, source_topic,
+                    source_partition, source_offset,
+                )
+                try:
+                    send_to_dlq(
+                        producer,
+                        orjson.dumps(item),
+                        f"writer_retry_exhausted: lane={lane}",
+                        source_topic,
+                        int(source_partition) if source_partition not in (None, "") else -1,
+                        int(source_offset) if source_offset not in (None, "") else -1,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "DLQ send failed for exhausted writer batch: %s", exc,
+                    )
+                metrics.record_writer_batch_dlq(lane)
+                continue
+            # Tag and re-enqueue
+            item["_retry_count"] = retry_count
+            try:
+                q.put_nowait(item)
+                metrics.record_writer_batch_requeue(lane)
+            except queue.Full:
+                logger.critical(
+                    "Cannot requeue failed item (lane=%s, queue full) — dropping",
+                    lane,
+                )
+                metrics.record_writer_queue_dropped(lane)
+
     def _writer_loop(q: queue.Queue, batch_size: int, max_wait: float, lane: str, depth_attr: str) -> None:
         """Generic writer: drain ``q`` into Postgres in batches.
 
@@ -2547,6 +2711,13 @@ def main():
         writer wakes early to prioritise latency; bulk writer waits longer to
         prioritise throughput. Catalog upsert is deferred to the catalog
         writer so this hot path is dominated by audit_events INSERT only.
+
+        Failure handling: on a False return from the underlying write,
+        the batch is re-enqueued (item-by-item, with a per-item retry
+        budget of _WRITER_MAX_RETRIES). After exhaustion, items are
+        routed to DLQ so the consumer can keep flowing. This eliminates
+        the silent-drop path that existed before, where a transient PG
+        hiccup would just lose the batch without operator visibility.
         """
         log_state: dict = {}
         backoff = RuntimeBackoff(maximum=DB_WRITE_BACKOFF_MAX_SECONDS)
@@ -2569,20 +2740,46 @@ def main():
                 if lane == "bulk":
                     # Noise lane → audit_events_noise: minimal columns, no
                     # fingerprint, no catalog upsert. ~50x cheaper per row.
-                    if flush_db_writer_noise_batch(batch, backoff, log_state, label=lane):
+                    success = flush_db_writer_noise_batch(
+                        batch, backoff, log_state, label=lane,
+                    )
+                    if success:
                         # Ack short-circuited noise offsets so the processor
                         # thread can include them in the next commit. Items
                         # without _short_circuit (those routed here from the
                         # processor's own _route_to_queue path) are skipped
                         # silently — their offsets ride on batch_max_offsets.
                         _record_noise_persisted(batch)
+                    else:
+                        logger.error(
+                            "DB write failed for batch of %d events (lane=%s) "
+                            "— requeueing for retry",
+                            len(batch), lane,
+                        )
+                        _requeue_or_dlq(batch, q, lane)
                 else:
-                    flush_db_writer_batch(
+                    success = flush_db_writer_batch(
                         batch, backoff, log_state,
                         defer_catalog=True,
                         catalog_target=catalog_queue,
                         label=lane,
                     )
+                    if success:
+                        # Fix F gate: when SIGNAL_COMMIT_REQUIRES_PG is on,
+                        # publish the persisted offsets so the processor's
+                        # end-of-batch _await_signal_persisted unblocks.
+                        # When the flag is off this is effectively a
+                        # no-op (the processor never awaits).
+                        if SIGNAL_COMMIT_REQUIRES_PG:
+                            _record_signal_persisted(batch)
+                            metrics.record_writer_signal_persisted(lane, len(batch))
+                    else:
+                        logger.error(
+                            "DB write failed for batch of %d events (lane=%s) "
+                            "— requeueing for retry",
+                            len(batch), lane,
+                        )
+                        _requeue_or_dlq(batch, q, lane)
                 setattr(metrics, depth_attr, q.qsize())
             if _shutdown_requested and q.empty() and not batch:
                 return
@@ -2672,10 +2869,81 @@ def main():
             metrics.record_noise_short_circuited(short_circuited)
         return non_noise, noise_offsets
 
+    def _writer_queues_under_pressure() -> bool:
+        """True if any signal/bulk writer queue is at >= 80% capacity.
+
+        Catalog queue is excluded — it absorbs derived state and can be
+        filled by downstream upserts after the audit_events INSERT
+        already succeeded; backing off on it would deadlock the writers.
+
+        Returns False when priority queues aren't enabled (DB writer off);
+        no writers to back-pressure against in that mode.
+        """
+        if not PRIORITY_QUEUES_ENABLED:
+            return False
+        for queue_obj in (critical_queue, normal_queue, bulk_queue):
+            if queue_obj is None or queue_obj.maxsize <= 0:
+                continue
+            if queue_obj.qsize() >= int(queue_obj.maxsize * 0.8):
+                return True
+        return False
+
     def _consume_thread() -> None:
         """Thread A: poll Kafka, short-circuit bulk noise, queue the rest."""
         paused = False
+        # writer_pressure_paused is a SUB-cause of paused: when set, the
+        # pause was triggered by writer-queue pressure (Fix B) — independent
+        # of the legacy record_queue.Full pause path. We resume only when
+        # neither cause is active.
+        writer_pressure_paused = False
         while not _shutdown_requested:
+            # ─── Fix B: writer-queue backpressure ───
+            # Before each consume(), check whether the signal / bulk writer
+            # queues are saturated. If yes, pause the assignment (driving
+            # heartbeats via poll(0) while paused) so we stop pulling more
+            # events that would be dropped at _route_to_queue. Resume once
+            # the queues drain below 80% AND record_queue is also OK.
+            under_pressure = _writer_queues_under_pressure()
+            if under_pressure and not writer_pressure_paused:
+                try:
+                    consumer.pause(consumer.assignment())
+                    paused = True
+                    writer_pressure_paused = True
+                    metrics.record_consumer_paused_writer_pressure()
+                    crit_size = critical_queue.qsize() if critical_queue is not None else 0
+                    crit_max = critical_queue.maxsize if critical_queue is not None else 0
+                    norm_size = normal_queue.qsize() if normal_queue is not None else 0
+                    norm_max = normal_queue.maxsize if normal_queue is not None else 0
+                    bulk_size = bulk_queue.qsize() if bulk_queue is not None else 0
+                    bulk_max = bulk_queue.maxsize if bulk_queue is not None else 0
+                    logger.warning(
+                        "Writer queues under pressure — pausing consumer "
+                        "(critical=%d/%d normal=%d/%d bulk=%d/%d)",
+                        crit_size, crit_max, norm_size, norm_max,
+                        bulk_size, bulk_max,
+                    )
+                except Exception as exc:
+                    logger.warning("consumer.pause (writer pressure) failed: %s", exc)
+            elif not under_pressure and writer_pressure_paused:
+                # Writer pressure relieved. Only actually resume if the
+                # other pause cause (record_queue.Full) is also clear.
+                writer_pressure_paused = False
+                if record_queue.qsize() < RECORD_QUEUE_SIZE // 2:
+                    try:
+                        consumer.resume(consumer.assignment())
+                        paused = False
+                        logger.info(
+                            "Writer pressure relieved — resuming consumer",
+                        )
+                    except Exception as exc:
+                        logger.warning("consumer.resume (writer pressure) failed: %s", exc)
+
+            if writer_pressure_paused:
+                # Drive heartbeats while paused; don't fetch records.
+                consumer.poll(0)
+                _sleep_with_shutdown(0.1)
+                continue
+
             try:
                 batch_local = consumer.consume(num_messages=BATCH_SIZE, timeout=CONSUMER_POLL_TIMEOUT_SECONDS)
             except Exception as exc:
@@ -2778,6 +3046,14 @@ def main():
             # split off, librdkafka's auto-offset-store does not propagate
             # reliably to the commit thread; explicit offsets are mandatory.
             batch_max_offsets: dict[tuple[str, int], int] = {}
+            # When SIGNAL_COMMIT_REQUIRES_PG=true this dict accumulates the
+            # max-offset-per-partition for every event routed to a signal
+            # lane (critical/normal). _await_signal_persisted gates the
+            # end-of-batch commit on writer-thread acks. When the flag is
+            # false this stays empty (the cost is one dict allocation per
+            # batch, ~free) and the await call short-circuits at the
+            # empty-required check.
+            signal_in_flight: dict[tuple[str, int], int] = {}
             # Record in metrics
             batch_size = len([m for m in batch if m and not m.error()])
             metrics.record_poll(batch_size)
@@ -2830,6 +3106,18 @@ def main():
                         if _ps_health:
                             metrics.record_persistence_success(_ps_health)
                     if ENABLE_DB_WRITER:
+                        # Tag with source metadata so the writer thread
+                        # can route an exhausted-retry item to DLQ AND
+                        # (when SIGNAL_COMMIT_REQUIRES_PG=true) advance
+                        # the per-partition signal-persisted high-water
+                        # mark on successful write. Underscore-prefixed
+                        # keys are ignored by minimal_normalize /
+                        # normalize_event so they don't bleed into PG
+                        # columns; raw_payload_json stores them but
+                        # downstream consumers ignore the prefix.
+                        enriched_event["_source_topic"] = msg.topic()
+                        enriched_event["_source_partition"] = msg.partition()
+                        enriched_event["_source_offset"] = msg.offset()
                         # Route into the priority lane based on methodName
                         # (critical / normal / bulk). Writer threads drain
                         # each queue into Postgres asynchronously; we no
@@ -2843,6 +3131,18 @@ def main():
                             # event is replayed next poll; ON CONFLICT in
                             # audit_events dedups when it does land.
                             batch_had_processing_failure = True
+                        elif (
+                            SIGNAL_COMMIT_REQUIRES_PG
+                            and enriched_event.get("_queue_lane") in ("critical", "normal")
+                        ):
+                            # Track per-partition max offset of events that
+                            # were routed to a signal lane (critical/normal).
+                            # At end-of-batch the processor will
+                            # _await_signal_persisted on this map before
+                            # committing — same shape as noise_offsets.
+                            sig_key = (msg.topic(), msg.partition())
+                            if msg.offset() > signal_in_flight.get(sig_key, -1):
+                                signal_in_flight[sig_key] = msg.offset()
 
                     if pattern_detector is not None:
                         _method = str(enriched_event.get("methodName", "")).lower()
@@ -3118,10 +3418,34 @@ def main():
                         msg.topic(), msg.partition(), msg.offset(),
                     )
 
-            # End-of-batch DB write is now async — events were routed into
-            # priority lanes earlier in this batch. The producer flush below
-            # is what gates offset commit; PG durability is rebuilt from
-            # Kafka topics on replay if a writer thread crashes.
+            # ─── DELIVERY SEMANTICS — SIGNAL EVENTS ──────────────────────
+            # Offsets are committed after Kafka topic produce confirms
+            # (producer.flush) and after noise events are PG-durable
+            # (_await_noise_persisted). Signal events are NOT, by default,
+            # waited on for PG durability before commit — they are routed
+            # to writer queues which drain asynchronously.
+            #
+            # Rationale: Signal events are published to audit.raw,
+            # audit.normalized, and audit.enriched Kafka topics first.
+            # These topics are the durable source of truth. If the
+            # forwarder crashes after commit but before the writer thread
+            # INSERTs to audit_events, the Kafka topics still hold the
+            # events and `make replay` will rebuild audit_events from
+            # them.
+            #
+            # Implication: audit_events may be transiently behind the
+            # committed offset by up to (writer_queue_depth ×
+            # processing_time). The /health endpoint exposes
+            # db_behind_seconds, writer_queue_depth{lane}, and now
+            # writer_queue_dropped_total (which flips replay_recommended
+            # True the moment any drop happens) to make this gap
+            # observable.
+            #
+            # To achieve full PG-before-commit durability (stricter
+            # at-least-once into PG), set SIGNAL_COMMIT_REQUIRES_PG=true
+            # in .env. This gates commit on writer-thread confirmation
+            # (the _await_signal_persisted call below) at the cost of
+            # ~2-5x lower throughput.
             db_last_flush_ts = time.monotonic()
 
             # Flush producer to ensure ALL messages are delivered before committing offsets
@@ -3155,10 +3479,27 @@ def main():
                         len(noise_offsets),
                     )
 
-            if not should_commit or not noise_persisted_ok:
+            # Fix F: when SIGNAL_COMMIT_REQUIRES_PG is on, gate commit on
+            # signal-lane PG durability too. When off (default) this is a
+            # no-op — signal_in_flight is never populated.
+            signal_persisted_ok = True
+            if SIGNAL_COMMIT_REQUIRES_PG and signal_in_flight:
+                signal_persisted_ok = _await_signal_persisted(signal_in_flight)
+                if not signal_persisted_ok:
+                    logger.warning(
+                        "Signal persistence wait timed out — declining commit "
+                        "(SIGNAL_COMMIT_REQUIRES_PG=true): %d signal events across "
+                        "%d partitions will replay on restart",
+                        sum(1 for _ in signal_in_flight),
+                        len(signal_in_flight),
+                    )
+
+            if not should_commit or not noise_persisted_ok or not signal_persisted_ok:
                 # Some messages failed to deliver, or short-circuited noise
-                # didn't land in PG in time. Either way: do NOT commit
-                # offsets — restart will replay everything in this batch.
+                # didn't land in PG in time, or strict-signal mode is on
+                # and the signal lane didn't catch up. Either way: do NOT
+                # commit offsets — restart will replay everything in this
+                # batch.
                 if not should_commit:
                     logger.error("Batch not committed: %s", commit_details)
                 metrics.record_commit_failure()
@@ -3184,14 +3525,26 @@ def main():
                         TopicPartition(t, p, offset + 1)
                         for (t, p), offset in merged_offsets.items()
                     ]
+                    # Fix D: record sync commit latency. metrics module
+                    # owns a 60s rolling window; surfaced on /health as
+                    # commit_latency_p50_ms / commit_latency_p95_ms.
                     try:
+                        _commit_started = time.perf_counter()
                         consumer.commit(offsets=offsets_to_commit, asynchronous=False)
+                        record_commit_latency_ms(
+                            (time.perf_counter() - _commit_started) * 1000.0,
+                        )
                         metrics.record_commit_success()
                         logger.debug(
                             "Batch committed: %d events across %d partitions (noise offsets included)",
                             batch_size, len(offsets_to_commit),
                         )
                     except Exception as e:
+                        # Even failed commits are real wall-clock; record
+                        # so the percentile reflects worst-case observed.
+                        record_commit_latency_ms(
+                            (time.perf_counter() - _commit_started) * 1000.0,
+                        )
                         logger.error("Failed to commit offsets: %s", e)
                         metrics.record_commit_failure()
 

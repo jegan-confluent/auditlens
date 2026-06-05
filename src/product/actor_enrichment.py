@@ -76,6 +76,54 @@ def reset_iam_cache_stats() -> None:
         _HIT_MISS_SAMPLES.clear()
 
 
+# ──────────── IAM lookup latency observability (60s rolling window) ─────────
+# Records latency of IAM HTTP round-trips on cache miss (the slow path that
+# dominates first-time enrichment under cold-start). Same deque + lazy-prune
+# + nearest-rank pattern as db_writer.py / commit-latency in metrics.py.
+# Surfaced on /health as iam_lookup_p50_ms / iam_lookup_p95_ms; consumed by
+# diagnose-ingest's IAM_ENRICHMENT bottleneck rule.
+_IAM_LOOKUP_LATENCY_WINDOW_SECONDS = 60.0
+_IAM_LOOKUP_LATENCY_HARD_CAP = 10_000
+_IAM_LOOKUP_LATENCY_LOCK = threading.Lock()
+_IAM_LOOKUP_LATENCY_SAMPLES: deque = deque()
+
+
+def _record_iam_lookup_latency_ms(ms: float) -> None:
+    if ms is None or ms < 0:
+        return
+    now = time.monotonic()
+    cutoff = now - _IAM_LOOKUP_LATENCY_WINDOW_SECONDS
+    with _IAM_LOOKUP_LATENCY_LOCK:
+        _IAM_LOOKUP_LATENCY_SAMPLES.append((now, float(ms)))
+        while _IAM_LOOKUP_LATENCY_SAMPLES and _IAM_LOOKUP_LATENCY_SAMPLES[0][0] < cutoff:
+            _IAM_LOOKUP_LATENCY_SAMPLES.popleft()
+        while len(_IAM_LOOKUP_LATENCY_SAMPLES) > _IAM_LOOKUP_LATENCY_HARD_CAP:
+            _IAM_LOOKUP_LATENCY_SAMPLES.popleft()
+
+
+def get_iam_lookup_percentiles() -> dict[str, float | int | None]:
+    """Return {"p50", "p95", "count"} over the last 60 s of IAM lookups."""
+    now = time.monotonic()
+    cutoff = now - _IAM_LOOKUP_LATENCY_WINDOW_SECONDS
+    with _IAM_LOOKUP_LATENCY_LOCK:
+        while _IAM_LOOKUP_LATENCY_SAMPLES and _IAM_LOOKUP_LATENCY_SAMPLES[0][0] < cutoff:
+            _IAM_LOOKUP_LATENCY_SAMPLES.popleft()
+        samples = [ms for _ts, ms in _IAM_LOOKUP_LATENCY_SAMPLES]
+    if not samples:
+        return {"p50": None, "p95": None, "count": 0}
+    samples.sort()
+    n = len(samples)
+    p50 = samples[n // 2]
+    p95_idx = max(0, min(n - 1, -(-95 * n // 100) - 1))
+    p95 = samples[p95_idx]
+    return {"p50": p50, "p95": p95, "count": n}
+
+
+def reset_iam_lookup_latency_stats() -> None:
+    with _IAM_LOOKUP_LATENCY_LOCK:
+        _IAM_LOOKUP_LATENCY_SAMPLES.clear()
+
+
 def _as_text(value: Any) -> str:
     return "" if value is None else str(value).strip()
 
@@ -294,11 +342,19 @@ def _lookup_confluent_principal(raw: str, config: EnrichmentConfig) -> dict[str,
     enricher = _confluent_identity_enricher()
     if enricher is None:
         return None
+    # Wrap the live IAM HTTP round-trip (no-op when the cache inside the
+    # enricher already has this principal). Records to a 60s rolling
+    # window so /health can surface p50/p95 lookup latency. On exception
+    # we still record an "elapsed" sample — the bad-path latency is part
+    # of the real distribution operators need to see.
+    _lookup_started = time.perf_counter()
     try:
         info = enricher.resolve(raw)
     except Exception as exc:
+        _record_iam_lookup_latency_ms((time.perf_counter() - _lookup_started) * 1000.0)
         logger.debug("Confluent IAM lookup for %r raised: %s", raw, exc)
         return None
+    _record_iam_lookup_latency_ms((time.perf_counter() - _lookup_started) * 1000.0)
     display_name = _as_text(getattr(info, "display_name", ""))
     email = _as_text(getattr(info, "email", ""))
     identity_id = _as_text(getattr(info, "id", raw)) or raw

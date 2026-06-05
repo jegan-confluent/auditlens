@@ -477,6 +477,23 @@ class AuditEventDbWriter:
         and full normalize_event(). Targets the audit_events_noise table
         which has 2 indexes only — INSERT cost is dominated by the wire
         round-trip, not the index updates.
+
+        DESIGN DECISION — no dedup on audit_events_noise:
+        audit_events_noise intentionally has no unique constraint. Noise
+        events (kafka.Fetch, kafka.Produce, mds.Authorize, etc — high-
+        volume reads / auth checks) are informational only and tolerate
+        duplicates on forwarder restart, rebalance, or replay. Skipping
+        the fingerprint + ON CONFLICT machinery keeps the fast noise path
+        cheap (~50x lower per-row cost than audit_events).
+
+        3-day default retention (NOISE_RETENTION_DAYS) bounds the storage
+        cost of duplicates. If exact noise counts matter for an operator's
+        use case, two options:
+          1. Query audit_events instead (dedupped, exact counts).
+          2. Enable the opt-in unique index from alembic migration
+             0026_audit_events_noise_optional_dedup.
+        See that migration's docstring for the trade-off (~15% write
+        overhead on the bulk lane).
         """
         normalize_started = time.perf_counter()
         rows: list[dict[str, Any]] = []

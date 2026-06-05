@@ -127,7 +127,8 @@ status: ## Show service health (compose ps + API + forwarder)
 	  | python3 -c "import json,sys; d=json.load(sys.stdin); print('API:', d.get('status'), '|', d.get('database_mode'))" \
 	  || echo "API: unreachable"
 	@curl -s --max-time 3 http://localhost:8003/health 2>/dev/null \
-	  | python3 -c "import json,sys; d=json.load(sys.stdin); print('Forwarder: {0} | Signal: {1:.1f} msg/s | Noise: {2:.1f} msg/s | Total: {3:.1f} msg/s | Lag: {4:,}'.format(d.get('status'), d.get('processing_rate', 0), d.get('noise_rate_per_second', 0), d.get('total_rate_per_second', 0), d.get('consumer_lag', 0)))" \
+	  | python3 -c "import json,sys; d=json.load(sys.stdin); print('Forwarder: {0} | Signal: {1:.1f} msg/s | Noise: {2:.1f} msg/s | Total: {3:.1f} msg/s | Lag: {4:,}'.format(d.get('status'), d.get('processing_rate', 0), d.get('noise_rate_per_second', 0), d.get('total_rate_per_second', 0), d.get('consumer_lag', 0))); \
+	          d.get('replay_recommended') and print(f'\\n⚠  Replay recommended (reason={d.get(\"replay_reason\")!r}): run \\\`make replay\\\` to recover events that may have been dropped')" \
 	  || echo "Forwarder: unreachable"
 	@echo ""
 
