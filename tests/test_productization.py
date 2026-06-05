@@ -53,6 +53,63 @@ def test_restart_after_commit_allows_offset_commit():
     assert should_commit is True
 
 
+def test_unrecoverable_event_does_not_block_commit():
+    """Poison-pill semantics: a DLQ'd parse failure inside the batch must
+    advance the offset. Without this, a malformed event would loop forever
+    against the same partition."""
+    should_commit, details = forwarder.evaluate_batch_commit(
+        flush_remaining=0,
+        delivery_errors_before=0,
+        delivery_errors_after=0,
+        processing_failed=False,
+        unrecoverable_count=3,
+    )
+    assert should_commit is True
+    assert details["unrecoverable_count"] == 3
+    assert details["processing_failed"] is False
+
+
+def test_infra_failure_takes_precedence_over_unrecoverable():
+    """If a batch has both DLQ'd parse failures AND a real produce/DB
+    failure, the infra failure wins — block commit so the replay can
+    retry the infra side. The unrecoverable events get replayed too;
+    they'll DLQ again and the count will rise, which is acceptable."""
+    should_commit, details = forwarder.evaluate_batch_commit(
+        flush_remaining=0,
+        delivery_errors_before=0,
+        delivery_errors_after=1,
+        processing_failed=True,
+        unrecoverable_count=2,
+    )
+    assert should_commit is False
+    assert details["processing_failed"] is True
+    assert details["unrecoverable_count"] == 2
+
+
+def test_unrecoverable_count_defaults_to_zero():
+    """Backwards compatibility: callers that don't know about the new
+    parameter (older tests, third-party scripts importing the helper)
+    still get an unrecoverable_count of 0 in the details dict."""
+    _, details = forwarder.evaluate_batch_commit(
+        flush_remaining=0,
+        delivery_errors_before=0,
+        delivery_errors_after=0,
+        processing_failed=False,
+    )
+    assert details["unrecoverable_count"] == 0
+
+
+def test_dlq_poison_pill_metric_increments():
+    """Metric is bumped exactly once per DLQ'd unrecoverable event so
+    operators can detect a sustained source of malformed input."""
+    from src.forwarder.metrics import Metrics
+    m = Metrics()
+    assert m.get_metrics()["dlq_poison_pill_total"] == 0
+    m.record_dlq_poison_pill()
+    m.record_dlq_poison_pill(count=3)
+    assert m.get_metrics()["dlq_poison_pill_total"] == 4
+
+
 def test_duplicate_replay_tolerance_uses_upsert(tmp_path):
     store = _store(tmp_path)
     event = {

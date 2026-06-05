@@ -36,6 +36,12 @@ class Metrics:
         # short-circuited noise offsets in time (we did NOT commit;
         # restart will replay). High value signals bulk lane backpressure.
         self.noise_persist_wait_timeouts_total = 0
+        # DLQ poison-pill counter — bumped each time we route a malformed
+        # or unprocessable event to the DLQ AND advance the offset past
+        # it. Distinguishes parse / shape failures (durable in DLQ, safe
+        # to advance) from infra failures (transient, must replay). See
+        # `_process_thread` exception handlers + evaluate_batch_commit.
+        self.dlq_poison_pill_total = 0
         # ── DB-writer freshness state for /health ─────────────────────
         # ISO-8601 UTC timestamp of the most-recent event time observed
         # in any successfully-written batch (signal or noise lane).
@@ -220,6 +226,14 @@ class Metrics:
     def record_noise_persist_wait_timeout(self):
         with self.lock:
             self.noise_persist_wait_timeouts_total += 1
+
+    def record_dlq_poison_pill(self, count: int = 1):
+        """Bumped when an unrecoverable event is DLQ'd and the offset
+        advances past it. Used by operators to detect a sustained source
+        of malformed events (would otherwise just appear as a low
+        per-event ERROR log)."""
+        with self.lock:
+            self.dlq_poison_pill_total += int(count)
 
     def record_db_write_success(
         self,
@@ -413,6 +427,7 @@ class Metrics:
                 },
                 "noise_short_circuited_total": int(self.noise_short_circuited_total),
                 "noise_persist_wait_timeouts_total": int(self.noise_persist_wait_timeouts_total),
+                "dlq_poison_pill_total": int(self.dlq_poison_pill_total),
                 "dry_run_suppressed_total": int(self.dry_run_suppressed_total),
                 "last_ingested_event_time": self.last_ingested_event_time,
                 "last_committed_at": self.last_committed_at,

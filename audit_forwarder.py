@@ -196,6 +196,29 @@ _noise_persisted_lock = threading.Lock()
 _noise_persisted_cv = threading.Condition(_noise_persisted_lock)
 
 
+# ──────────── rebalance-aware offset state ────────────
+# Bridges the consumer-thread rebalance callbacks (on_assign / on_revoke)
+# and the processor-thread event loop. Without this, on_revoke just logs
+# and returns: any in-flight events for the revoked partition end up
+# replayed by the new owner, producing duplicates in audit_events_noise
+# and the destination Kafka topics (audit_events itself dedups via
+# event_fingerprint, so signal duplicates are silently dropped).
+#
+# `_processed_offsets[(topic, partition)]` is the highest offset the
+# processor has successfully handled per partition (independent of when
+# it was committed). on_revoke reads this and best-effort sync-commits
+# before returning so the new owner starts from a more recent position.
+#
+# `_revoked_partitions` is a one-shot signal: events whose (topic,
+# partition) is in this set are skipped by the processor — they belong
+# to the new owner. on_assign clears the entry for any partitions it
+# regains so processing resumes once we own them again.
+_processed_offsets: dict[tuple[str, int], int] = {}
+_processed_offsets_lock = threading.Lock()
+_revoked_partitions: set[tuple[str, int]] = set()
+_revoked_partitions_lock = threading.Lock()
+
+
 def _record_noise_persisted(items: list) -> None:
     """Mark per-(topic, partition) max persisted offset for short-circuited
     noise events that were just successfully INSERTed into audit_events_noise.
@@ -815,6 +838,12 @@ consumer_conf = {
     "sasl.username":             AUDIT_API_KEY,
     "sasl.password":             AUDIT_API_SECRET,
     "group.id":                  GROUP_ID,
+    # Cooperative-sticky rebalancing: only the partitions that need to move
+    # are revoked, instead of every consumer in the group revoking all
+    # partitions stop-the-world. Reduces both the duration and the
+    # event-duplication window of every rebalance. Requires librdkafka
+    # ≥ 1.8.0 (confluent-kafka ≥ 1.8.0); we pin ≥ 2.13.2 in requirements.txt.
+    "partition.assignment.strategy": "cooperative-sticky",
     # Explicit offset commits after batch processing (at-least-once delivery)
     "enable.auto.commit":        False,
     "auto.offset.reset":         AUTO_OFFSET_RESET,
@@ -991,13 +1020,109 @@ def on_assign(consumer, partitions):
     # producing a rebalance loop. Per-partition lag is already published by the
     # rdkafka stats_cb path (see make_rdkafka_stats_callback) on a 10s cadence, so
     # the on_assign log line is sufficient context for operators.
+    #
+    # Clear the revoked-set entry for any partition we just (re)gained, so
+    # the processor stops skipping events for it. Safe to call even when
+    # the partition was never revoked — set.discard is a no-op miss.
+    assigned_keys = [(p.topic, p.partition) for p in partitions]
+    if assigned_keys:
+        with _revoked_partitions_lock:
+            for key in assigned_keys:
+                _revoked_partitions.discard(key)
     logger.info("Assigned %d partitions: %s", len(partitions), [p.partition for p in partitions])
 
 
 def on_revoke(consumer, partitions):
-    """Track revocations during rebalances."""
+    """Mark partitions as revoked and best-effort sync-commit any offsets
+    the processor has already successfully handled for those partitions
+    before returning to the broker.
+
+    Reduces (does not eliminate) rebalance-induced duplicates. The new
+    owner starts from the higher of (last committed by us, last committed
+    by them) — typically the value we wrote here. Events still in flight
+    in record_queue / writer queues are NOT drained — that would require
+    blocking the callback for many seconds, risking session.timeout.ms.
+    At-least-once semantics are preserved: anything we don't commit gets
+    replayed by the new owner.
+    """
     metrics.record_rebalance()
+    revoked_keys = [(p.topic, p.partition) for p in partitions]
+    if revoked_keys:
+        with _revoked_partitions_lock:
+            _revoked_partitions.update(revoked_keys)
+
+        # Best-effort: build commit set from offsets the processor has
+        # already succeeded on for these partitions. Snapshot under lock
+        # to avoid mutating-while-iterating with the processor.
+        offsets_to_commit = []
+        with _processed_offsets_lock:
+            for key in revoked_keys:
+                if key in _processed_offsets:
+                    topic, partition = key
+                    offsets_to_commit.append(
+                        TopicPartition(topic, partition, _processed_offsets[key] + 1),
+                    )
+
+        if offsets_to_commit:
+            try:
+                consumer.commit(offsets=offsets_to_commit, asynchronous=False)
+                logger.info(
+                    "on_revoke: committed %d partition offset(s) before revoke",
+                    len(offsets_to_commit),
+                )
+            except Exception as exc:
+                # Commit failure is non-fatal — next owner reprocesses
+                # from last successful commit. At-least-once preserved.
+                logger.warning(
+                    "on_revoke: best-effort commit failed (next owner will reprocess): %s",
+                    exc,
+                )
+
     logger.warning("Revoked %d partitions: %s", len(partitions), [p.partition for p in partitions])
+
+
+def _check_group_membership_once(consumer_conf_dict: dict, group_id: str) -> None:
+    """Best-effort startup probe: detect another consumer already in this
+    Kafka consumer group.
+
+    When two AuditLens deployments accidentally share GROUP_ID against the
+    same source cluster, Kafka cooperatively shares partitions — both
+    write enriched events to (possibly different) destination clusters
+    and both write to the same `audit_events_noise` table (which has no
+    fingerprint dedup). The combined behaviour produces silent
+    duplicate-noise + duplicate-Kafka-destination-topic publishes that
+    operators have historically chased through Grafana for hours.
+
+    This probe uses AdminClient.describe_consumer_groups — supported by
+    librdkafka ≥ 1.8.0. It runs before consumer.subscribe(), so at probe
+    time member_count > 0 strictly means "someone other than us".
+
+    Never blocks startup: any failure (cluster unreachable, API not
+    supported, group doesn't exist yet, timeout) downgrades to DEBUG
+    and returns silently. Operators who care can call this manually via
+    `confluent kafka consumer-group describe <GROUP_ID>`.
+    """
+    try:
+        from confluent_kafka.admin import AdminClient  # noqa: PLC0415
+
+        admin = AdminClient(consumer_conf_dict)
+        futures = admin.describe_consumer_groups([group_id])
+        future = futures.get(group_id)
+        if future is None:
+            return
+        description = future.result(timeout=10.0)
+        members = getattr(description, "members", None) or []
+        if len(members) >= 1:
+            logger.warning(
+                "Consumer group %s already has %d active member(s). "
+                "If this is a second accidental deployment against the "
+                "same source cluster, use a different GROUP_ID in .env "
+                "to avoid partition sharing and duplicate writes to "
+                "audit_events_noise + destination Kafka topics.",
+                group_id, len(members),
+            )
+    except Exception as exc:
+        logger.debug("Consumer group membership check skipped: %s", exc)
 
 
 def _handle_denial_summary_flush(alert) -> None:
@@ -1287,13 +1412,33 @@ def flush_db_writer_buffer(payloads: list[dict], backoff: RuntimeBackoff, log_st
     return True
 
 
-def evaluate_batch_commit(flush_remaining: int, delivery_errors_before: int, delivery_errors_after: int, processing_failed: bool) -> tuple[bool, dict]:
-    """Return whether offsets may be committed for a processed batch."""
+def evaluate_batch_commit(
+    flush_remaining: int,
+    delivery_errors_before: int,
+    delivery_errors_after: int,
+    processing_failed: bool,
+    unrecoverable_count: int = 0,
+) -> tuple[bool, dict]:
+    """Return whether offsets may be committed for a processed batch.
+
+    `processing_failed` is the INFRASTRUCTURE-failure flag — Kafka produce
+    error, DB write error, or any transient backend issue that requires
+    replay. It blocks commit.
+
+    `unrecoverable_count` counts events that were unprocessable at the
+    parse/shape layer (orjson.JSONDecodeError, normalize_event explosion)
+    and have ALREADY been delivered to the DLQ. Advancing past them is
+    safe — they will not magically parse on the next attempt — and
+    NECESSARY to prevent a single poison-pill event from blocking a
+    partition indefinitely. So this count does NOT block commit; it is
+    surfaced in the details dict purely for observability.
+    """
     details = {
         "flush_remaining": flush_remaining,
         "delivery_errors_before": delivery_errors_before,
         "delivery_errors_after": delivery_errors_after,
         "processing_failed": processing_failed,
+        "unrecoverable_count": unrecoverable_count,
     }
     should_commit = flush_remaining == 0 and delivery_errors_after == delivery_errors_before and not processing_failed
     return should_commit, details
@@ -2227,6 +2372,12 @@ def main():
             sr_url=None,
         )
 
+    # Best-effort warning when another forwarder is already a member of
+    # this consumer group — runs BEFORE subscribe so at probe time any
+    # detected members strictly mean "someone other than us". Skips
+    # silently on any failure (no API key, network error, group missing).
+    _check_group_membership_once(consumer_conf, GROUP_ID)
+
     # Subscribe to source topic - offsets are managed by Kafka consumer groups
     # On first join: starts from auto.offset.reset (latest)
     # On rejoins after crash: resumes from last committed offset
@@ -2284,8 +2435,13 @@ def main():
         def _queue_max(env_primary: str, env_legacy: str, default: int, floor: int) -> int:
             value = os.getenv(env_primary) or os.getenv(env_legacy) or str(default)
             return max(floor, int(value))
+        # Default 5000 (was 500): critical events (DeleteTopic, RotateApiKey,
+        # RevokeRole, etc) MUST NOT be silently dropped under sustained PG
+        # pressure. A larger queue plus the "block-commit-on-full" behavior
+        # in _route_to_queue is the safety net. Floor=100 preserves the old
+        # minimum for operators who pin the value tighter via env.
         critical_queue: queue.Queue = queue.Queue(
-            maxsize=_queue_max("WRITER_CRITICAL_QUEUE_SIZE", "PRIORITY_QUEUE_CRITICAL_MAX", 500, 100)
+            maxsize=_queue_max("WRITER_CRITICAL_QUEUE_SIZE", "PRIORITY_QUEUE_CRITICAL_MAX", 5000, 100)
         )
         normal_queue: queue.Queue = queue.Queue(
             maxsize=_queue_max("WRITER_NORMAL_QUEUE_SIZE", "PRIORITY_QUEUE_NORMAL_MAX", 5000, 500)
@@ -2299,7 +2455,7 @@ def main():
     else:
         critical_queue = normal_queue = bulk_queue = catalog_queue = None
 
-    def _route_to_queue(enriched_event: dict) -> None:
+    def _route_to_queue(enriched_event: dict) -> bool:
         """Fast routing — pick the priority lane based on methodName.
 
         Critical+High methods → critical_queue (small batches, < 0.1s wait).
@@ -2308,9 +2464,16 @@ def main():
 
         Sets ``_queue_lane`` on the event so the writer thread can pick
         the right INSERT path (audit_events vs audit_events_noise).
+
+        Returns False ONLY when the critical lane is full after the
+        backpressure timeout. The caller MUST treat False as a hard
+        failure and block offset commit so the event is replayed next
+        poll. Non-critical (normal / bulk) full-after-timeout still
+        drops silently and returns True — informational lanes accept
+        lossy degradation under sustained overload.
         """
         if not PRIORITY_QUEUES_ENABLED:
-            return
+            return True
         method = enriched_event.get("methodName") or enriched_event.get("method") or ""
         if enriched_event.get("validateOnly"):
             target, target_name = bulk_queue, "bulk"
@@ -2327,18 +2490,40 @@ def main():
         enriched_event["_queue_lane"] = target_name
         try:
             target.put_nowait(enriched_event)
+            return True
         except queue.Full:
             # Block briefly to apply back-pressure to the processor thread.
             # If this saturates, the upstream record_queue fills and the
             # consumer thread pauses Kafka — the existing back-pressure path.
             try:
                 target.put(enriched_event, timeout=5.0)
+                return True
             except queue.Full:
+                if target_name == "critical":
+                    # Critical lane: do NOT drop. Block commit so the event
+                    # is replayed by the next poll. The Kafka destination
+                    # topics (audit.raw / audit.enriched) have already
+                    # received it via safe_produce earlier in the loop, so
+                    # replay produces duplicates that audit_events dedups
+                    # via event_fingerprint — safe.
+                    metrics.record_db_write_error(
+                        "critical_queue full after timeout — blocking commit", 1,
+                    )
+                    logger.critical(
+                        "CRITICAL queue full — blocking commit to prevent event loss "
+                        "method=%s",
+                        method,
+                    )
+                    return False
+                # normal / bulk lanes still drop — informational events,
+                # acceptable loss under sustained overload. Operators see
+                # this via metrics.db_write_error_total and the WARNING log.
                 metrics.record_db_write_error(f"{target_name}_queue full", 1)
                 logger.warning(
                     "priority queue %s full — dropping event method=%s",
                     target_name, method,
                 )
+                return True
 
     def _refresh_queue_depths() -> None:
         if not PRIORITY_QUEUES_ENABLED:
@@ -2574,7 +2759,12 @@ def main():
             else:
                 batch, noise_offsets = envelope, {}
             loop_backoff.reset()
+            # processing_failure = INFRA failure (produce / DB) — blocks commit.
+            # unrecoverable_count = parse/shape failures already in DLQ — does
+            # NOT block commit (the event will never parse on retry; advancing
+            # past it is the only way out of the partition-stuck loop).
             batch_had_processing_failure = False
+            batch_unrecoverable_count = 0
             batch_delivery_errors_before = delivery_errors["count"]
             # Track high-water-mark offset per (topic, partition) so we can
             # explicitly commit once at end of batch. With the consumer thread
@@ -2601,6 +2791,19 @@ def main():
                         _sleep_with_shutdown(delay)
                         batch_had_processing_failure = True
                     continue
+
+                # Rebalance-aware skip: if a partition was revoked by the
+                # broker between consume() and now, the in-flight events
+                # belong to the new owner. Skipping here avoids producing
+                # to audit.* topics + writing to audit_events_noise on both
+                # the old and new owner. audit_events is dedupped via
+                # event_fingerprint, so signal duplicates are already
+                # silently dropped — this is purely a duplicate-reduction
+                # optimisation for the noise lane and Kafka destinations.
+                with _revoked_partitions_lock:
+                    if (msg.topic(), msg.partition()) in _revoked_partitions:
+                        continue
+
                 try:
                     evt = orjson.loads(msg.value())
                     safe_produce(producer, AUDIT_RAW_TOPIC, None, orjson.dumps(build_raw_event(evt, msg)))
@@ -2627,7 +2830,12 @@ def main():
                         # remain durable in the audit Kafka topics, so a
                         # crash between offset-commit and async-write is
                         # recoverable via replay.
-                        _route_to_queue(enriched_event)
+                        if not _route_to_queue(enriched_event):
+                            # Only the critical lane returns False (queue
+                            # full after timeout). Block commit so the
+                            # event is replayed next poll; ON CONFLICT in
+                            # audit_events dedups when it does land.
+                            batch_had_processing_failure = True
 
                     if pattern_detector is not None:
                         _method = str(enriched_event.get("methodName", "")).lower()
@@ -2830,9 +3038,18 @@ def main():
                     key = (msg.topic(), msg.partition())
                     if msg.offset() > batch_max_offsets.get(key, -1):
                         batch_max_offsets[key] = msg.offset()
+                    # Also publish to the module-level mirror used by
+                    # on_revoke. Visible to the consumer thread for the
+                    # best-effort sync-commit before partition handover.
+                    with _processed_offsets_lock:
+                        if msg.offset() > _processed_offsets.get(key, -1):
+                            _processed_offsets[key] = msg.offset()
                 except orjson.JSONDecodeError as ex:
-                    batch_had_processing_failure = True
+                    # CLASS A: unrecoverable — the event will never parse, no
+                    # amount of retry helps. Already DLQ'd. Advance past it.
+                    batch_unrecoverable_count += 1
                     metrics.record_parse_error()
+                    metrics.record_dlq_poison_pill()
                     logger.exception("Parse failure: %s", ex)
                     send_to_dlq(
                         producer,
@@ -2842,13 +3059,38 @@ def main():
                         msg.partition(),
                         msg.offset()
                     )
+                    # CRITICAL: ensure batch_max_offsets includes this offset
+                    # so the per-partition commit at end-of-batch advances
+                    # past it. Without this, a poison pill at the END of the
+                    # batch leaves its partition without a committed offset
+                    # for the batch → restart re-reads the same poison pill.
+                    key = (msg.topic(), msg.partition())
+                    if msg.offset() > batch_max_offsets.get(key, -1):
+                        batch_max_offsets[key] = msg.offset()
+                    with _processed_offsets_lock:
+                        if msg.offset() > _processed_offsets.get(key, -1):
+                            _processed_offsets[key] = msg.offset()
+                    logger.error(
+                        "Advancing offset past unrecoverable event "
+                        "topic=%s partition=%d offset=%d — event sent to DLQ",
+                        msg.topic(), msg.partition(), msg.offset(),
+                    )
                 except Exception as ex:
-                    batch_had_processing_failure = True
+                    # CLASS A continued: any other exception during the per-
+                    # event hot path (flatten_audit / normalize_event / etc).
+                    # These shape failures are not transient — replay would
+                    # hit the same exception on the same payload. DLQ + advance.
+                    # NOTE: Kafka produce + DB write failures take a different
+                    # path (safe_produce → delivery_errors counter; writer
+                    # thread retries) and DO block commit via the
+                    # delivery_errors check in evaluate_batch_commit. So this
+                    # branch is genuinely "event shape problem, not infra".
+                    batch_unrecoverable_count += 1
                     metrics.record_error()
+                    metrics.record_dlq_poison_pill()
                     if product_store:
                         metrics.record_persistence_failure(str(ex))
                     logger.exception("Process failure: %s", ex)
-                    # Send failed event to DLQ for later reprocessing
                     send_to_dlq(
                         producer,
                         msg.value(),
@@ -2856,6 +3098,17 @@ def main():
                         msg.topic(),
                         msg.partition(),
                         msg.offset()
+                    )
+                    key = (msg.topic(), msg.partition())
+                    if msg.offset() > batch_max_offsets.get(key, -1):
+                        batch_max_offsets[key] = msg.offset()
+                    with _processed_offsets_lock:
+                        if msg.offset() > _processed_offsets.get(key, -1):
+                            _processed_offsets[key] = msg.offset()
+                    logger.error(
+                        "Advancing offset past unrecoverable event "
+                        "topic=%s partition=%d offset=%d — event sent to DLQ",
+                        msg.topic(), msg.partition(), msg.offset(),
                     )
 
             # End-of-batch DB write is now async — events were routed into
@@ -2874,6 +3127,7 @@ def main():
                 batch_delivery_errors_before,
                 delivery_errors["count"],
                 batch_had_processing_failure,
+                unrecoverable_count=batch_unrecoverable_count,
             )
 
             # Merge offsets from noise events the consumer short-circuited.
@@ -3134,12 +3388,16 @@ def main():
             logger.warning("event-processor thread did not exit within 120s")
         # Drain priority writer threads. Each writer flushes any partial
         # batch it has buffered before exiting (loop checks _shutdown_requested
-        # after every batch). Critical drains first because its queue is
-        # smallest and we want destructive events landed before exit.
+        # after every batch). Parallel join under a shared 100s budget:
+        # without this, sequential joins of N writers can take N×120s and
+        # blow through Docker's stop_grace_period. Each writer normally
+        # exits in seconds; the deadline is the upper-bound guard.
+        writer_join_deadline = time.monotonic() + 100.0
         for t in writer_threads:
-            t.join(timeout=120)
+            remaining = max(1.0, writer_join_deadline - time.monotonic())
+            t.join(timeout=remaining)
             if t.is_alive():
-                logger.warning("%s did not exit within 120s", t.name)
+                logger.warning("%s did not exit within shutdown deadline", t.name)
 
         # Shutdown denial aggregator FIRST (flushes pending alerts before producer)
         if denial_aggregator:

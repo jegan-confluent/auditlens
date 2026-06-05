@@ -8,6 +8,12 @@ services:
     image: auditlens-forwarder:v1.0.0
     container_name: auditlens-forwarder
     restart: always
+    # Docker default stop_grace_period is 10s — far too short for the
+    # forwarder's graceful shutdown (consumer drain → processor drain →
+    # writer drain → producer flush → final commit). 120s comfortably
+    # covers the 30+120+~100 second worst-case sequence; on a clean stop
+    # the actual elapsed time is typically < 30s.
+    stop_grace_period: 120s
     env_file:
       - path: .env
         required: false
