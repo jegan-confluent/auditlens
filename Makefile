@@ -1,7 +1,7 @@
 # Makefile for Audit Forwarder
 # Production-ready build, test, and deployment tasks
 
-.PHONY: help build build-alpine build-distroless test scan clean deploy deploy-check migrate setup start stop restart status monitoring logs health ps sync backup backup-list backup-list-remote backup-restore update update-check repair diagnose diagnose-ai diagnose-ingest register-schemas check-schemas sync-schemas
+.PHONY: help build build-alpine build-distroless test scan clean deploy deploy-check migrate setup start stop restart status monitoring logs health ps sync backup backup-list backup-list-remote backup-restore update update-check repair diagnose diagnose-ai diagnose-ingest register-schemas check-schemas sync-schemas up down teardown
 
 ##############################################################################
 # Quickstart Lifecycle (Phase 3 — single-command install + service control)
@@ -25,6 +25,61 @@ stop: ## Stop all services
 restart: ## Restart all services
 	docker compose down
 	docker compose up -d
+
+up: ## Bring up the production stack (build + start)
+	@docker compose -f docker-compose.prod.yml up -d --build
+	@echo ""
+	@echo "✅  AuditLens is up."
+	@echo "    UI:     http://localhost:3000"
+	@echo "    API:    http://localhost:8080"
+	@echo "    Health: http://localhost:8003/health"
+	@echo ""
+
+down: ## Stop and remove production containers (data kept)
+	@docker compose -f docker-compose.prod.yml down
+
+teardown: ## Interactive shutdown — stop, remove, or fully wipe (containers + data)
+	@set -e; \
+	COMPOSE_FILE=""; \
+	if docker compose -f docker-compose.prod.yml ps --quiet 2>/dev/null | grep -q .; then \
+	  COMPOSE_FILE=docker-compose.prod.yml; \
+	elif [ -f docker-compose.yml ] && docker compose -f docker-compose.yml ps --quiet 2>/dev/null | grep -q .; then \
+	  COMPOSE_FILE=docker-compose.yml; \
+	fi; \
+	if [ -z "$$COMPOSE_FILE" ]; then \
+	  echo "No AuditLens containers found."; \
+	  exit 0; \
+	fi; \
+	echo ""; \
+	echo "AuditLens containers currently running:"; \
+	echo "─────────────────────────────────────────"; \
+	docker compose -f $$COMPOSE_FILE ps --format "table {{.Name}}\t{{.Status}}" 2>/dev/null | tail -n +2; \
+	echo "─────────────────────────────────────────"; \
+	echo ""; \
+	echo "What would you like to do?"; \
+	echo "  [1] Stop containers      (pause — data kept, can restart)"; \
+	echo "  [2] Remove containers    (clean shutdown — data kept)"; \
+	echo "  [3] Remove everything    (containers + all data) ⚠ irreversible"; \
+	echo "  [4] Cancel"; \
+	echo ""; \
+	printf "Choice [1-4]: "; \
+	read choice; \
+	case "$$choice" in \
+	  1) docker compose -f $$COMPOSE_FILE stop ;; \
+	  2) docker compose -f $$COMPOSE_FILE down ;; \
+	  3) printf "Type YES to confirm data deletion: "; \
+	     read confirm; \
+	     if [ "$$confirm" = "YES" ]; then \
+	       docker compose -f $$COMPOSE_FILE down -v; \
+	     else \
+	       echo "Cancelled."; \
+	       exit 0; \
+	     fi ;; \
+	  4) echo "Cancelled."; exit 0 ;; \
+	  *) echo "Cancelled."; exit 0 ;; \
+	esac; \
+	echo ""; \
+	echo "Done. To restart: make up"
 
 status: ## Show service health (compose ps + API + forwarder)
 	@echo ""

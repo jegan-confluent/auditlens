@@ -120,6 +120,57 @@ Signal classification assigns every event a `signal_type` (`noise` → `informat
 
 ---
 
+## Managing your deployment
+
+### Check status
+```bash
+make status
+```
+Shows running containers, consumer lag, and pipeline health.
+
+### Restart after a reboot
+```bash
+make up
+```
+Containers are configured to restart automatically on reboot. If they don't, run `make up` to bring everything back.
+
+### Update to the latest version
+```bash
+git pull
+make deploy
+```
+Pulls the latest code, rebuilds containers, applies any database migrations, and restarts services. Your data is preserved.
+
+### Stop and remove (guided)
+```bash
+make teardown
+```
+Interactive prompt — shows what's running, then asks whether you want to stop, remove, or fully wipe. Safe to run any time.
+
+### Manual options (if you prefer)
+
+| Goal | Command |
+|---|---|
+| Pause containers (keep data, restart later) | `docker compose stop` |
+| Remove containers (keep data) | `docker compose down` |
+| Remove containers + all data ⚠ | `docker compose down -v` |
+| Restart paused containers | `docker compose start` |
+| Restart and rebuild | `make up` |
+
+### What happens to my data?
+- `make teardown` option 1 and 2 — data is safe in the Postgres volume
+- `make teardown` option 3 — deletes the Postgres volume permanently. All ingested events are gone. There is no undo.
+- `git pull && make deploy` — always safe, data is never touched
+
+### Uninstall completely
+```bash
+make teardown  # choose option 3 to wipe data
+cd ..
+rm -rf AuditLens
+```
+
+---
+
 ## Quick Start
 
 **Host prerequisites:**
