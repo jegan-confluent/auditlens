@@ -1103,12 +1103,21 @@ def diagnose_ingest(url: str = FORWARDER_HEALTH_URL_DEFAULT) -> int:
 
     # Extract counters from both samples. Default to 0 so a missing field
     # (older forwarder build) computes as 0 instead of raising.
+    # processed_total counts signal events that the processor thread
+    # routed into audit_events; noise_short_circuited_total counts bulk
+    # noise events the consumer thread routed straight to audit_events_noise
+    # without ever entering the processor. Both lanes consume Kafka
+    # offsets; total = signal + noise is the real ingest rate.
     processed_a = int(first.get("processed_total") or 0)
     processed_b = int(second.get("processed_total") or 0)
+    noise_a = int(first.get("noise_short_circuited_total") or 0)
+    noise_b = int(second.get("noise_short_circuited_total") or 0)
     lag_a = int(first.get("consumer_lag") or 0)
     lag_b = int(second.get("consumer_lag") or 0)
 
-    rate = max(0.0, (processed_b - processed_a) / float(INGEST_SAMPLE_SECONDS))
+    signal_rate = max(0.0, (processed_b - processed_a) / float(INGEST_SAMPLE_SECONDS))
+    noise_rate = max(0.0, (noise_b - noise_a) / float(INGEST_SAMPLE_SECONDS))
+    total_rate = signal_rate + noise_rate
     lag_delta = lag_b - lag_a
 
     queues_b = second.get("queues") or {}
@@ -1149,7 +1158,13 @@ def diagnose_ingest(url: str = FORWARDER_HEALTH_URL_DEFAULT) -> int:
     iam_enabled = iam_env != "false"
 
     # ── Per-row severity classification ─────────────────────────────────
-    rate_level = "ok" if rate >= 200 else ("warn" if rate >= 50 else "bad")
+    # Thresholds operate on TOTAL rate — signal alone underestimates real
+    # ingest by ~5x (noise lane carries the bulk of audit volume). Signal
+    # gets a looser threshold so a normal "low signal / high noise" steady
+    # state doesn't flag as bad.
+    total_level = "ok" if total_rate >= 200 else ("warn" if total_rate >= 50 else "bad")
+    signal_level = "ok" if signal_rate >= 5 else ("warn" if signal_rate >= 1 else "bad")
+    noise_level = "ok"  # Always green — noise is informational, never a fault signal.
     if lag_delta <= 0:
         lag_level = "ok"
     elif lag_delta < 1000:
@@ -1167,8 +1182,10 @@ def diagnose_ingest(url: str = FORWARDER_HEALTH_URL_DEFAULT) -> int:
     if iam_hit_rate is not None:
         iam_level = "ok" if iam_hit_rate >= 80 else ("warn" if iam_hit_rate >= 50 else "bad")
 
+    # Bottleneck classifier consumes TOTAL rate — signal alone misleadingly
+    # flags a healthy "low signal / high noise" stack as IAM-bound.
     label, action = _classify_bottleneck(
-        rate=rate,
+        rate=total_rate,
         lag_delta=lag_delta,
         iam_hit_rate=iam_hit_rate,
         db_write_p95_ms=db_p95,
@@ -1188,7 +1205,9 @@ def diagnose_ingest(url: str = FORWARDER_HEALTH_URL_DEFAULT) -> int:
     print()
     print(cyan("Forwarder ingest health (60s sample)"))
     print(cyan("─" * 60))
-    _row("Rate (60s sliding):", f"{rate:.1f} msg/s", rate_level)
+    _row("Signal rate (60s):", f"{signal_rate:.1f} msg/s", signal_level)
+    _row("Noise rate (60s):", f"{noise_rate:.1f} msg/s", noise_level)
+    _row("Total rate (60s):", f"{total_rate:.1f} msg/s", total_level)
     _row("Lag trend (Δ60s):", f"{_fmt_signed(lag_delta)} msgs", lag_level)
     _row("DB write p95:", "—" if db_p95 is None else f"{db_p95:.0f} ms", db_level)
     _row("bulk_queue depth:", f"{bulk_q} / {bulk_q_cap}", bulk_level)
@@ -1215,7 +1234,8 @@ def diagnose_ingest(url: str = FORWARDER_HEALTH_URL_DEFAULT) -> int:
     # Surface the inputs the classifier used so an operator who disagrees
     # can audit the decision. Dim so they don't compete with the main row.
     print(dim(
-        f"   inputs: rate={rate:.1f} lag_delta={lag_delta} "
+        f"   inputs: total_rate={total_rate:.1f} signal_rate={signal_rate:.1f} "
+        f"noise_rate={noise_rate:.1f} lag_delta={lag_delta} "
         f"ceiling={'n/a' if ceiling is None else f'{ceiling:.0f}'} "
         f"iam_enabled={iam_enabled} batch_size={batch_size} "
         f"sleep_s={sleep_s}"

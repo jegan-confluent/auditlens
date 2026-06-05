@@ -63,6 +63,15 @@ from src.product.bootstrap import (
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
+# Catch-up mode flag — set by Phase 1's _maybe_offer_catchup_mode when the
+# operator chose offset=earliest AND opted in to faster replay. Consumed by
+# _maybe_write_catchup_env_lines (appended to .env after write_local_config)
+# and _maybe_print_catchup_banner (shown after the Phase 7 status panel).
+# Module-level singleton because the wizard is one-shot and threading-free —
+# no race surface, no need to thread state through every call site.
+_catchup_mode_enabled = False
+
+
 # ─────────────────────────────────────────────────────────────────────────
 # ANSI styling helpers. All check sys.stdout.isatty() so output stays
 # clean when piped or running in CI (no escape codes leak into logs).
@@ -365,6 +374,160 @@ def prompt_text(
         if value or not required:
             return value
         err_line("This field is required.")
+
+
+def _maybe_offer_catchup_mode(inputs: BootstrapInputs, source_result) -> None:
+    """Show catch-up warning + opt-in prompt after Phase 1 source validation.
+
+    Triggers only when the operator chose offset=earliest. AuditLens then
+    replays all retained audit history before live events; on a busy org
+    with 7d retention that can be hours of cold-IAM-cache enrichment.
+    Catch-up mode trades enriched display names (raw IDs shown until lag
+    clears) for ~10x throughput.
+
+    Sets the module flag `_catchup_mode_enabled` on opt-in; the actual
+    .env append happens in `_maybe_write_catchup_env_lines` so it lands
+    AFTER write_local_config has emitted the canonical file.
+    """
+    global _catchup_mode_enabled
+    if inputs.auto_offset_reset != "earliest":
+        return
+
+    bar = "━" * 60
+    print()
+    print(bold(yellow(bar)))
+    print(bold(yellow("  ⚠  Catch-up mode: earliest offset selected")))
+    print(bold(yellow(bar)))
+    print()
+    print(dim("     AuditLens will replay all retained audit history before"))
+    print(dim("     processing live events."))
+    # source_result only reports a boolean (retained_messages_present),
+    # not a count, so skip the count line entirely when no exact number
+    # is available. Show a presence hint when we know history exists.
+    if getattr(source_result, "retained_messages_present", False):
+        print()
+        print(dim("     Retained events: present (exact count unavailable)"))
+    print()
+    print(dim("     Recommended: enable catch-up mode for faster replay."))
+
+    if prompt_bool(
+        "Enable catch-up mode",
+        default=True,
+        help_text=(
+            "Disables IAM enrichment and increases batch sizes during replay. "
+            "Actor names show raw IDs until you run `make catchup-done` "
+            "(typically once lag drops below 10k events)."
+        ),
+    ):
+        _catchup_mode_enabled = True
+        info_line(
+            "Catch-up mode enabled. Actor names will show raw IDs until "
+            "replay completes, then re-enrich automatically."
+        )
+        print(dim("     Run `make catchup-status` to monitor progress."))
+        print(dim("     Run `make catchup-done` when lag clears to restore normal settings."))
+
+
+def _maybe_write_catchup_env_lines() -> None:
+    """Append the catch-up tuning block to .env when the wizard enabled
+    catch-up mode in Phase 1. No-op when the flag is False.
+
+    Called from main() AFTER write_local_config has written the canonical
+    .env — otherwise the canonical render would overwrite these additions.
+    Lines are appended (not interleaved) so `make catchup-done` can sed
+    them out cleanly by exact match.
+    """
+    if not _catchup_mode_enabled:
+        return
+    env_path = REPO_ROOT / ".env"
+    if not env_path.exists():
+        warn_line(
+            ".env not on disk — skipping catch-up env append. "
+            "Re-run the wizard if the file gets restored later."
+        )
+        return
+    catchup_lines = [
+        "",
+        "# ── Catch-up mode (set by setup wizard for offset=earliest) ──",
+        "# Faster replay at the cost of un-enriched actor names.",
+        "# Remove these via `make catchup-done` once lag drops below 10k events.",
+        "CATCH_UP_MODE=true",
+        "IAM_ENRICHMENT_ENABLED=false",
+        "CONSUMER_BATCH_SLEEP_SECONDS=0",
+        "KAFKA_CONSUME_BATCH_SIZE=500",
+        "DB_WRITE_BATCH_SIZE=500",
+        "WRITER_NORMAL_BATCH=500",
+        "WRITER_BULK_BATCH=2000",
+        "",
+    ]
+    try:
+        with env_path.open("a", encoding="utf-8") as fh:
+            fh.write("\n".join(catchup_lines))
+    except OSError as exc:
+        warn_line(
+            f"Could not append catch-up tuning to .env ({exc.__class__.__name__}). "
+            "Run `make catchup-status` to verify."
+        )
+        return
+    ok_line("Catch-up tuning appended to .env.")
+
+
+def _maybe_print_catchup_banner(inputs: BootstrapInputs) -> None:
+    """Phase 7 banner — shown when CATCH_UP_MODE=true is present in .env.
+
+    Queries the live forwarder /health for consumer_lag and the lifetime
+    signal rate, computes an ETA, and prints a one-shot banner so the
+    operator knows what to expect after `make up` returns. Silent on any
+    fetch error — the forwarder may still be warming up and the wizard's
+    own validation already raised on actual startup failure.
+    """
+    from urllib.error import HTTPError, URLError
+    from urllib.request import Request, urlopen
+
+    env_path = REPO_ROOT / ".env"
+    if (_read_env_value(env_path, "CATCH_UP_MODE") or "").strip().lower() != "true":
+        return
+
+    health_url = f"http://localhost:{inputs.metrics_port}/health"
+    try:
+        with urlopen(Request(health_url), timeout=5.0) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except (HTTPError, URLError, OSError, json.JSONDecodeError):
+        # Forwarder /health unreachable — don't error out, banner is
+        # informational. The wizard's _validate_runtime_with_progress has
+        # already confirmed the forwarder reached /health at least once.
+        return
+
+    lag = int(payload.get("consumer_lag") or 0)
+    rate = float(payload.get("processing_rate") or 0.0)
+
+    # ETA math per spec — guard divide-by-zero and call out unrealistic
+    # estimates so the operator sees actionable text rather than a number
+    # they have to interpret.
+    if rate <= 0:
+        eta = "calculating..."
+    else:
+        hours = (lag / rate) / 3600.0
+        if hours > 100:
+            eta = "> 100 hours — consider IAM_ENRICHMENT_ENABLED=false"
+        elif hours < 1:
+            eta = "< 1 hour"
+        else:
+            eta = f"~{hours:.1f} hours"
+
+    bar = "━" * 60
+    print()
+    print(bold(cyan(bar)))
+    print(bold(cyan("  ℹ  Catch-up in progress")))
+    print(bold(cyan(bar)))
+    print(f"     Backlog:        {lag:,} events")
+    print(f"     Current rate:   {rate:.1f} msg/s (signal) + noise lane running")
+    print(f"     Est. clear:     {eta}")
+    print()
+    print(dim("     Monitor: make catchup-status"))
+    print(dim("     Finish:  make catchup-done  (run when lag < 10k)"))
+    print(bold(cyan(bar)))
+    print()
 
 
 def prompt_bool(label: str, default: bool = True, help_text: str | None = None) -> bool:
@@ -942,6 +1105,12 @@ def collect_interactive_inputs(
             f"Source validated — topic={source_result.topic}, partitions={source_result.partitions}, "
             f"retained_events={'yes' if source_result.retained_messages_present else 'no'}"
         )
+
+        # STEP 5 — catch-up mode opt-in when offset=earliest. No-op for
+        # latest; replay is implicit and the IAM cache warm-up cost is
+        # bounded by live event rate.
+        _maybe_offer_catchup_mode(inputs, source_result)
+
         completed.append(1)
         save_checkpoint(completed, inputs)
         ok_line("Progress saved.")
@@ -2353,6 +2522,11 @@ def main() -> int:
             for backup in backups:
                 print(dim(f"      • {backup}"))
 
+        # Append catch-up tuning if Phase 1 opted in. Runs AFTER
+        # write_local_config so the canonical render doesn't strip the
+        # additions.
+        _maybe_write_catchup_env_lines()
+
         port_forward_processes: list[subprocess.Popen[str]] = []
         services_started = False
         try:
@@ -2382,6 +2556,10 @@ def main() -> int:
         # Health checks passed — show the service status + quick-link panel
         # before the legacy "ready to launch" summary.
         print_service_status_panel(inputs)
+
+        # Catch-up ETA banner when CATCH_UP_MODE=true is set in .env.
+        # Silent otherwise.
+        _maybe_print_catchup_banner(inputs)
 
         # Compose up + runtime validation made it here — clear the checkpoint
         # so the next invocation starts fresh rather than offering to resume

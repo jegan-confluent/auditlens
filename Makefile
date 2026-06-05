@@ -1,7 +1,7 @@
 # Makefile for Audit Forwarder
 # Production-ready build, test, and deployment tasks
 
-.PHONY: help build build-alpine build-distroless test scan clean deploy deploy-check migrate setup start stop restart status monitoring logs health ps sync backup backup-list backup-list-remote backup-restore update update-check repair diagnose diagnose-ai diagnose-ingest register-schemas check-schemas sync-schemas up down teardown
+.PHONY: help build build-alpine build-distroless test scan clean deploy deploy-check migrate setup start stop restart status monitoring logs health ps sync backup backup-list backup-list-remote backup-restore update update-check repair diagnose diagnose-ai diagnose-ingest register-schemas check-schemas sync-schemas up down teardown catchup-status catchup-done
 
 ##############################################################################
 # Quickstart Lifecycle (Phase 3 — single-command install + service control)
@@ -37,6 +37,44 @@ up: ## Bring up the production stack (build + start)
 
 down: ## Stop and remove production containers (data kept)
 	@docker compose -f docker-compose.prod.yml down
+
+##############################################################################
+# Catch-up mode commands — used during initial backlog replay (offset=earliest).
+#   make catchup-status  — show backlog, signal/noise/total rate, ETA, IAM state.
+#   make catchup-done    — remove catch-up tuning from .env, restart forwarder.
+# Catch-up mode disables IAM enrichment and bumps batch sizes for ~10x replay
+# throughput; actor names show raw IDs until enrichment is re-enabled. The
+# setup wizard adds the CATCH_UP_MODE sentinel when the operator opts in.
+##############################################################################
+
+catchup-status: ## Show catch-up progress (backlog, signal/noise/total rate, ETA)
+	@if [ -x .venv/bin/python ]; then .venv/bin/python scripts/catchup_status.py; else python3 scripts/catchup_status.py; fi
+
+catchup-done: ## Remove catch-up tuning from .env and restart forwarder
+	@echo "Restoring normal settings and re-enabling IAM enrichment..."
+	@if [ ! -f .env ]; then \
+		echo "❌  .env not found — nothing to do."; \
+		exit 0; \
+	fi
+	@# sed -i.bak <pattern>  works on both BSD (macOS) and GNU (Linux) sed.
+	@# .bak is removed immediately so the directory stays clean.
+	@sed -i.bak \
+		-e '/^CATCH_UP_MODE=true$$/d' \
+		-e '/^IAM_ENRICHMENT_ENABLED=false$$/d' \
+		-e '/^CONSUMER_BATCH_SLEEP_SECONDS=0$$/d' \
+		-e '/^KAFKA_CONSUME_BATCH_SIZE=500$$/d' \
+		-e '/^DB_WRITE_BATCH_SIZE=500$$/d' \
+		-e '/^WRITER_NORMAL_BATCH=500$$/d' \
+		-e '/^WRITER_BULK_BATCH=2000$$/d' \
+		.env && rm -f .env.bak
+	@echo "ℹ  Catch-up env lines removed from .env."
+	@if docker ps --filter "name=auditlens-forwarder" --filter "status=running" -q 2>/dev/null | grep -q .; then \
+		echo "ℹ  Restarting forwarder with --force-recreate so new env vars take effect..."; \
+		docker compose -f docker-compose.prod.yml up -d --force-recreate auditlens-forwarder; \
+		echo "✅  Normal mode restored. Actor names will re-enrich over the next 55 minutes as the IAM cache warms."; \
+	else \
+		echo "ℹ  Forwarder not running — skipped restart. Run 'make up' to start AuditLens."; \
+	fi
 
 teardown: ## Interactive shutdown — stop, remove, or fully wipe (containers + data)
 	@set -e; \
@@ -89,7 +127,7 @@ status: ## Show service health (compose ps + API + forwarder)
 	  | python3 -c "import json,sys; d=json.load(sys.stdin); print('API:', d.get('status'), '|', d.get('database_mode'))" \
 	  || echo "API: unreachable"
 	@curl -s --max-time 3 http://localhost:8003/health 2>/dev/null \
-	  | python3 -c "import json,sys; d=json.load(sys.stdin); print('Forwarder:', d.get('status'), '| rate:', round(d.get('processing_rate', 0), 1), 'msg/s | lag:', '{:,}'.format(d.get('consumer_lag', 0)))" \
+	  | python3 -c "import json,sys; d=json.load(sys.stdin); print('Forwarder: {0} | Signal: {1:.1f} msg/s | Noise: {2:.1f} msg/s | Total: {3:.1f} msg/s | Lag: {4:,}'.format(d.get('status'), d.get('processing_rate', 0), d.get('noise_rate_per_second', 0), d.get('total_rate_per_second', 0), d.get('consumer_lag', 0)))" \
 	  || echo "Forwarder: unreachable"
 	@echo ""
 

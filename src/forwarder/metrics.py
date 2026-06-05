@@ -386,10 +386,19 @@ class Metrics:
             idle_time = time.time() - self.last_process_time
             total_lag = sum(self.partition_lag.values()) if self.partition_lag else 0
 
+            # Lifetime averages over uptime. processing_rate_per_second counts
+            # only signal events (events that increment processed_total via the
+            # processor thread). noise events short-circuited by the consumer
+            # thread into the bulk lane never touch processed_total, so a
+            # separate rate is needed to show actual ingest throughput.
+            # total_rate_per_second = signal + noise.
+            noise_total = self.noise_short_circuited_total
             return {
                 "uptime_seconds": uptime,
                 "processed_messages_total": self.processed_total,
                 "processing_rate_per_second": self.processed_total / uptime if uptime > 0 else 0,
+                "noise_rate_per_second": noise_total / uptime if uptime > 0 else 0,
+                "total_rate_per_second": (self.processed_total + noise_total) / uptime if uptime > 0 else 0,
                 "error_count": self.error_count,
                 "idle_seconds": idle_time,
                 "consumer_lag_total": total_lag,

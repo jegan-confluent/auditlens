@@ -376,6 +376,14 @@ class MetricsHandler(BaseHTTPRequestHandler):
             "consumer_lag": metrics_data['consumer_lag_total'],
             "consumer_lag_by_partition": metrics_data['consumer_lag_by_partition'],
             "processing_rate": metrics_data['processing_rate_per_second'],
+            # Signal-only is `processing_rate` above (kept for backwards
+            # compatibility); noise / total are new fields. The noise rate
+            # counts events the consumer-thread short-circuited into the
+            # bulk lane (audit_events_noise table). `make status` and
+            # `make catchup-status` consume these so operators see actual
+            # total ingest, not just the signal slice.
+            "noise_rate_per_second": metrics_data.get('noise_rate_per_second', 0),
+            "total_rate_per_second": metrics_data.get('total_rate_per_second', 0),
             "record_queue_depth": metrics_data.get('record_queue_depth', 0),
             "record_queue_capacity": metrics_data.get('record_queue_capacity', 0),
             "queues": metrics_data.get("priority_queue_depths", {
