@@ -838,12 +838,19 @@ consumer_conf = {
     "sasl.username":             AUDIT_API_KEY,
     "sasl.password":             AUDIT_API_SECRET,
     "group.id":                  GROUP_ID,
-    # Cooperative-sticky rebalancing: only the partitions that need to move
-    # are revoked, instead of every consumer in the group revoking all
-    # partitions stop-the-world. Reduces both the duration and the
-    # event-duplication window of every rebalance. Requires librdkafka
-    # ≥ 1.8.0 (confluent-kafka ≥ 1.8.0); we pin ≥ 2.13.2 in requirements.txt.
-    "partition.assignment.strategy": "cooperative-sticky",
+    # Rebalance strategy: cooperative-sticky reduces rebalance duration +
+    # duplicates BUT cannot be introduced mid-flight against a group whose
+    # other members are running the legacy eager protocol — they reject
+    # the JoinGroup with INCONSISTENT_GROUP_PROTOCOL until they too restart
+    # with the new strategy. We default to the librdkafka default
+    # (range,roundrobin) for safe in-place upgrades; to migrate to
+    # cooperative-sticky, stop every consumer in the group simultaneously
+    # then start all with this setting. Override per-deployment:
+    #   KAFKA_PARTITION_ASSIGNMENT_STRATEGY=cooperative-sticky
+    "partition.assignment.strategy": os.getenv(
+        "KAFKA_PARTITION_ASSIGNMENT_STRATEGY",
+        "range,roundrobin",
+    ),
     # Explicit offset commits after batch processing (at-least-once delivery)
     "enable.auto.commit":        False,
     "auto.offset.reset":         AUTO_OFFSET_RESET,

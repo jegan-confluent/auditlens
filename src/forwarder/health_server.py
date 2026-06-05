@@ -392,6 +392,10 @@ class MetricsHandler(BaseHTTPRequestHandler):
             "noise_short_circuited_total": metrics_data.get("noise_short_circuited_total", 0),
             "noise_persist_wait_timeouts_total": metrics_data.get("noise_persist_wait_timeouts_total", 0),
             "dry_run_suppressed_total": metrics_data.get("dry_run_suppressed_total", 0),
+            # Parse/shape failures that were DLQ'd and the offset advanced
+            # past. A non-zero rate means upstream is emitting unparseable
+            # events; investigate at the source.
+            "dlq_poison_pill_total": metrics_data.get("dlq_poison_pill_total", 0),
             # Ingest-bottleneck diagnostics (consumed by `make diagnose-ingest`).
             # Both reads pull from module-level 60s rolling windows that are
             # pruned lazily on every record + read; cost is a single list-sort
