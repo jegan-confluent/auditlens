@@ -83,6 +83,15 @@ services:
       # thread when ingesting a large backlog. Reflected at start by a
       # WARNING log line and surfaced by `make diagnose-ingest`.
       - IAM_ENRICHMENT_ENABLED=${IAM_ENRICHMENT_ENABLED:-true}
+      # AWS Secrets Manager integration (Phase 3 of the secrets migration).
+      # When enabled, src/core/secrets.py overlays HIGH-sensitivity env
+      # values with ASM-stored versions. The EC2 instance IAM role
+      # supplies credentials; no AWS_ACCESS_KEY_ID is mounted into the
+      # container. Default: false so local docker compose stays usable
+      # without AWS access.
+      - AWS_SECRETS_MANAGER_ENABLED=${AWS_SECRETS_MANAGER_ENABLED:-false}
+      - AUDITLENS_ENV=${AUDITLENS_ENV:-prod}
+      - AWS_REGION=${AWS_REGION:-ap-southeast-1}
     volumes:
       - ./audit_forwarder.py:/app/audit_forwarder.py:ro
       - ./src:/app/src:ro
@@ -150,6 +159,12 @@ services:
       - IAM_ENRICHMENT_ENABLED=${IAM_ENRICHMENT_ENABLED:-false}
       - CONFLUENT_CLOUD_API_KEY=${CONFLUENT_CLOUD_API_KEY:-}
       - CONFLUENT_CLOUD_API_SECRET=${CONFLUENT_CLOUD_API_SECRET:-}
+      # AWS Secrets Manager wiring for the api container (Phase 3).
+      # Same defaults as the forwarder service above. EC2 IAM role
+      # supplies AWS credentials in-cluster.
+      - AWS_SECRETS_MANAGER_ENABLED=${AWS_SECRETS_MANAGER_ENABLED:-false}
+      - AUDITLENS_ENV=${AUDITLENS_ENV:-prod}
+      - AWS_REGION=${AWS_REGION:-ap-southeast-1}
       # backend/app/api/routes/tableflow.py reads these directly from
       # os.getenv to scope its REST calls — the wizard always emits both
       # (empty when undiscovered) so the variables are visible to the

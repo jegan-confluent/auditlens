@@ -1,7 +1,7 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -26,6 +26,29 @@ class Settings(BaseSettings):
     # Public dashboard URL used in notification digests and other outbound
     # messages. Empty default → digest omits the dashboard link section.
     dashboard_url: str = Field(default="", alias="DASHBOARD_URL")
+
+    @model_validator(mode="after")
+    def _resolve_secrets_via_asm(self) -> "Settings":
+        """When AWS_SECRETS_MANAGER_ENABLED=true, overlay HIGH-sensitivity
+        fields with ASM-sourced values. Pydantic already applied env-var
+        + .env defaults; we only override if ASM supplies a non-empty
+        replacement. Local dev with the flag off is unaffected.
+        """
+        # Import here to avoid pulling boto3 transitively at module import
+        # time — settings load on every fresh worker boot.
+        from src.core.secrets import get_secret
+
+        _overlays = {
+            "confluent_cloud_api_key": "CONFLUENT_CLOUD_API_KEY",
+            "confluent_cloud_api_secret": "CONFLUENT_CLOUD_API_SECRET",
+            "confluent_api_key": "CONFLUENT_API_KEY",
+            "confluent_api_secret": "CONFLUENT_API_SECRET",
+        }
+        for attr, env_name in _overlays.items():
+            resolved = get_secret(env_name)
+            if resolved:
+                setattr(self, attr, resolved)
+        return self
 
     @property
     def database_mode(self) -> Literal["sqlite", "postgres"]:

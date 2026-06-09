@@ -5,6 +5,21 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from src.product import AuthConfig, PersistenceConfig
+from src.core.secrets import get_secret
+
+
+def _secret_or_env(name: str, default: str | None = None) -> str | None:
+    """Resolve a HIGH-sensitivity value via AWS Secrets Manager first
+    (when AWS_SECRETS_MANAGER_ENABLED=true), falling back to os.getenv
+    when ASM is disabled or unreachable.
+
+    Module-level constants below use this so the same import path keeps
+    working — no caller knows whether the value came from ASM or .env.
+    """
+    value = get_secret(name)
+    if value:
+        return value
+    return os.getenv(name, default) if default is not None else os.getenv(name)
 
 
 # ──────────── environment loader ────────────
@@ -28,25 +43,28 @@ def load_env():
         load_dotenv(secrets_path)
 
 # ──────────── environment variables ────────────
-AUDIT_BOOTSTRAP        = os.getenv("AUDIT_BOOTSTRAP")
-AUDIT_API_KEY          = os.getenv("AUDIT_API_KEY")
-AUDIT_API_SECRET       = os.getenv("AUDIT_API_SECRET")
-DEST_BOOTSTRAP         = os.getenv("DEST_BOOTSTRAP")
-DEST_API_KEY           = os.getenv("DEST_API_KEY")
-DEST_API_SECRET        = os.getenv("DEST_API_SECRET")
+# HIGH-sensitivity values route through _secret_or_env so the same
+# constants resolve from AWS Secrets Manager (when enabled) without
+# requiring downstream code to know about ASM.
+AUDIT_BOOTSTRAP        = _secret_or_env("AUDIT_BOOTSTRAP")
+AUDIT_API_KEY          = _secret_or_env("AUDIT_API_KEY")
+AUDIT_API_SECRET       = _secret_or_env("AUDIT_API_SECRET")
+DEST_BOOTSTRAP         = _secret_or_env("DEST_BOOTSTRAP")
+DEST_API_KEY           = _secret_or_env("DEST_API_KEY")
+DEST_API_SECRET        = _secret_or_env("DEST_API_SECRET")
 SCHEMA_REGISTRY_URL    = (
-    os.environ.get("SCHEMA_REGISTRY_URL")
+    _secret_or_env("SCHEMA_REGISTRY_URL")
     or os.environ.get("SR_ENDPOINT")
     or ""
 )
 SCHEMA_REGISTRY_KEY    = (
-    os.environ.get("SCHEMA_REGISTRY_API_KEY")
+    _secret_or_env("SCHEMA_REGISTRY_API_KEY")
     or os.environ.get("SCHEMA_REGISTRY_KEY")
     or os.environ.get("SR_API_KEY")
     or ""
 )
 SCHEMA_REGISTRY_SECRET = (
-    os.environ.get("SCHEMA_REGISTRY_API_SECRET")
+    _secret_or_env("SCHEMA_REGISTRY_API_SECRET")
     or os.environ.get("SCHEMA_REGISTRY_SECRET")
     or os.environ.get("SR_API_SECRET")
     or ""

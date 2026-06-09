@@ -2122,6 +2122,23 @@ def main():
         sys.exit(1)
     logger.info("Startup configuration validated successfully")
 
+    # AWS Secrets Manager check (Phase 3). When ASM is enabled, we still
+    # need every required HIGH secret to resolve via either ASM or env.
+    # Missing values are logged at WARNING with their exact name so an
+    # operator can see at a glance which secret is misconfigured.
+    # validate_secrets() does NOT raise — startup proceeds and the
+    # downstream Kafka client will fail fast with a clear error if the
+    # missing value is actually required.
+    from src.core.secrets import validate_secrets as _validate_required_secrets
+    _missing_secrets = _validate_required_secrets()
+    if _missing_secrets:
+        logger.warning(
+            "Forwarder startup: %d required secret(s) missing: %s. "
+            "Kafka / DB clients will fail fast if these are actually used.",
+            len(_missing_secrets),
+            ", ".join(_missing_secrets),
+        )
+
     # Surface the IAM kill-switch loudly at WARNING level so operators (and
     # `make diagnose-ingest`) can tell at a glance whether catch-up mode is
     # active. Logged once during startup; the bypass itself runs in-process

@@ -407,6 +407,21 @@ class AuditLensNotifier:
         name = str(entry.get("name") or "unnamed")
         dtype = str(entry.get("type") or "").lower()
         webhook_url = str(entry.get("webhook_url") or "")
+        # Phase 3c: resolve "asm:..." references via AWS Secrets Manager.
+        # Lets notifications.yml keep its on-disk shape while the actual
+        # webhook URL lives in ASM. Resolution failure leaves the
+        # original placeholder, which then hits the existing
+        # _is_placeholder_url skip below — same end behaviour as an
+        # unconfigured destination.
+        if webhook_url.startswith("asm:"):
+            try:
+                from src.core.secrets import resolve_asm_reference
+                webhook_url = resolve_asm_reference(webhook_url)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning(
+                    "ASM resolution for %s failed (%s) — leaving placeholder",
+                    name, exc,
+                )
         enabled = bool(entry.get("enabled", True))
         filters = entry.get("filters") or {}
         if not isinstance(filters, dict):
