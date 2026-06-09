@@ -222,6 +222,25 @@ SIGNAL_COMMIT_REQUIRES_PG = (
 )
 
 
+def _int_env(name: str, default: int, minimum: int = 1) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value >= minimum else default
+
+
+# Auth-failure burst alert (Feature 5). When an actor crosses
+# AUTH_FAILURE_BURST_COUNT failures within AUTH_FAILURE_BURST_WINDOW_SECONDS,
+# fire a chat-channel alert via notifier.send_system_alert. Distinct from
+# the Kafka-stream anomaly detector — both can fire on the same incident.
+AUTH_FAILURE_BURST_COUNT = _int_env("AUTH_FAILURE_BURST_COUNT", 5)
+AUTH_FAILURE_BURST_WINDOW_SECONDS = _int_env("AUTH_FAILURE_BURST_WINDOW_SECONDS", 300)
+
+
 def _record_signal_persisted(items: list) -> None:
     """Called by signal-lane writer threads on successful flush. Advances
     the per-(topic, partition) high-water mark using the _source_topic /
@@ -2247,6 +2266,7 @@ def main():
     # Failure here must not crash the forwarder — the legacy SLACK_WEBHOOK
     # path stays available via ENABLE_LEGACY_SLACK_WEBHOOK=true.
     notifier: AuditLensNotifier | None = None
+    burst_detector = None
     try:
         notifier = AuditLensNotifier(
             config_path=os.getenv("NOTIFICATIONS_CONFIG", "notifications.yml")
@@ -2264,6 +2284,27 @@ def main():
             "Notification layer init failed (%s) — continuing without it", exc
         )
         notifier = None
+
+    # Auth-failure burst detector (Feature 5). Built whenever a notifier
+    # is configured so per-actor sliding-window failures can fan out to
+    # the same Slack/Teams destinations as the pipeline-health watchdog.
+    if notifier is not None and notifier.has_destinations():
+        try:
+            from src.product.burst_detector import BurstDetector
+
+            burst_detector = BurstDetector(
+                count_threshold=AUTH_FAILURE_BURST_COUNT,
+                window_seconds=AUTH_FAILURE_BURST_WINDOW_SECONDS,
+                notifier=notifier,
+            )
+            logger.info(
+                "Auth-failure burst detector enabled (threshold=%d, window=%ds)",
+                AUTH_FAILURE_BURST_COUNT,
+                AUTH_FAILURE_BURST_WINDOW_SECONDS,
+            )
+        except Exception as exc:
+            logger.warning("BurstDetector init failed (%s) — continuing without it", exc)
+            burst_detector = None
 
     # Pipeline-health watchdog: fires a Slack/Teams alert when no events
     # have landed in audit_events for longer than the configured threshold.
@@ -3246,6 +3287,35 @@ def main():
                                 persist_safely("anomaly_alert", product_store.persist_alert, anomaly_alert)
                                 if _ps_health:
                                     metrics.record_persistence_success(_ps_health)
+
+                    # Auth-failure burst detector (Feature 5). Records
+                    # per-actor sliding-window failures and dispatches a
+                    # system alert on burst. Runs before the regular
+                    # notifier path so the burst alert can fire even when
+                    # individual events fall below the notification
+                    # threshold. Checks two conditions per the spec:
+                    #   1. kafka.Authentication with result=UNAUTHENTICATED
+                    #   2. any event with is_denied=True
+                    if burst_detector is not None:
+                        try:
+                            _method_name = enriched_event.get("methodName") or enriched_event.get("action") or ""
+                            _result_status = (enriched_event.get("resultStatus") or enriched_event.get("result") or "")
+                            _is_auth_failure = (
+                                str(_method_name).lower() == "kafka.authentication"
+                                and str(_result_status).upper() == "UNAUTHENTICATED"
+                            )
+                            _is_denied_event = bool(enriched_event.get("is_denied"))
+                            if _is_auth_failure or _is_denied_event:
+                                _actor = (
+                                    enriched_event.get("actor")
+                                    or enriched_event.get("principal")
+                                    or enriched_event.get("actor_id")
+                                    or ""
+                                )
+                                if _actor:
+                                    burst_detector.record(str(_actor))
+                        except Exception as exc:
+                            logger.warning("burst_detector.record failed: %s", exc)
 
                     # Configurable notification layer (slack/teams/webhook)
                     # — runs before the legacy webhook so dedup keys are
