@@ -15,6 +15,14 @@ install.local.yaml
 install.*.local.yaml
 *.install.local.yaml
 secrets/
+# Generated artefacts from scripts/secrets/* (the .sh scripts themselves
+# are safe to commit because they read values from .env at runtime —
+# only any output / log / tfvars files generated alongside them are
+# gitignored).
+scripts/secrets/*.out
+scripts/secrets/*.log
+scripts/secrets/*.tfvars
+scripts/secrets/*.json
 backups/
 deploy/kubernetes/generated/
 *.pem
@@ -37,6 +45,14 @@ confluent.properties
 *secret*
 # Exception: Python masking-utility modules are code, not secrets files
 !src/forwarder/secrets_masking.py
+# Exception: Phase 2 secret-fetcher module + its tests + the ASM bootstrap
+# script. These contain NO credentials — they read from .env / ASM at
+# runtime. The blanket *secret* rule above is for accidental leakage of
+# things like aws_secret_access_key.txt or my_secret_dump.json.
+!src/core/secrets.py
+!tests/test_secrets.py
+!scripts/secrets/
+!scripts/secrets/create_secrets.sh
 *token*
 *.token
 
