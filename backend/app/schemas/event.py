@@ -96,6 +96,8 @@ class AuditEventDetailOut(AuditEventListOut):
     raw_payload_json: str | None = None
     rbac_role: str | None = None
     rbac_scope: str | None = None
+    auth_role: str | None = None
+    auth_role_target: str | None = None
 
 
 AuditEventOut = AuditEventListOut

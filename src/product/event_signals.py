@@ -19,7 +19,17 @@ ACTION_REQUIRED_REASONS = {
     "denied_access",
     "destructive_change",
     "security_sensitive_change",
+    "privilege_escalation",
 }
+
+# Admin-tier roles whose binding triggers a privilege-escalation alert.
+# Anything outside this set (MetricsViewer, EnvironmentReader, etc.) falls
+# through to the normal classification cascade.
+_PRIVILEGED_ROLES: frozenset[str] = frozenset({
+    "OrganizationAdmin",
+    "EnvironmentAdmin",
+    "CloudClusterAdmin",
+})
 
 
 def _as_text(value: Any) -> str:
@@ -440,6 +450,29 @@ def _classify_signal_core(event_or_fields: Any) -> dict[str, str]:
             "recommended_action": "Investigate immediately",
             "decision_label": "Action Needed",
         }
+    # Privilege escalation: BindRoleForPrincipal granting an admin-tier
+    # role (OrganizationAdmin / EnvironmentAdmin / CloudClusterAdmin) is
+    # the highest-impact RBAC mutation in Confluent Cloud — it gives the
+    # target full read/write across the scope. Per the Splunk-blog alert
+    # recipe, fire action_required with a dedicated signal_reason so
+    # downstream destinations can route these distinctly from generic
+    # destructive_change events. Runs after is_failure / is_denied so
+    # failed and denied grant attempts fall through to those buckets.
+    _auth_role = _as_text(_field(event_or_fields, "auth_role")).strip()
+    _auth_role_target = _as_text(_field(event_or_fields, "auth_role_target")).strip()
+    if (
+        "bindroleforprincipal" in method_name
+        and _auth_role in _PRIVILEGED_ROLES
+    ):
+        target_part = f" granted to {_auth_role_target}" if _auth_role_target else ""
+        return {
+            "signal_type": "action_required",
+            "signal_reason": "privilege_escalation",
+            "recommended_action": "Confirm grant approval and review actor's authority",
+            "decision_label": "Action Needed",
+            "decision_reason": f"High-privilege role binding detected: {_auth_role}{target_part}",
+        }
+
     if risk == "critical" or impact == "destructive" or change == "deleted" or any(marker in action_text for marker in ("delete", "remove", "drop", "destroy", "terminate", "unbind", "revoke")):
         return {
             "signal_type": "action_required",

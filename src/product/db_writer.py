@@ -193,6 +193,9 @@ audit_events = Table(
     Column("result_resource_id", String(255), nullable=True),
     # Flattened request.accessType — READ_ONLY / READ_WRITE / etc.
     Column("access_type", String(64), nullable=True),
+    # Role-binding alert: extracted role + target principal.
+    Column("auth_role", String(255), nullable=True),
+    Column("auth_role_target", String(255), nullable=True),
     Column("summary", Text, nullable=False),
     Column("raw_payload_json", Text, nullable=False),
     Column("is_failure", Boolean, nullable=False),

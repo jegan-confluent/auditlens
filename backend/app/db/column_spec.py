@@ -54,4 +54,10 @@ AUDIT_EVENT_COLUMNS: dict[str, str] = {
     # Used by event_normalization to demote READ_ONLY events to
     # signal_type=informational.
     "access_type": "VARCHAR(64)",
+    # Role-binding alert support (Feature 2). auth_role is the role being
+    # granted in BindRoleForPrincipal events (request.data.role_name), with
+    # rbacAuthorization.role as a fallback for other contexts. auth_role_target
+    # is the principal receiving the grant (request.data.principal).
+    "auth_role": "VARCHAR(255)",
+    "auth_role_target": "VARCHAR(255)",
 }

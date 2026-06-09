@@ -313,6 +313,7 @@ def _event_filter_conditions(
     production_hint: str | None = None,
     q: str | None = None,
     plane: str | None = None,
+    auth_role: str | None = None,
 ) -> list[Any]:
     conditions: list[Any] = []
     since = parse_time_window(time_window)
@@ -372,6 +373,8 @@ def _event_filter_conditions(
             conditions.append(func.lower(AuditEvent.actor).like(f"%{a}%"))
     if action and action.strip():
         conditions.append(func.lower(AuditEvent.action).like(f"%{action.strip().lower()}%"))
+    if auth_role and auth_role.strip():
+        conditions.append(AuditEvent.auth_role == auth_role.strip())
     if result and result.strip():
         conditions.append(AuditEvent.result == result.strip())
     if is_denied is True:

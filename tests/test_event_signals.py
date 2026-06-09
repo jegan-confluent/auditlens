@@ -430,3 +430,108 @@ def test_validate_only_false_create_topics_not_suppressed():
     }
     result = normalize_event(payload)
     assert result["signal_type"] != "noise" or result["signal_reason"] != "dry_run_preflight"
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Feature 2: privilege-escalation alert for admin-tier BindRoleForPrincipal
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def test_bind_role_organization_admin_is_privilege_escalation():
+    """Granting OrganizationAdmin via BindRoleForPrincipal must fire
+    action_required + privilege_escalation, with the role and target
+    surfaced in decision_reason."""
+    result = signal({
+        "type": "io.confluent.cloud/request",
+        "methodName": "BindRoleForPrincipal",
+        "auth_role": "OrganizationAdmin",
+        "auth_role_target": "User:u-new-admin",
+        "resultStatus": "SUCCESS",
+    })
+    assert result["signal_type"] == "action_required"
+    assert result["signal_reason"] == "privilege_escalation"
+    assert "OrganizationAdmin" in result["decision_reason"]
+    assert "u-new-admin" in result["decision_reason"]
+
+
+def test_bind_role_cloud_cluster_admin_is_privilege_escalation():
+    """CloudClusterAdmin grants are equally privileged at cluster scope."""
+    result = signal({
+        "type": "io.confluent.cloud/request",
+        "methodName": "BindRoleForPrincipal",
+        "auth_role": "CloudClusterAdmin",
+        "auth_role_target": "User:u-cluster-admin",
+        "resultStatus": "SUCCESS",
+    })
+    assert result["signal_type"] == "action_required"
+    assert result["signal_reason"] == "privilege_escalation"
+
+
+def test_bind_role_environment_admin_is_privilege_escalation():
+    result = signal({
+        "type": "io.confluent.cloud/request",
+        "methodName": "BindRoleForPrincipal",
+        "auth_role": "EnvironmentAdmin",
+        "auth_role_target": "User:u-env-admin",
+        "resultStatus": "SUCCESS",
+    })
+    assert result["signal_type"] == "action_required"
+    assert result["signal_reason"] == "privilege_escalation"
+
+
+def test_bind_role_metrics_viewer_is_not_privilege_escalation():
+    """MetricsViewer (and any non-admin role) must fall through to the
+    normal classification cascade — i.e., access_changed at most."""
+    result = signal({
+        "type": "io.confluent.cloud/request",
+        "methodName": "BindRoleForPrincipal",
+        "auth_role": "MetricsViewer",
+        "auth_role_target": "User:u-reader",
+        "resultStatus": "SUCCESS",
+    })
+    assert result["signal_reason"] != "privilege_escalation"
+    # Should land in the access-change bucket, not action_required.
+    assert result["signal_type"] in {"attention", "informational"}
+
+
+def test_bind_role_denied_does_not_fire_privilege_escalation():
+    """A denied OrganizationAdmin grant attempt is denied_access, not
+    privilege_escalation — somebody tried but the system refused."""
+    result = signal({
+        "type": "io.confluent.cloud/request",
+        "methodName": "BindRoleForPrincipal",
+        "auth_role": "OrganizationAdmin",
+        "auth_role_target": "User:u-attacker",
+        "granted": False,
+    })
+    assert result["signal_type"] == "action_required"
+    assert result["signal_reason"] == "denied_access"
+
+
+def test_bind_role_extraction_from_request_data():
+    """End-to-end normalization: a raw CloudEvent with role_name in
+    request.data populates the auth_role + auth_role_target columns and
+    routes to privilege_escalation."""
+    event = {
+        "id": "evt-bind-1",
+        "specversion": "1.0",
+        "source": "crn://confluent.cloud/organization=org1",
+        "type": "io.confluent.cloud/request",
+        "time": "2026-06-09T10:00:00.000Z",
+        "data": {
+            "methodName": "BindRoleForPrincipal",
+            "authenticationInfo": {"principal": "User:admin@example.com"},
+            "request": {
+                "data": {
+                    "role_name": "OrganizationAdmin",
+                    "principal": "User:u-target",
+                }
+            },
+            "result": {"status": "SUCCESS"},
+        },
+    }
+    normalized = normalize_event(event)
+    assert normalized["auth_role"] == "OrganizationAdmin"
+    assert normalized["auth_role_target"] == "User:u-target"
+    assert normalized["signal_type"] == "action_required"
+    assert normalized["signal_reason"] == "privilege_escalation"

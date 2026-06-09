@@ -112,6 +112,11 @@ def events(
         default=None,
         description="Filter by plane type: 'control_plane' or 'data_plane'. Derived from the action method name.",
     ),
+    auth_role: str | None = Query(
+        default=None,
+        max_length=255,
+        description="Filter by extracted role-binding role (OrganizationAdmin, EnvironmentAdmin, CloudClusterAdmin, MetricsViewer, etc.).",
+    ),
     db: Session = Depends(get_db),
 ):
     if show_noise:
@@ -203,6 +208,7 @@ def events(
             q=q,
             production_hint=production_hint,
             plane=plane,
+            auth_role=auth_role,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

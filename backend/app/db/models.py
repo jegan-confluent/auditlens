@@ -95,6 +95,8 @@ class AuditEvent(Base):
     auth_pattern_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
     result_resource_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     access_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    auth_role: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    auth_role_target: Mapped[str | None] = mapped_column(String(255), nullable=True)
     summary: Mapped[str] = mapped_column(Text, default="", nullable=False)
     raw_payload_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
     is_failure: Mapped[bool] = mapped_column(default=False, nullable=False)

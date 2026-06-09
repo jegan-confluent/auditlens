@@ -528,7 +528,16 @@ def parse_event_timestamp(payload: dict[str, Any]) -> datetime:
 
 
 def normalize_event(payload: dict[str, Any]) -> dict[str, Any]:
-    method = _as_text(payload.get("methodName") or payload.get("method_name"))
+    # methodName lives at the top level after flatten_audit, but raw
+    # CloudEvents (used by some tests and by minimal_normalize) carry it
+    # nested under data.methodName. Dig there as a fallback so the
+    # classifier and downstream branches can see the method consistently.
+    _nested_data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    method = _as_text(
+        payload.get("methodName")
+        or payload.get("method_name")
+        or (_nested_data.get("methodName") if isinstance(_nested_data, dict) else None)
+    )
     action = _as_text(payload.get("action"))
     action_category = derive_action_category(method, action)
     resource_context = extract_resource_context(payload)
@@ -549,14 +558,6 @@ def normalize_event(payload: dict[str, Any]) -> dict[str, Any]:
     actor = _pn if (_pn and not _pn.isdigit()) else actor_raw
     actor_info = enrich_actor(actor, subject_type=payload.get("principal_type") or "")
     source_info = extract_source_info(payload)
-    decision = decision_snapshot(payload)
-    # Reads carry data.request.accessType=READ_ONLY in the raw payload —
-    # demote any classifier verdict to informational regardless of method
-    # name. Catches TableflowCatalogConfig, TableflowListTables,
-    # ListTableFlowCatalog, GetComputePool, GetPeerings, etc. which the
-    # classifier currently bins as attention/config_changed despite being
-    # pure reads. validateOnly (dry-run preflight) still wins below.
-    _read_only_access = _is_read_only_access(payload)
     # Flattened data_json subfields. flatten_audit() already lifted
     # authorizationInfo.{granted,operation,resourceType,patternType} to
     # top-level keys, so we read them straight from `payload`. accessType
@@ -566,6 +567,48 @@ def normalize_event(payload: dict[str, Any]) -> dict[str, Any]:
     _result_block = _data_dict.get("result") if isinstance(_data_dict.get("result"), dict) else {}
     _result_data = _result_block.get("data") if isinstance(_result_block.get("data"), dict) else {}
     _granted_raw = payload.get("granted")
+    # Role-binding alert support. flatten_audit lifts these from
+    # request.data.{role_name, principal} (or rbacAuthorization.role as
+    # fallback). On raw CloudEvents that bypass flatten_audit we also
+    # accept the data.request.data shape directly. Derived BEFORE
+    # decision_snapshot so the classifier can see auth_role on the
+    # signal_input dict and fire the privilege_escalation branch.
+    _req_data_dict = _request.get("data") if isinstance(_request.get("data"), dict) else {}
+    _auth_role = (
+        payload.get("auth_role")
+        or _req_data_dict.get("role_name")
+        or _req_data_dict.get("roleName")
+        or _req_data_dict.get("role")
+        or payload.get("rbacRole")
+    )
+    _auth_role_target = (
+        payload.get("auth_role_target")
+        or _req_data_dict.get("principal")
+        or _req_data_dict.get("principal_id")
+        or _req_data_dict.get("principalId")
+    )
+    # Pass an augmented payload to decision_snapshot so the classifier
+    # sees auth_role / auth_role_target / methodName on the signal_input
+    # dict. Raw CloudEvents from tests don't carry methodName at top
+    # level (it lives in data.methodName) and the classifier helper
+    # _method_name_lower() only reads top-level keys, so without this
+    # lift the privilege_escalation branch can't match.
+    _classifier_payload = payload
+    if _auth_role or _auth_role_target or (method and not payload.get("methodName")):
+        _classifier_payload = {
+            **payload,
+            "methodName": method or payload.get("methodName"),
+            "auth_role": _as_text(_auth_role) or None,
+            "auth_role_target": _as_text(_auth_role_target) or None,
+        }
+    decision = decision_snapshot(_classifier_payload)
+    # Reads carry data.request.accessType=READ_ONLY in the raw payload —
+    # demote any classifier verdict to informational regardless of method
+    # name. Catches TableflowCatalogConfig, TableflowListTables,
+    # ListTableFlowCatalog, GetComputePool, GetPeerings, etc. which the
+    # classifier currently bins as attention/config_changed despite being
+    # pure reads. validateOnly (dry-run preflight) still wins below.
+    _read_only_access = _is_read_only_access(payload)
     flat_auth = {
         "auth_granted": bool(_granted_raw) if isinstance(_granted_raw, bool) else None,
         "auth_operation": _as_text(payload.get("operation")) or None,
@@ -573,6 +616,8 @@ def normalize_event(payload: dict[str, Any]) -> dict[str, Any]:
         "auth_pattern_type": _as_text(payload.get("patternType")) or None,
         "result_resource_id": _as_text(_result_data.get("id")) or None,
         "access_type": _as_text(_request.get("accessType")) or None,
+        "auth_role": _as_text(_auth_role) or None,
+        "auth_role_target": _as_text(_auth_role_target) or None,
     }
     summary = _as_text(payload.get("summary") or payload.get("message"))
     if not summary:
@@ -860,6 +905,26 @@ def flatten_audit(event):
     acl = authz.get("aclAuthorization", {})
     out["aclPermissionType"]   = acl.get("permissionType")
     out["aclHost"]             = acl.get("host")
+
+    # Role-binding alert support: for BindRoleForPrincipal (and similar
+    # role-grant methods) the granted role + target principal live in
+    # request.data.{role_name, principal}. Fall back to
+    # rbacAuthorization.role when the request body is absent so we still
+    # capture the role used during a generic authz check.
+    req_data = data.get("request", {}).get("data") if isinstance(data.get("request"), dict) else {}
+    if not isinstance(req_data, dict):
+        req_data = {}
+    out["auth_role"] = (
+        req_data.get("role_name")
+        or req_data.get("roleName")
+        or req_data.get("role")
+        or rbac.get("role")
+    )
+    out["auth_role_target"] = (
+        req_data.get("principal")
+        or req_data.get("principal_id")
+        or req_data.get("principalId")
+    )
 
     req = data.get("request", {})
     out["correlationId"]       = req.get("correlationId")
