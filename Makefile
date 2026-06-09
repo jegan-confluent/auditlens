@@ -673,3 +673,20 @@ sync: ## Sync files to EC2 without restart
 
 health-check-full: ## Run full 7-section health check on EC2
 	ssh -i $(PEM) $(EC2_USER)@$(EC2_IP) "bash ~/AuditLens/scripts/health_check_full.sh"
+
+##############################################################################
+# AWS Secrets Manager
+##############################################################################
+
+secrets-create: ## Create/update secrets in AWS Secrets Manager from local .env + notifications.yml
+	@. $(HOME)/.cc-dotfiles/caas.sh && \
+	 SECRET_DRY_RUN=false bash scripts/secrets/create_secrets.sh
+
+secrets-dry-run: ## Preview what secrets would be created (no AWS calls)
+	@SECRET_DRY_RUN=true bash scripts/secrets/create_secrets.sh
+
+secrets-rotate: ## Re-push current .env values to ASM (same as secrets-create)
+	@$(MAKE) secrets-create
+
+secrets-enable: ## Switch running containers to AWS Secrets Manager (rebuild)
+	@$(MAKE) deploy AWS_SECRETS_MANAGER_ENABLED=true

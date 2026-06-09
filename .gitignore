@@ -53,6 +53,7 @@ confluent.properties
 !tests/test_secrets.py
 !scripts/secrets/
 !scripts/secrets/create_secrets.sh
+!infra/aws/setup_secrets_manager_role.sh
 *token*
 *.token
 

@@ -361,6 +361,14 @@ The most important variables in `.env`. The wizard writes all of these for you; 
 | `CONFLUENT_CLOUD_API_KEY` / `_SECRET` | — | Cloud-scoped key for IAM lookups + Tableflow + the wizard's cluster picker |
 | `SCHEMA_REGISTRY_URL` / `_API_KEY` / `_API_SECRET` | — | Schema Registry endpoint + credentials (required for Tableflow) |
 
+### Using AWS Secrets Manager (recommended for EC2)
+
+- Set `AWS_SECRETS_MANAGER_ENABLED=true` in `.env` to overlay HIGH-sensitivity values from ASM (env stays the fallback).
+- Run `make secrets-create` once to push current `.env` + `notifications.yml` values into the `auditlens/prod/*` secret group.
+- Attach the EC2 IAM role (`bash infra/aws/setup_secrets_manager_role.sh` on the operator's Mac, then `aws ec2 associate-iam-instance-profile`).
+- Set `AWS_REGION` in `.env` (default `ap-southeast-1`).
+- Secrets auto-refresh every 15 minutes — no container restart needed after rotation in ASM.
+
 ---
 
 ## Tableflow
