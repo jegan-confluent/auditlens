@@ -153,7 +153,7 @@ CREATE TABLE audit_enriched (
   source_ip          STRING,
   environment_id     STRING,
   cluster_id         STRING,
-  event_time         AS TO_TIMESTAMP_LTZ(CAST(\`timestamp\` AS BIGINT), 3),
+  event_time         AS TO_TIMESTAMP(REPLACE(\`timestamp\`, 'T', ' '), 'yyyy-MM-dd HH:mm:ss'),
   WATERMARK FOR event_time AS event_time - INTERVAL '5' SECOND
 ) WITH (
   'connector'                          = 'kafka',
