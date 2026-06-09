@@ -7,6 +7,7 @@ const NAV_LINKS = [
   { href: "/dashboard", label: "Dashboard" },
   { href: "/events", label: "Events" },
   { href: "/auth-analytics", label: "Auth Analytics" },
+  { href: "/access-transparency", label: "Access Transparency" },
   { href: "/resources", label: "Resources" },
   { href: "/system", label: "System" },
   { href: "/settings", label: "Settings" },

@@ -605,6 +605,25 @@ def normalize_event(payload: dict[str, Any]) -> dict[str, Any]:
         or _ipfilter_block.get("resourceGroup")
     )
 
+    # Access Transparency extraction (Feature 4). Populated only when
+    # event type is io.confluent.cloud/access-transparency; otherwise
+    # both fields stay NULL. The classifier already routes AT events to
+    # action_required via the existing type-based override.
+    _event_type = _as_text(payload.get("type") or payload.get("event_type")).lower()
+    _at_justification: str | None = None
+    _at_operator: str | None = None
+    if "access-transparency" in _event_type:
+        _at_justification = (
+            payload.get("at_justification")
+            or _data_dict.get("justification")
+            or _data_dict.get("accessJustification")
+        )
+        _at_operator = (
+            payload.get("at_operator")
+            or _data_dict.get("operator")
+            or _data_dict.get("operatorPrincipal")
+        )
+
     # Pass an augmented payload to decision_snapshot so the classifier
     # sees auth_role / auth_role_target / ipfilter_* / methodName on the
     # signal_input dict. Raw CloudEvents from tests don't carry methodName
@@ -646,6 +665,8 @@ def normalize_event(payload: dict[str, Any]) -> dict[str, Any]:
         "auth_role_target": _as_text(_auth_role_target) or None,
         "ipfilter_client_ip": _as_text(_ipfilter_client_ip) or None,
         "ipfilter_resource_group": _as_text(_ipfilter_resource_group) or None,
+        "at_justification": _as_text(_at_justification) or None,
+        "at_operator": _as_text(_at_operator) or None,
     }
     summary = _as_text(payload.get("summary") or payload.get("message"))
     if not summary:

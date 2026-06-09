@@ -585,6 +585,144 @@ def test_ipfilter_extraction_from_raw_cloudevent():
     assert "198.51.100.7" in normalized["decision_reason"]
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# Feature 4: Access Transparency normalization + endpoint
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def test_access_transparency_event_extracts_justification_and_operator():
+    """A raw io.confluent.cloud/access-transparency CloudEvent populates
+    at_justification + at_operator from data.justification and data.operator."""
+    event = {
+        "id": "evt-at-1",
+        "specversion": "1.0",
+        "source": "crn://confluent.cloud/organization=org1",
+        "type": "io.confluent.cloud/access-transparency",
+        "time": "2026-06-09T10:00:00.000Z",
+        "data": {
+            "methodName": "AccessCustomerCluster",
+            "authenticationInfo": {"principal": "User:confluent-ops"},
+            "operator": "confluent-ops@confluent.io",
+            "justification": "Support ticket #12345 — investigating customer-reported latency",
+            "result": {"status": "SUCCESS"},
+        },
+    }
+    normalized = normalize_event(event)
+    assert normalized["at_operator"] == "confluent-ops@confluent.io"
+    assert "12345" in normalized["at_justification"]
+
+
+def test_access_transparency_event_is_always_action_required():
+    """Existing override: AT events must be action_required regardless of
+    method name or other fields."""
+    event = {
+        "type": "io.confluent.cloud/access-transparency",
+        "methodName": "AccessCustomerCluster",
+        "data": {
+            "methodName": "AccessCustomerCluster",
+            "operator": "confluent-ops@confluent.io",
+            "justification": "Routine maintenance",
+        },
+    }
+    result = signal(event)
+    assert result["signal_type"] == "action_required"
+    assert result["signal_reason"] == "security_sensitive_change"
+
+
+def test_access_transparency_endpoint_returns_only_at_events():
+    """End-to-end: /access-transparency must return AT events and skip
+    everything else. Uses a fresh sqlite db + isolated FastAPI app."""
+    from fastapi import FastAPI
+    from starlette.testclient import TestClient
+
+    from backend.app.api.routes.access_transparency import router as at_router
+    from backend.app.db.database import get_db
+
+    with TemporaryDirectory() as tmp:
+        engine = build_engine(f"sqlite:///{Path(tmp) / 'auditlens.db'}")
+        init_db(engine)
+        TestSession = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+
+        # Seed two events: one AT, one regular request.
+        with TestSession() as db:
+            create_event(db, {
+                "id": "evt-at-endpoint-1",
+                "specversion": "1.0",
+                "type": "io.confluent.cloud/access-transparency",
+                "time": "2026-06-09T10:00:00.000Z",
+                "data": {
+                    "methodName": "AccessCustomerCluster",
+                    "authenticationInfo": {"principal": "User:confluent-ops"},
+                    "operator": "confluent-ops@confluent.io",
+                    "justification": "Investigating ticket #ABC",
+                    "result": {"status": "SUCCESS"},
+                },
+            })
+            create_event(db, {
+                "id": "evt-other-endpoint-1",
+                "specversion": "1.0",
+                "type": "io.confluent.cloud/request",
+                "time": "2026-06-09T10:05:00.000Z",
+                "data": {
+                    "methodName": "CreateEnvironment",
+                    "authenticationInfo": {"principal": "User:admin"},
+                    "result": {"status": "SUCCESS"},
+                },
+            })
+
+        app = FastAPI()
+        def override_get_db():
+            db = TestSession()
+            try:
+                yield db
+            finally:
+                db.close()
+        app.dependency_overrides[get_db] = override_get_db
+        app.include_router(at_router)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        # Mock auth: dependency_overrides on _require_viewer
+        from backend.app.api.routes.patterns import _require_viewer
+        app.dependency_overrides[_require_viewer] = lambda: None
+
+        # The limiter is registered on the actual app's state — bypass it by
+        # disabling state. Easiest: install a no-op limiter Stub on app.state.
+        from slowapi import Limiter
+        from slowapi.util import get_remote_address
+        app.state.limiter = Limiter(key_func=get_remote_address, enabled=False)
+
+        response = client.get("/access-transparency")
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["total"] == 1
+        assert len(body["items"]) == 1
+        item = body["items"][0]
+        assert item["at_operator"] == "confluent-ops@confluent.io"
+        assert "ABC" in item["at_justification"]
+
+
+def test_non_at_event_does_not_populate_at_fields():
+    """Events of other CloudEvents types must keep at_justification +
+    at_operator NULL even if the raw payload happens to have a
+    field named 'operator' or 'justification' somewhere."""
+    event = {
+        "id": "evt-other-1",
+        "specversion": "1.0",
+        "type": "io.confluent.cloud/request",
+        "time": "2026-06-09T10:00:00.000Z",
+        "data": {
+            "methodName": "CreateEnvironment",
+            "authenticationInfo": {"principal": "User:admin"},
+            "operator": "would-not-be-used",
+            "justification": "would-not-be-used",
+            "result": {"status": "SUCCESS"},
+        },
+    }
+    normalized = normalize_event(event)
+    assert normalized["at_operator"] is None
+    assert normalized["at_justification"] is None
+
+
 def test_bind_role_extraction_from_request_data():
     """End-to-end normalization: a raw CloudEvent with role_name in
     request.data populates the auth_role + auth_role_target columns and

@@ -146,6 +146,36 @@ export function compareEvents(
   return request<CompareResponse>(`/events/compare?${params.toString()}`, signal);
 }
 
+export type AccessTransparencyEvent = {
+  id: number;
+  timestamp: string;
+  actor: string;
+  resource_name: string;
+  at_operator: string | null;
+  at_justification: string | null;
+  result: string;
+  environment_id: string | null;
+};
+
+export type AccessTransparencyResponse = {
+  items: AccessTransparencyEvent[];
+  limit: number;
+  offset: number;
+  total: number;
+};
+
+export function getAccessTransparency(
+  limit: number = 50,
+  offset: number = 0,
+  signal?: AbortSignal
+) {
+  const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+  return request<AccessTransparencyResponse>(
+    `/access-transparency?${params.toString()}`,
+    signal
+  );
+}
+
 export async function exportEvents(
   params: URLSearchParams,
   format: "csv" | "json"

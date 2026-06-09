@@ -66,4 +66,9 @@ AUDIT_EVENT_COLUMNS: dict[str, str] = {
     # mediated authorization decision distinct from ACL/RBAC denials.
     "ipfilter_client_ip": "VARCHAR(45)",
     "ipfilter_resource_group": "VARCHAR(255)",
+    # Access Transparency support (Feature 4). Populated only when
+    # event type == "io.confluent.cloud/access-transparency": the operator
+    # who accessed customer resources and the business justification.
+    "at_justification": "TEXT",
+    "at_operator": "VARCHAR(255)",
 }

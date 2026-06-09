@@ -100,6 +100,8 @@ class AuditEventDetailOut(AuditEventListOut):
     auth_role_target: str | None = None
     ipfilter_client_ip: str | None = None
     ipfilter_resource_group: str | None = None
+    at_justification: str | None = None
+    at_operator: str | None = None
 
 
 AuditEventOut = AuditEventListOut

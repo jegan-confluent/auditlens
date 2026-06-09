@@ -201,6 +201,10 @@ audit_events = Table(
     # an IP-filter-mediated authz decision.
     Column("ipfilter_client_ip", String(45), nullable=True),
     Column("ipfilter_resource_group", String(255), nullable=True),
+    # Access Transparency: operator + business justification recorded
+    # by Confluent personnel when accessing customer resources.
+    Column("at_justification", Text, nullable=True),
+    Column("at_operator", String(255), nullable=True),
     Column("summary", Text, nullable=False),
     Column("raw_payload_json", Text, nullable=False),
     Column("is_failure", Boolean, nullable=False),
