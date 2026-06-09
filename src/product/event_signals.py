@@ -20,6 +20,7 @@ ACTION_REQUIRED_REASONS = {
     "destructive_change",
     "security_sensitive_change",
     "privilege_escalation",
+    "ip_filter_deny",
 }
 
 # Admin-tier roles whose binding triggers a privilege-escalation alert.
@@ -332,7 +333,23 @@ def _classify_signal_core(event_or_fields: Any) -> dict[str, str]:
     is_denied = bool(_field(event_or_fields, "is_denied", False)) or "denied" in result or change == "denied"
 
     # ── Early-return classifiers ───────────────────────────────────────────
-    # Denial check runs FIRST so denied bulk-noise / read-only methods
+    # IP-filter denial wins over the generic denied_access bucket so the
+    # alert payload can carry the actual client IP and resource group.
+    # Requires both the ipfilter_client_ip column populated AND a denied
+    # outcome — a granted IP-filter check (rare but possible during
+    # policy evaluation) is not an alert-worthy event.
+    _ipfilter_ip = _as_text(_field(event_or_fields, "ipfilter_client_ip")).strip()
+    _ipfilter_rg = _as_text(_field(event_or_fields, "ipfilter_resource_group")).strip()
+    if _ipfilter_ip and is_denied:
+        rg_clause = f" on resource group {_ipfilter_rg}" if _ipfilter_rg else ""
+        return {
+            "signal_type": "action_required",
+            "signal_reason": "ip_filter_deny",
+            "recommended_action": "Confirm the client IP belongs to an authorized network range",
+            "decision_label": "Action Needed",
+            "decision_reason": f"IP filter denied access from {_ipfilter_ip}{rg_clause}",
+        }
+    # Denial check runs early so denied bulk-noise / read-only methods
     # (mds.Authorize denials, ip-filter.Authorize denials, denied GetSecret
     # reads, …) surface as action_required instead of being swallowed by
     # the auth_noise / read_only_lookup short-cuts below. Read-only and

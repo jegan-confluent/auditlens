@@ -314,6 +314,7 @@ def _event_filter_conditions(
     q: str | None = None,
     plane: str | None = None,
     auth_role: str | None = None,
+    ipfilter_client_ip: str | None = None,
 ) -> list[Any]:
     conditions: list[Any] = []
     since = parse_time_window(time_window)
@@ -375,6 +376,8 @@ def _event_filter_conditions(
         conditions.append(func.lower(AuditEvent.action).like(f"%{action.strip().lower()}%"))
     if auth_role and auth_role.strip():
         conditions.append(AuditEvent.auth_role == auth_role.strip())
+    if ipfilter_client_ip and ipfilter_client_ip.strip():
+        conditions.append(AuditEvent.ipfilter_client_ip == ipfilter_client_ip.strip())
     if result and result.strip():
         conditions.append(AuditEvent.result == result.strip())
     if is_denied is True:

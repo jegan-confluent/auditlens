@@ -196,6 +196,11 @@ audit_events = Table(
     # Role-binding alert: extracted role + target principal.
     Column("auth_role", String(255), nullable=True),
     Column("auth_role_target", String(255), nullable=True),
+    # IP-filter denial detail: client IP and resource group from
+    # authorizationInfo.ipfilterAuthorization. NULL unless the event is
+    # an IP-filter-mediated authz decision.
+    Column("ipfilter_client_ip", String(45), nullable=True),
+    Column("ipfilter_resource_group", String(255), nullable=True),
     Column("summary", Text, nullable=False),
     Column("raw_payload_json", Text, nullable=False),
     Column("is_failure", Boolean, nullable=False),

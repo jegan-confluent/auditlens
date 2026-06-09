@@ -117,6 +117,11 @@ def events(
         max_length=255,
         description="Filter by extracted role-binding role (OrganizationAdmin, EnvironmentAdmin, CloudClusterAdmin, MetricsViewer, etc.).",
     ),
+    ipfilter_client_ip: str | None = Query(
+        default=None,
+        max_length=45,
+        description="Filter by ipfilterAuthorization.client_ip — non-NULL marks IP-filter-mediated authz decisions.",
+    ),
     db: Session = Depends(get_db),
 ):
     if show_noise:
@@ -209,6 +214,7 @@ def events(
             production_hint=production_hint,
             plane=plane,
             auth_role=auth_role,
+            ipfilter_client_ip=ipfilter_client_ip,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

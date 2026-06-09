@@ -587,19 +587,45 @@ def normalize_event(payload: dict[str, Any]) -> dict[str, Any]:
         or _req_data_dict.get("principal_id")
         or _req_data_dict.get("principalId")
     )
+    # IP-filter denial extraction (Feature 3). Fires when the platform
+    # blocked an access attempt because the client IP fell outside the
+    # configured IP allow list, distinct from ACL/RBAC denials.
+    _authz_info = _data_dict.get("authorizationInfo") if isinstance(_data_dict.get("authorizationInfo"), dict) else {}
+    _ipfilter_block = _authz_info.get("ipfilterAuthorization") if isinstance(_authz_info, dict) else None
+    if not isinstance(_ipfilter_block, dict):
+        _ipfilter_block = {}
+    _ipfilter_client_ip = (
+        payload.get("ipfilter_client_ip")
+        or _ipfilter_block.get("client_ip")
+        or _ipfilter_block.get("clientIp")
+    )
+    _ipfilter_resource_group = (
+        payload.get("ipfilter_resource_group")
+        or _ipfilter_block.get("resource_group")
+        or _ipfilter_block.get("resourceGroup")
+    )
+
     # Pass an augmented payload to decision_snapshot so the classifier
-    # sees auth_role / auth_role_target / methodName on the signal_input
-    # dict. Raw CloudEvents from tests don't carry methodName at top
-    # level (it lives in data.methodName) and the classifier helper
+    # sees auth_role / auth_role_target / ipfilter_* / methodName on the
+    # signal_input dict. Raw CloudEvents from tests don't carry methodName
+    # at top level (it lives in data.methodName) and the classifier helper
     # _method_name_lower() only reads top-level keys, so without this
-    # lift the privilege_escalation branch can't match.
+    # lift the privilege_escalation / ip_filter_deny branches can't match.
     _classifier_payload = payload
-    if _auth_role or _auth_role_target or (method and not payload.get("methodName")):
+    if (
+        _auth_role
+        or _auth_role_target
+        or _ipfilter_client_ip
+        or _ipfilter_resource_group
+        or (method and not payload.get("methodName"))
+    ):
         _classifier_payload = {
             **payload,
             "methodName": method or payload.get("methodName"),
             "auth_role": _as_text(_auth_role) or None,
             "auth_role_target": _as_text(_auth_role_target) or None,
+            "ipfilter_client_ip": _as_text(_ipfilter_client_ip) or None,
+            "ipfilter_resource_group": _as_text(_ipfilter_resource_group) or None,
         }
     decision = decision_snapshot(_classifier_payload)
     # Reads carry data.request.accessType=READ_ONLY in the raw payload —
@@ -618,6 +644,8 @@ def normalize_event(payload: dict[str, Any]) -> dict[str, Any]:
         "access_type": _as_text(_request.get("accessType")) or None,
         "auth_role": _as_text(_auth_role) or None,
         "auth_role_target": _as_text(_auth_role_target) or None,
+        "ipfilter_client_ip": _as_text(_ipfilter_client_ip) or None,
+        "ipfilter_resource_group": _as_text(_ipfilter_resource_group) or None,
     }
     summary = _as_text(payload.get("summary") or payload.get("message"))
     if not summary:

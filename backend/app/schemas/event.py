@@ -98,6 +98,8 @@ class AuditEventDetailOut(AuditEventListOut):
     rbac_scope: str | None = None
     auth_role: str | None = None
     auth_role_target: str | None = None
+    ipfilter_client_ip: str | None = None
+    ipfilter_resource_group: str | None = None
 
 
 AuditEventOut = AuditEventListOut

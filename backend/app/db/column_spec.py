@@ -60,4 +60,10 @@ AUDIT_EVENT_COLUMNS: dict[str, str] = {
     # is the principal receiving the grant (request.data.principal).
     "auth_role": "VARCHAR(255)",
     "auth_role_target": "VARCHAR(255)",
+    # IP-filter denial support (Feature 3). Populated from
+    # authorizationInfo.ipfilterAuthorization.{client_ip, resource_group}.
+    # Both NULL on the vast majority of events; non-NULL marks an IP-filter-
+    # mediated authorization decision distinct from ACL/RBAC denials.
+    "ipfilter_client_ip": "VARCHAR(45)",
+    "ipfilter_resource_group": "VARCHAR(255)",
 }

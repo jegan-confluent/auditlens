@@ -508,6 +508,83 @@ def test_bind_role_denied_does_not_fire_privilege_escalation():
     assert result["signal_reason"] == "denied_access"
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# Feature 3: IP-filter denial alert
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def test_ipfilter_denied_is_action_required_with_specific_reason():
+    """ipfilterAuthorization populated + denied → ip_filter_deny (more
+    specific than the generic denied_access reason)."""
+    result = signal({
+        "type": "io.confluent.cloud/authorization",
+        "methodName": "ip-filter.Authorize",
+        "ipfilter_client_ip": "203.0.113.42",
+        "ipfilter_resource_group": "MANAGEMENT",
+        "granted": False,
+    })
+    assert result["signal_type"] == "action_required"
+    assert result["signal_reason"] == "ip_filter_deny"
+    assert "203.0.113.42" in result["decision_reason"]
+    assert "MANAGEMENT" in result["decision_reason"]
+
+
+def test_ipfilter_granted_is_not_action_required():
+    """A granted IP-filter authz check is informational/noise, not alert-worthy."""
+    result = signal({
+        "type": "io.confluent.cloud/authorization",
+        "methodName": "ip-filter.Authorize",
+        "ipfilter_client_ip": "203.0.113.42",
+        "ipfilter_resource_group": "MANAGEMENT",
+        "granted": True,
+    })
+    assert result["signal_reason"] != "ip_filter_deny"
+    assert result["signal_type"] != "action_required"
+
+
+def test_no_ipfilter_field_unaffected_by_ip_filter_branch():
+    """Events without ipfilter_client_ip behave exactly like before:
+    a denied authz check still gets the generic denied_access reason."""
+    result = signal({
+        "type": "io.confluent.kafka.server/authorization",
+        "methodName": "kafka.Authorize",
+        "granted": False,
+    })
+    assert result["signal_type"] == "action_required"
+    assert result["signal_reason"] == "denied_access"
+
+
+def test_ipfilter_extraction_from_raw_cloudevent():
+    """End-to-end: a raw CloudEvent with ipfilterAuthorization populates
+    ipfilter_client_ip + ipfilter_resource_group columns and routes to
+    ip_filter_deny."""
+    event = {
+        "id": "evt-ipfilter-1",
+        "specversion": "1.0",
+        "source": "crn://confluent.cloud/organization=org1",
+        "type": "io.confluent.cloud/authorization",
+        "time": "2026-06-09T10:00:00.000Z",
+        "data": {
+            "methodName": "ip-filter.Authorize",
+            "authenticationInfo": {"principal": "User:admin@example.com"},
+            "authorizationInfo": {
+                "granted": False,
+                "ipfilterAuthorization": {
+                    "client_ip": "198.51.100.7",
+                    "resource_group": "MANAGEMENT",
+                },
+            },
+            "result": {"status": "DENIED"},
+        },
+    }
+    normalized = normalize_event(event)
+    assert normalized["ipfilter_client_ip"] == "198.51.100.7"
+    assert normalized["ipfilter_resource_group"] == "MANAGEMENT"
+    assert normalized["signal_type"] == "action_required"
+    assert normalized["signal_reason"] == "ip_filter_deny"
+    assert "198.51.100.7" in normalized["decision_reason"]
+
+
 def test_bind_role_extraction_from_request_data():
     """End-to-end normalization: a raw CloudEvent with role_name in
     request.data populates the auth_role + auth_role_target columns and
