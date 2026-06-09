@@ -102,6 +102,10 @@ class AuditEventDetailOut(AuditEventListOut):
     ipfilter_resource_group: str | None = None
     at_justification: str | None = None
     at_operator: str | None = None
+    auth_mechanism: str | None = None
+    identity: str | None = None
+    original_principal: str | None = None
+    assigned_principals: str | None = None
 
 
 AuditEventOut = AuditEventListOut

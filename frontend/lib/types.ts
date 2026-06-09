@@ -62,6 +62,16 @@ export type AuditEvent = {
   raw_payload_json?: string;
   rbac_role?: string | null;
   rbac_scope?: string | null;
+  auth_role?: string | null;
+  auth_role_target?: string | null;
+  ipfilter_client_ip?: string | null;
+  ipfilter_resource_group?: string | null;
+  at_justification?: string | null;
+  at_operator?: string | null;
+  auth_mechanism?: string | null;
+  identity?: string | null;
+  original_principal?: string | null;
+  assigned_principals?: string | null;
   plane_type: string;
   suppressed?: boolean;
 };

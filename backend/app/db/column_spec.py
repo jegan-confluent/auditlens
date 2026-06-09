@@ -71,4 +71,15 @@ AUDIT_EVENT_COLUMNS: dict[str, str] = {
     # who accessed customer resources and the business justification.
     "at_justification": "TEXT",
     "at_operator": "VARCHAR(255)",
+    # Auth mechanism / identity fields (Feature 6). flatten_audit already
+    # extracts these from authenticationInfo but the values were dropped
+    # before DB write. Persisting them lets the UI render an "Auth
+    # Details" section and the events filter narrow by mechanism.
+    "auth_mechanism": "VARCHAR(50)",
+    "identity": "VARCHAR(512)",
+    "original_principal": "VARCHAR(512)",
+    # assigned_principals stored as a JSON-encoded TEXT for portability
+    # across Postgres/SQLite (Postgres-native JSONB would need a dialect
+    # branch — the read pattern is "render in detail drawer" only).
+    "assigned_principals": "TEXT",
 }

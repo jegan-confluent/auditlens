@@ -605,6 +605,48 @@ def normalize_event(payload: dict[str, Any]) -> dict[str, Any]:
         or _ipfilter_block.get("resourceGroup")
     )
 
+    # Auth mechanism + identity fields (Feature 6). flatten_audit lifts
+    # these from authenticationInfo, but raw CloudEvents (tests +
+    # minimal_normalize path) need a direct dig. assigned_principals is
+    # JSON-encoded on the way to the column to keep the row dialect-
+    # agnostic — readers parse the JSON when rendering the detail drawer.
+    _authn_info = _data_dict.get("authenticationInfo") if isinstance(_data_dict.get("authenticationInfo"), dict) else {}
+    _authn_meta = _authn_info.get("metadata") if isinstance(_authn_info.get("metadata"), dict) else {}
+    _auth_mechanism = (
+        payload.get("auth_mechanism")
+        or _authn_meta.get("mechanism")
+    )
+    _identity_value = (
+        payload.get("identity")
+        or _authn_info.get("identity")
+    )
+    _original_principal = (
+        payload.get("original_principal")
+        or payload.get("originalPrincipal")
+        or _authn_info.get("originalPrincipal")
+    )
+    if isinstance(_original_principal, dict):
+        # CloudEvents schema represents originalPrincipal as a principal
+        # object (user/sa/externalAccount). Serialize defensively.
+        try:
+            _original_principal = orjson.dumps(_original_principal).decode("utf-8")
+        except Exception:
+            _original_principal = str(_original_principal)
+    _assigned_principals_raw = (
+        payload.get("assigned_principals")
+        or payload.get("assignedPrincipals")
+        or (_authz_info.get("assignedPrincipals") if isinstance(_authz_info, dict) else None)
+    )
+    if _assigned_principals_raw is None:
+        _assigned_principals_json: str | None = None
+    elif isinstance(_assigned_principals_raw, str):
+        _assigned_principals_json = _assigned_principals_raw
+    else:
+        try:
+            _assigned_principals_json = orjson.dumps(_assigned_principals_raw).decode("utf-8")
+        except Exception:
+            _assigned_principals_json = None
+
     # Access Transparency extraction (Feature 4). Populated only when
     # event type is io.confluent.cloud/access-transparency; otherwise
     # both fields stay NULL. The classifier already routes AT events to
@@ -667,6 +709,10 @@ def normalize_event(payload: dict[str, Any]) -> dict[str, Any]:
         "ipfilter_resource_group": _as_text(_ipfilter_resource_group) or None,
         "at_justification": _as_text(_at_justification) or None,
         "at_operator": _as_text(_at_operator) or None,
+        "auth_mechanism": _as_text(_auth_mechanism) or None,
+        "identity": _as_text(_identity_value) or None,
+        "original_principal": _as_text(_original_principal) or None,
+        "assigned_principals": _assigned_principals_json,
     }
     summary = _as_text(payload.get("summary") or payload.get("message"))
     if not summary:

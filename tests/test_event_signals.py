@@ -701,6 +701,120 @@ def test_access_transparency_endpoint_returns_only_at_events():
         assert "ABC" in item["at_justification"]
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# Feature 6: auth_mechanism / identity / original_principal /
+#            assigned_principals persistence
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def test_mtls_auth_mechanism_is_stored():
+    """An MTLS-authenticated event must persist auth_mechanism=MTLS."""
+    event = {
+        "id": "evt-mtls-1",
+        "specversion": "1.0",
+        "type": "io.confluent.kafka.server/authentication",
+        "time": "2026-06-09T10:00:00.000Z",
+        "data": {
+            "methodName": "kafka.Authentication",
+            "authenticationInfo": {
+                "principal": "User:u-mtls",
+                "metadata": {"mechanism": "MTLS", "identifier": "cn=client-app"},
+                "identity": "crn://confluent.cloud/organization=org1/identity-provider=idp/identity=u-mtls",
+            },
+            "result": {"status": "SUCCESS"},
+        },
+    }
+    normalized = normalize_event(event)
+    assert normalized["auth_mechanism"] == "MTLS"
+
+
+def test_sasl_oauthbearer_with_identity_crn_stored():
+    """SASL_OAUTHBEARER events carry an `identity` CRN — both fields persist."""
+    event = {
+        "id": "evt-oauth-1",
+        "specversion": "1.0",
+        "type": "io.confluent.kafka.server/authentication",
+        "time": "2026-06-09T10:00:00.000Z",
+        "data": {
+            "methodName": "kafka.Authentication",
+            "authenticationInfo": {
+                "principal": "User:u-oauth",
+                "metadata": {"mechanism": "SASL_OAUTHBEARER"},
+                "identity": "crn://confluent.cloud/organization=org1/identity-provider=okta/identity=u-oauth",
+            },
+            "result": {"status": "SUCCESS"},
+        },
+    }
+    normalized = normalize_event(event)
+    assert normalized["auth_mechanism"] == "SASL_OAUTHBEARER"
+    assert normalized["identity"] == (
+        "crn://confluent.cloud/organization=org1/identity-provider=okta/identity=u-oauth"
+    )
+
+
+def test_original_principal_is_stored_when_present():
+    """When one principal acts on behalf of another (assume-role pattern),
+    originalPrincipal is set in authenticationInfo and must persist."""
+    event = {
+        "id": "evt-orig-1",
+        "specversion": "1.0",
+        "type": "io.confluent.cloud/request",
+        "time": "2026-06-09T10:00:00.000Z",
+        "data": {
+            "methodName": "CreateEnvironment",
+            "authenticationInfo": {
+                "principal": {"confluentUser": {"resourceId": "u-impersonator"}},
+                "originalPrincipal": {"confluentUser": {"resourceId": "u-original"}},
+            },
+            "result": {"status": "SUCCESS"},
+        },
+    }
+    normalized = normalize_event(event)
+    # Stored as JSON-encoded principal object; assert the original user
+    # resourceId is present in the serialized blob.
+    assert normalized["original_principal"] is not None
+    assert "u-original" in normalized["original_principal"]
+
+
+def test_auth_mechanism_filter_returns_only_matching_events(tmp_path):
+    """End-to-end /events?auth_mechanism=MTLS — the filter pushes into
+    the SQL WHERE clause and excludes non-MTLS rows."""
+    from backend.app.services.event_service import list_events_result
+
+    engine = build_engine(f"sqlite:///{tmp_path / 'auditlens.db'}")
+    init_db(engine)
+    TestSession = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+    with TestSession() as db:
+        create_event(db, {
+            "id": "mtls-1",
+            "type": "io.confluent.kafka.server/authentication",
+            "data": {
+                "methodName": "kafka.Authentication",
+                "authenticationInfo": {
+                    "principal": "User:u-mtls",
+                    "metadata": {"mechanism": "MTLS"},
+                },
+                "result": {"status": "SUCCESS"},
+            },
+        })
+        create_event(db, {
+            "id": "plain-1",
+            "type": "io.confluent.kafka.server/authentication",
+            "data": {
+                "methodName": "kafka.Authentication",
+                "authenticationInfo": {
+                    "principal": "User:u-plain",
+                    "metadata": {"mechanism": "SASL_PLAIN"},
+                },
+                "result": {"status": "SUCCESS"},
+            },
+        })
+        result = list_events_result(db, mode="audit_trail", auth_mechanism="MTLS")
+        assert result.total == 1
+        assert len(result.items) == 1
+        assert result.items[0].auth_mechanism == "MTLS"
+
+
 def test_non_at_event_does_not_populate_at_fields():
     """Events of other CloudEvents types must keep at_justification +
     at_operator NULL even if the raw payload happens to have a

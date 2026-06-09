@@ -214,6 +214,15 @@ export default function EventDetailDrawer({ event, onClose, onTriage, triageErro
         </section>
       ) : null}
 
+      {event.auth_mechanism || event.identity || event.original_principal ? (
+        <section className="why-this-matters" style={{ borderLeftColor: "#0ea5e9" }}>
+          <div className="eyebrow">Auth Details</div>
+          {event.auth_mechanism ? <div><div className="detail-label">Mechanism</div><strong>{event.auth_mechanism}</strong></div> : null}
+          {event.identity ? <div><div className="detail-label">Identity</div><strong style={{ wordBreak: "break-all" }}>{event.identity}</strong></div> : null}
+          {event.original_principal ? <div><div className="detail-label">Original Principal</div><strong style={{ wordBreak: "break-all" }}>{event.original_principal}</strong></div> : null}
+        </section>
+      ) : null}
+
       <div className="triage-actions">
         {triageActions.map((action) => (
           <button key={action.status} onClick={() => onTriage?.(action.status)}>{action.label}</button>

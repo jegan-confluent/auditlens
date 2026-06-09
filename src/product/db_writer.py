@@ -205,6 +205,12 @@ audit_events = Table(
     # by Confluent personnel when accessing customer resources.
     Column("at_justification", Text, nullable=True),
     Column("at_operator", String(255), nullable=True),
+    # Auth mechanism + identity fields. JSON-encoded string for
+    # assigned_principals to keep the writer dialect-agnostic.
+    Column("auth_mechanism", String(50), nullable=True),
+    Column("identity", String(512), nullable=True),
+    Column("original_principal", String(512), nullable=True),
+    Column("assigned_principals", Text, nullable=True),
     Column("summary", Text, nullable=False),
     Column("raw_payload_json", Text, nullable=False),
     Column("is_failure", Boolean, nullable=False),

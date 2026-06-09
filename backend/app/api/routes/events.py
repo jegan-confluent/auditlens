@@ -122,6 +122,11 @@ def events(
         max_length=45,
         description="Filter by ipfilterAuthorization.client_ip — non-NULL marks IP-filter-mediated authz decisions.",
     ),
+    auth_mechanism: str | None = Query(
+        default=None,
+        max_length=50,
+        description="Filter by auth mechanism (SASL_PLAIN, MTLS, SASL_OAUTHBEARER, etc.).",
+    ),
     db: Session = Depends(get_db),
 ):
     if show_noise:
@@ -215,6 +220,7 @@ def events(
             plane=plane,
             auth_role=auth_role,
             ipfilter_client_ip=ipfilter_client_ip,
+            auth_mechanism=auth_mechanism,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
