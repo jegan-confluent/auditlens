@@ -185,6 +185,21 @@ def minimal_normalize(event: dict[str, Any]) -> dict[str, Any]:
     if not actor:
         actor = "unknown"
 
+    # MDS numeric-principal swap. Kafka audit-log events arrive as
+    # "User:8893428" — a Kafka-broker MDS numeric ID space that the IAM
+    # cache cannot resolve. The same authenticationInfo block carries
+    # `principalResourceId` in IAM-shaped form ("u-79z161" / "sa-xyz"),
+    # which IS in the cache. Mirror the swap that flatten_audit already
+    # does on the full path (event_normalization.py:991-999) so the noise
+    # lane benefits from the warmed IAM cache without any live HTTP calls.
+    principal_resource_id = auth_info.get("principalResourceId") or event.get("principalResourceId")
+    if principal_resource_id and isinstance(principal_resource_id, str):
+        pri = principal_resource_id.strip()
+        if pri.startswith(("u-", "sa-")):
+            numeric_actor = actor[5:] if actor.startswith("User:") else actor
+            if numeric_actor.isdigit() or actor.startswith("User:"):
+                actor = pri
+
     # is_denied: authorizationInfo.granted is the canonical signal; fall
     # back to top-level granted (set by flatten_audit) and the explicit
     # is_denied flag. None means "no opinion" → not denied.

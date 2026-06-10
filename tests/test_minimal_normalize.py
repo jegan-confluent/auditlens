@@ -323,6 +323,139 @@ def test_minimal_normalize_skips_enrichment_for_unknown_actor(monkeypatch):
     assert calls == []
 
 
+# ───────────── MDS numeric → IAM principalResourceId swap ──────────────
+
+
+def _raw_kafka_authentication_with_mds_principal() -> dict:
+    """Production-shaped kafka.Authentication noise event — MDS numeric
+    principal alongside the IAM principalResourceId, exactly as Kafka
+    brokers emit them."""
+    return {
+        "id": "evt-auth-mds-1",
+        "specversion": "1.0",
+        "type": "io.confluent.kafka.server/authentication",
+        "time": "2026-06-10T10:30:00.000Z",
+        "data": {
+            "methodName": "kafka.Authentication",
+            "authenticationInfo": {
+                "principal": "User:2020737",
+                "principalResourceId": "u-6zon76",
+                "identity": "crn://confluent.cloud/identity=u-6zon76",
+            },
+            "result": {"status": "SUCCESS"},
+            "clientAddress": [{"ip": "10.0.0.5"}],
+        },
+    }
+
+
+def test_minimal_normalize_swaps_mds_numeric_for_principal_resource_id(monkeypatch):
+    """User:8893428-style MDS numeric IDs must be replaced by the
+    co-located principalResourceId so the IAM cache can resolve them."""
+    from src.product import event_normalization as evnorm
+
+    captured = {}
+
+    def fake_enrich(actor, subject="", subject_type=""):
+        captured["actor"] = actor
+        return {
+            "actor_id": actor,
+            "actor_display_name": "Jegan Nagarajan",
+            "actor_email": "jnagarajan@confluent.io",
+            "actor_source": "confluent_api",
+            "actor_confidence": "high",
+        }
+
+    monkeypatch.setattr(evnorm, "enrich_actor", fake_enrich)
+    out = minimal_normalize(_raw_kafka_authentication_with_mds_principal())
+    assert out["actor"] == "u-6zon76"  # swapped from "User:2020737"
+    assert captured["actor"] == "u-6zon76"  # IAM was queried with the IAM ID
+    assert out["actor_display_name"] == "Jegan Nagarajan"
+    assert out["actor_email"] == "jnagarajan@confluent.io"
+
+
+def test_minimal_normalize_swap_handles_service_account_resource_id(monkeypatch):
+    """`sa-xxx` resource IDs are valid IAM keys — same swap behavior."""
+    from src.product import event_normalization as evnorm
+
+    event = _raw_kafka_authentication_with_mds_principal()
+    event["data"]["authenticationInfo"]["principalResourceId"] = "sa-monitoring"
+
+    def fake_enrich(actor, subject="", subject_type=""):
+        return {
+            "actor_id": actor,
+            "actor_display_name": "Monitoring SA",
+            "actor_email": None,
+            "actor_source": "confluent_api",
+            "actor_confidence": "high",
+        }
+
+    monkeypatch.setattr(evnorm, "enrich_actor", fake_enrich)
+    out = minimal_normalize(event)
+    assert out["actor"] == "sa-monitoring"
+    assert out["actor_display_name"] == "Monitoring SA"
+
+
+def test_minimal_normalize_no_swap_when_principal_is_already_iam_shaped(monkeypatch):
+    """When the principal is already u-xxx / sa-xxx (no User: prefix and
+    not pure digits), the swap must NOT fire — the row keeps the
+    original principal as the actor."""
+    from src.product import event_normalization as evnorm
+
+    event = {
+        "id": "evt-auth-clean-1",
+        "data": {
+            "methodName": "kafka.Authentication",
+            "authenticationInfo": {
+                "principal": "sa-realprincipal",
+                # Stray principalResourceId pointing somewhere else —
+                # should NOT clobber the already-clean principal.
+                "principalResourceId": "u-shouldnotwin",
+            },
+            "result": {"status": "SUCCESS"},
+        },
+    }
+
+    def fake_enrich(actor, subject="", subject_type=""):
+        return {
+            "actor_source": "confluent_api",
+            "actor_display_name": "Some User",
+            "actor_email": None,
+        }
+
+    monkeypatch.setattr(evnorm, "enrich_actor", fake_enrich)
+    out = minimal_normalize(event)
+    assert out["actor"] == "sa-realprincipal"  # unchanged
+
+
+def test_minimal_normalize_no_swap_without_principal_resource_id(monkeypatch):
+    """When principalResourceId is absent, the raw numeric principal
+    stays — enrich_actor returns a fallback (display_name=None)."""
+    from src.product import event_normalization as evnorm
+
+    event = {
+        "id": "evt-mds-only-1",
+        "data": {
+            "methodName": "kafka.Authentication",
+            "authenticationInfo": {"principal": "User:99999999"},
+            "result": {"status": "SUCCESS"},
+        },
+    }
+
+    def fallback_enrich(actor, subject="", subject_type=""):
+        # The cache won't hit on a raw numeric ID — fall through.
+        return {
+            "actor_source": "fallback",
+            "actor_display_name": actor,
+            "actor_email": None,
+        }
+
+    monkeypatch.setattr(evnorm, "enrich_actor", fallback_enrich)
+    out = minimal_normalize(event)
+    assert out["actor"] == "User:99999999"  # no swap available
+    assert out["actor_display_name"] is None
+    assert out["actor_email"] is None
+
+
 def test_data_is_string_not_dict_does_not_raise():
     """Some upstream test fixtures stash data as JSON-encoded string;
     minimal_normalize must treat it as absent rather than crashing."""
