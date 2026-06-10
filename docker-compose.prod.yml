@@ -631,8 +631,6 @@ services:
       - no-new-privileges:true
 
   mcp-server:
-    profiles:
-      - future
     build:
       context: .
       dockerfile: src/mcp/Dockerfile
