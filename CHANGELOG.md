@@ -746,3 +746,183 @@ work only.
 - The audit.* subject filter is a string-prefix check, not config-driven. If `AUDIT_*_TOPIC` env vars are rewritten to a non-`audit.` prefix, the UI subject list will be empty even though SR is healthy
 - Untracked at repo root: `create.sh`, `setup.sh`, `updated.sh` and `docs/2025-02-15/`, `docs/2025-12-06/`. Pre-existing at session start; not investigated, not committed
 - Pre-commit commit `bafabab` (initial commit attempt this session for the docs scrub) appears to have been rewritten out-of-band into `0b11708` with a wider commit message. Final tree state is consistent — flagging only because it didn't come from my Bash calls
+
+## [2026-06-10] Session [16]
+
+### Fixed
+- Flink stream-output DDL silently produced NULL event_time
+  (CAST(`timestamp` AS BIGINT) on an ISO-8601 STRING) — watermark
+  never advanced and downstream Flink queries returned zero rows.
+  Now: TO_TIMESTAMP(REPLACE(`timestamp`, 'T', ' '), 'yyyy-MM-dd HH:mm:ss').
+  Why: blocked every customer who copy-pasted the DDL from Settings.
+  Files: frontend/app/settings/components/StreamOutputTab.tsx
+
+### Added
+- Privilege-escalation alert: BindRoleForPrincipal granting Org/Env/
+  CloudClusterAdmin fires signal_reason=privilege_escalation with the
+  role + target in decision_reason. flatten_audit + normalize_event
+  now persist auth_role + auth_role_target; /events filter accepts
+  auth_role. Migration 0027.
+  Why: Splunk-blog top-listed alert; rbacAuthorization.role was being
+  dropped before DB write.
+  Files: src/product/event_normalization.py, src/product/event_signals.py,
+         backend/app/db/{column_spec,models}.py, src/product/db_writer.py,
+         backend/alembic/versions/0027_add_auth_role_fields.py,
+         backend/app/services/event_service.py,
+         backend/app/api/routes/events.py, backend/app/schemas/event.py,
+         tests/test_event_signals.py (6 new tests)
+
+- IP-filter denial signal: ipfilterAuthorization.{client_ip,
+  resource_group} now persisted; classifier fires
+  signal_reason=ip_filter_deny BEFORE generic denied_access so the
+  alert payload carries the actual client IP. Migration 0028.
+  Why: Best-practice alert recipe; the entire ipfilterAuthorization
+  subtree was being dropped, IP-policy denials looked identical to
+  ACL denials in the UI.
+  Files: same set + backend/alembic/versions/0028_add_ipfilter_fields.py
+         (4 new tests)
+
+- Access Transparency dedicated view: new GET /access-transparency
+  route + Next.js page /access-transparency surfaces operator +
+  business justification per row. Compliance-driven (DORA/SOX/GDPR/
+  FCA). at_justification (TEXT) + at_operator (VARCHAR(255)) columns
+  added (migration 0029); nav entry added after Auth Analytics.
+  Why: customers ask for "who-accessed-what-and-why" per Access
+  Transparency PRD; AuditLens classified the type but had no view.
+  Files: backend/app/api/routes/access_transparency.py (new),
+         frontend/app/access-transparency/page.tsx (new),
+         backend/alembic/versions/0029_add_access_transparency_fields.py,
+         backend/app/main.py (router registration),
+         frontend/components/NavLinks.tsx (4 new tests)
+
+- Auth-failure burst detector: per-actor sliding-window counter
+  (AUTH_FAILURE_BURST_COUNT=5 / AUTH_FAILURE_BURST_WINDOW_SECONDS=300
+  defaults) fires Slack/Teams alerts via notifier.send_system_alert
+  on burst, then resets the window. Distinct from src/anomaly/
+  rate_tracker.py (which emits to audit.alerts.v1 Kafka topic).
+  Why: Nestle/Inditex FFs ask for auth-burst chat alerts immediately,
+  not via SIEM round-trip.
+  Files: src/product/burst_detector.py (new), audit_forwarder.py
+         (env vars + detector init + hot-path .record()),
+         .env.example, tests/test_burst_detector.py (7 new tests)
+
+- auth_mechanism / identity / original_principal / assigned_principals
+  persistence: flatten_audit already extracted these from
+  authenticationInfo but they were dropped before DB write. Migration
+  0030 adds the four columns; /events accepts auth_mechanism filter;
+  event detail drawer gains an Auth Details section.
+  Why: TD Bank (FF-16131) "auth_type to distinguish local vs SSO";
+  Inditex JSONPath filter case; identity CRN required for AT.
+  Files: same set + backend/alembic/versions/0030_add_auth_mechanism_identity_fields.py,
+         frontend/components/EventDetailDrawer.tsx,
+         frontend/lib/types.ts (4 new tests)
+
+- AWS Secrets Manager integration (src/core/secrets.py):
+  get_secret() / get_secret_dict() / validate_secrets() /
+  resolve_asm_reference(). ASM-first with 15-min TTLCache; env-var
+  fallback when AWS_SECRETS_MANAGER_ENABLED=false or boto3 fails
+  (logs WARNING, not ERROR). Wired into forwarder config helper,
+  Pydantic Settings @model_validator, notifier asm:-prefix path,
+  docker-compose env block (api + forwarder).
+  Why: removes HIGH-sensitivity values from on-disk .env on the EC2
+  host; keeps local dev working without AWS creds.
+  Files: src/core/{__init__,secrets}.py (new),
+         scripts/secrets/create_secrets.sh (new),
+         src/forwarder/config.py, audit_forwarder.py,
+         backend/app/core/config.py, src/notifications/notifier.py,
+         docker-compose.prod.yml, .gitignore,
+         tests/test_secrets.py (14 new tests)
+
+- Operator tooling for the secrets migration: idempotent IAM role
+  setup script (AuditLensSecretsManagerPolicy + AuditLensEC2Role +
+  AuditLensEC2Profile), Makefile targets (secrets-create /
+  secrets-dry-run / secrets-rotate / secrets-enable), and a 5-line
+  README subsection under Configuration.
+  Why: turn-it-on path for the ASM feature in prod.
+  Files: infra/aws/setup_secrets_manager_role.sh (new), Makefile,
+         README.md, .gitignore
+
+### Removed
+- (none; this session was purely additive)
+
+### Architecture Decisions
+- Per-feature commits over big-bang commits (CLAUDE.md rule 65).
+  Six features → six commits; secrets migration → three commits
+  (Phase 1+2, Phase 3, Phase 4+5+7). Each commit shipped pytest-green.
+  Why: easier rollback; each fix independently reviewable.
+  Impact: future migrations should follow the same cadence — split
+  >3-file scope into phases, run pytest after each phase, commit per
+  phase.
+
+- AWS Secrets Manager wrapped behind src.core.secrets.get_secret()
+  with env-var fallback (NOT a hard cutover). Setting
+  AWS_SECRETS_MANAGER_ENABLED=false reverts to legacy .env behaviour
+  with no code change.
+  Why: zero-risk rollout — flip the flag back off if ASM has an outage
+  during cutover.
+  Impact: every new HIGH secret should be added to
+  src/core/secrets.py:_ENV_TO_ASM AND the create_secrets.sh script,
+  not just .env.
+
+- "asm:<secret>#<key>" notation in notifications.yml (rather than
+  restructuring the file). Resolution happens at notifier load time
+  via resolve_asm_reference().
+  Why: lets operators keep notifications.yml on disk for filters,
+  rate-limits, schedule config while moving only the webhook URL into
+  ASM.
+  Impact: notifications.yml stays the contract; ASM is opt-in per
+  destination.
+
+- Augmented payload pattern for classifier input in normalize_event:
+  when methodName lives at data.methodName (raw CloudEvents) and
+  auth_role/ipfilter_* are extracted from request.data, normalize_event
+  builds an augmented dict before calling decision_snapshot so the
+  classifier helper _method_name_lower() (top-level keys only) can see
+  them. Required because flatten_audit and normalize_event historically
+  expected pre-flattened input but tests + minimal_normalize bypass
+  flatten_audit.
+  Impact: future classifier branches that need new lifted fields must
+  also lift them into the augmented payload here, OR teach the
+  classifier helper to dig into payload["data"][...]; we picked the
+  former for surgical scope this session.
+
+### Known Issues / Not Done
+- EC2 deploy NOT executed at the end of either workstream. The first
+  attempt (`make deploy` after the 6 features) timed out on SSH to
+  98.95.144.160:22 (network-side, no code failure). The second
+  workstream explicitly skipped deploy per prompt — EC2 IAM role
+  must be attached before turning AWS_SECRETS_MANAGER_ENABLED=true
+  in prod.
+  Why deferred: network reachability + prerequisite IAM step.
+
+- Pyright reports "Import src.core could not be resolved" on the new
+  modules; pytest imports work fine, so this is Pyright path-config
+  drift (not a runtime issue). Pyright config tweak deferred.
+
+- pre-commit hook .git/hooks/commit-msg uses GNU sed -i syntax which
+  is broken on macOS. Worked around by omitting Co-Authored-By from
+  commit messages (the hook would strip them anyway). Fix deferred —
+  it's the user's local hook, not in the repo.
+
+- README.md was not yet fully reviewed for the new Auth Details
+  drawer section or the IP-filter / AT pages. Out of scope for this
+  session.
+
+- frontend/components/EventDetailDrawer.tsx and other frontend changes
+  not visually verified — rebuild + browser smoke-test happens on
+  next deploy. Per rule 29, I did not claim "UI verified" anywhere.
+
+- AWS Secrets Manager scripts/IAM script not executed against real
+  AWS — they're idempotent and dry-runnable, but the first prod
+  execution will surface anything I missed.
+
+### Test status
+- Baseline at session start: 729 passed, 5 skipped (turned out to be
+  754 carried forward from prior session — confirmed via re-run).
+- After 6 features: 754 passed, 5 skipped (+25 new tests across
+  features 2–6; feature 1 was frontend-only).
+- After Secrets Manager migration: 768 passed, 5 skipped (+14
+  secrets tests).
+- Migrations applied: 0027 (auth_role) → 0028 (ipfilter) → 0029 (AT)
+  → 0030 (auth_mechanism). All idempotent.
+- 9 commits pushed to github.com:jegan-confluent/auditlens.git main.

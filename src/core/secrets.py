@@ -193,11 +193,11 @@ def get_secret(name: str, *, fallback_env: str | None = None) -> str | None:
 # ---------------------------------------------------------------------
 _ENV_TO_ASM: dict[str, tuple[str, str]] = {
     "AUDIT_BOOTSTRAP": ("confluent", "audit_bootstrap"),
-    "AUDIT_API_KEY": ("confluent", "audit_api_key"),
-    "AUDIT_API_SECRET": ("confluent", "audit_api_secret"),
+    "AUDIT_API_KEY": ("confluent", "cloud_api_key"),
+    "AUDIT_API_SECRET": ("confluent", "cloud_api_secret"),
     "DEST_BOOTSTRAP": ("confluent", "dest_bootstrap"),
-    "DEST_API_KEY": ("confluent", "dest_api_key"),
-    "DEST_API_SECRET": ("confluent", "dest_api_secret"),
+    "DEST_API_KEY": ("confluent", "cloud_api_key"),
+    "DEST_API_SECRET": ("confluent", "cloud_api_secret"),
     "CONFLUENT_CLOUD_API_KEY": ("confluent", "cloud_api_key"),
     "CONFLUENT_CLOUD_API_SECRET": ("confluent", "cloud_api_secret"),
     "CONFLUENT_API_KEY": ("confluent", "api_key"),
