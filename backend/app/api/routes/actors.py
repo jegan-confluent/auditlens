@@ -1,8 +1,9 @@
 """Actor endpoints — IP baseline and narrative story."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, Query
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from backend.app.db.database import get_db
@@ -12,6 +13,12 @@ from backend.app.services.narrative_service import get_actor_narrative
 
 router = APIRouter(tags=["actors"])
 
+# Display-name lookups walk audit_events ORDER BY timestamp DESC — bound
+# the scan window (the IAM cache refreshes the name on every recent event
+# anyway) and cap per-query budget so a missing actor can't tie up a worker.
+_DISPLAY_NAME_LOOKBACK_DAYS = 7
+_STMT_TIMEOUT_MS = 5_000
+
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
@@ -19,6 +26,9 @@ def _now() -> datetime:
 
 @router.get("/actors/{actor_id}/ip-baseline")
 def get_actor_ip_baseline(actor_id: str, db: Session = Depends(get_db), _auth: None = Depends(_require_viewer)) -> dict:
+    if db.get_bind().dialect.name == "postgresql":
+        db.execute(text(f"SET LOCAL statement_timeout = {_STMT_TIMEOUT_MS}"))
+
     rows = (
         db.query(ActorIpBaseline)
         .filter(ActorIpBaseline.actor == actor_id)
@@ -27,8 +37,8 @@ def get_actor_ip_baseline(actor_id: str, db: Session = Depends(get_db), _auth: N
     )
 
     now = _now()
-    from datetime import timedelta
     cutoff_24h_dt = now - timedelta(hours=24)
+    display_lookback = now - timedelta(days=_DISPLAY_NAME_LOOKBACK_DAYS)
 
     new_ips_last_24h = sum(
         1 for r in rows
@@ -37,11 +47,13 @@ def get_actor_ip_baseline(actor_id: str, db: Session = Depends(get_db), _auth: N
     trusted_ips_configured = any(r.is_trusted for r in rows)
 
     # Resolve display name from the most recent audit event for this actor
+    # within the bounded lookback window.
     actor_display_name: str | None = None
     recent = (
         db.query(AuditEvent.actor_display_name)
         .filter(AuditEvent.actor == actor_id)
         .filter(AuditEvent.actor_display_name.isnot(None))
+        .filter(AuditEvent.timestamp >= display_lookback)
         .order_by(AuditEvent.timestamp.desc())
         .first()
     )

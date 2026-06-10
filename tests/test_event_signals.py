@@ -699,6 +699,24 @@ def test_access_transparency_endpoint_returns_only_at_events():
         item = body["items"][0]
         assert item["at_operator"] == "confluent-ops@confluent.io"
         assert "ABC" in item["at_justification"]
+        # Issue 4: the response model must expose actor enrichment keys
+        # so the frontend can render a human display name (None here
+        # because the seed didn't set IAM enrichment columns).
+        assert "actor_display_name" in item
+        assert "actor_email" in item
+        assert item["actor_display_name"] is None
+        assert item["actor_email"] is None
+
+        # Issue 6: time window cap is rejected at the route boundary.
+        oob = client.get("/access-transparency?days=999")
+        assert oob.status_code == 422
+
+        # Issue 6: events outside the (default 7d) window are excluded.
+        # The fixture seeded an AT event at 2026-06-09; a 1-day window
+        # from "now" should return zero matches.
+        narrow = client.get("/access-transparency?days=1")
+        assert narrow.status_code == 200
+        assert narrow.json()["total"] == 0
 
 
 # ─────────────────────────────────────────────────────────────────────────

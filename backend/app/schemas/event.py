@@ -136,6 +136,8 @@ class AuditNoiseListOut(BaseModel):
     id: int
     timestamp: datetime
     actor: str | None = None
+    actor_display_name: str | None = None
+    actor_email: str | None = None
     action: str | None = None
     result: str | None = None
     resource_name: str | None = None

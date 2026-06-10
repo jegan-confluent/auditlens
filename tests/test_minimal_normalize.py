@@ -22,6 +22,8 @@ from src.product.event_normalization import (
 EXPECTED_FIELDS = {
     "timestamp",
     "actor",
+    "actor_display_name",
+    "actor_email",
     "action",
     "result",
     "resource_name",
@@ -102,8 +104,6 @@ def test_no_decision_or_enrichment_columns_present():
         "signal_reason",
         "actor_type",
         "actor_id",
-        "actor_display_name",
-        "actor_email",
         "actor_source",
         "actor_confidence",
         "resource_type",
@@ -225,6 +225,102 @@ def test_non_dict_input_does_not_raise():
     out = minimal_normalize(None)  # type: ignore[arg-type]
     assert set(out.keys()) == EXPECTED_FIELDS
     assert out["actor"] == "unknown"
+
+
+# ─────────────────────── actor enrichment (Issue 2) ─────────────────────
+
+
+def _raw_kafka_authentication_event() -> dict:
+    return {
+        "id": "evt-auth-1",
+        "specversion": "1.0",
+        "source": "crn://confluent.cloud/organization=org1/environment=env-aaa/kafka=lkc-bbb",
+        "type": "io.confluent.kafka.server/authentication",
+        "time": "2026-01-15T10:30:00.000Z",
+        "data": {
+            "methodName": "kafka.Authentication",
+            "authenticationInfo": {
+                "principal": {
+                    "confluentServiceAccount": {"resourceId": "sa-xyz999"},
+                },
+            },
+            "result": {"status": "SUCCESS"},
+            "clientAddress": [{"ip": "10.0.0.5"}],
+        },
+    }
+
+
+def test_minimal_normalize_returns_display_name_on_iam_hit(monkeypatch):
+    """kafka.Authentication → IAM cache resolves sa-xyz999 → display + email."""
+    from src.product import event_normalization as evnorm
+
+    def fake_enrich(actor, subject="", subject_type=""):
+        assert actor == "sa-xyz999"
+        return {
+            "actor_id": "sa-xyz999",
+            "actor_display_name": "Datadog Monitor SA",
+            "actor_email": "datadog@confluent.io",
+            "actor_source": "confluent_api",
+            "actor_confidence": "high",
+        }
+
+    monkeypatch.setattr(evnorm, "enrich_actor", fake_enrich)
+    out = minimal_normalize(_raw_kafka_authentication_event())
+    assert out["actor"] == "sa-xyz999"
+    assert out["actor_display_name"] == "Datadog Monitor SA"
+    assert out["actor_email"] == "datadog@confluent.io"
+
+
+def test_minimal_normalize_returns_none_on_fallback(monkeypatch):
+    """Cache miss / IAM fallback path → display + email are None."""
+    from src.product import event_normalization as evnorm
+
+    def fallback_enrich(actor, subject="", subject_type=""):
+        return {
+            "actor_id": actor,
+            "actor_display_name": actor,
+            "actor_email": None,
+            "actor_source": "fallback",
+            "actor_confidence": "low",
+        }
+
+    monkeypatch.setattr(evnorm, "enrich_actor", fallback_enrich)
+    out = minimal_normalize(_raw_kafka_authentication_event())
+    assert out["actor"] == "sa-xyz999"
+    assert out["actor_display_name"] is None
+    assert out["actor_email"] is None
+
+
+def test_minimal_normalize_never_raises_on_enrich_exception(monkeypatch):
+    """enrich_actor raising must not propagate; fields collapse to None."""
+    from src.product import event_normalization as evnorm
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("IAM HTTP exploded")
+
+    monkeypatch.setattr(evnorm, "enrich_actor", boom)
+    out = minimal_normalize(_raw_kafka_authentication_event())
+    assert out["actor"] == "sa-xyz999"
+    assert out["actor_display_name"] is None
+    assert out["actor_email"] is None
+
+
+def test_minimal_normalize_skips_enrichment_for_unknown_actor(monkeypatch):
+    """When actor falls back to 'unknown', enrich_actor must not be called."""
+    from src.product import event_normalization as evnorm
+
+    calls = []
+
+    def spy(*args, **kwargs):
+        calls.append(args)
+        return {"actor_source": "fallback", "actor_display_name": None}
+
+    monkeypatch.setattr(evnorm, "enrich_actor", spy)
+    out = minimal_normalize({})
+    assert out["actor"] == "unknown"
+    assert out["actor_display_name"] is None
+    assert out["actor_email"] is None
+    assert calls == []
 
 
 def test_data_is_string_not_dict_does_not_raise():

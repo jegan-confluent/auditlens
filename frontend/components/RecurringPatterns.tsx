@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { getPatterns, markPatternExpected, suppressPattern } from "../lib/api";
+import { looksLikeJsonActor, stripPrincipalPrefix } from "../lib/principal";
 import { formatResourceName } from "../lib/utils";
 import type { EventFilters } from "../lib/eventFilters";
 import type { EventPattern } from "../lib/types";
@@ -24,10 +25,8 @@ function truncate(value: string, max: number): string {
 }
 
 function formatPatternActor(actor: string): string {
-  if (actor.startsWith("{") || actor.startsWith("[")) return "Confluent (platform)";
-  if (actor.startsWith("User:")) return truncate(actor.slice(5), 40);
-  if (actor.startsWith("ServiceAccount:")) return truncate(actor.slice(15), 40);
-  return truncate(actor, 40);
+  if (looksLikeJsonActor(actor)) return "Confluent (platform)";
+  return truncate(stripPrincipalPrefix(actor), 40);
 }
 
 function isServiceAccount(actor_type: string | null | undefined): boolean {

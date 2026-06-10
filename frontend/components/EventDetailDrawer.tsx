@@ -1,9 +1,12 @@
 "use client";
 
 import type { AuditEvent } from "../lib/types";
+import {
+  displayActor as principalDisplay,
+  actorTooltip,
+  isServiceAccountActor,
+} from "../lib/principal";
 import SignalBadge from "./SignalBadge";
-
-const UNKNOWN_PRINCIPAL_LABELS = new Set(["unknown actor", "unknown user", "unknown service account", "unknown principal"]);
 
 function resolveClientTool(tool: string | null | undefined): string | null {
   if (!tool || !tool.trim()) return null;
@@ -12,7 +15,6 @@ function resolveClientTool(tool: string | null | undefined): string | null {
   if (t.startsWith("confluent-") || t.startsWith("adminclient-")) return null;
   return t;
 }
-const SERVICE_ACCOUNT_TYPES = new Set(["service_account", "serviceaccount", "service-account"]);
 const STALE_EVENT_THRESHOLD_MS = 2 * 60 * 60 * 1000; // 2 hours
 
 function displayAction(event: AuditEvent) {
@@ -25,31 +27,11 @@ function displayResource(event: AuditEvent) {
   return event.resource_display_short || event.resource_display || event.resource_type || "Unknown";
 }
 
-function isServiceAccount(event: AuditEvent): boolean {
-  const type = (event.actor_type || event.subject_type || "").toLowerCase();
-  if (SERVICE_ACCOUNT_TYPES.has(type)) return true;
-  const raw = (event.actor_raw_id || event.actor || "").toLowerCase();
-  return raw.startsWith("sa-") || raw.startsWith("user:sa-");
-}
-
 function displayActor(event: AuditEvent): { primary: string; secondary: string; isServiceAccount: boolean } {
-  const isSA = isServiceAccount(event);
-  const display = (event.actor_display_name || event.subject || event.actor || "").trim();
-  const raw = (event.actor_raw_id || event.subject || event.actor || "").trim();
-  const email = (event.actor_email || "").trim();
-  if (isSA) {
-    const primary = display && !UNKNOWN_PRINCIPAL_LABELS.has(display.toLowerCase()) ? display : raw || "Unknown service account";
-    const secondary = raw && raw !== primary ? raw : "";
-    return { primary, secondary, isServiceAccount: true };
-  }
-  if (email) {
-    const secondary = display && display !== email ? display : (raw && raw !== email ? raw : "");
-    return { primary: email, secondary, isServiceAccount: false };
-  }
-  if (display && !UNKNOWN_PRINCIPAL_LABELS.has(display.toLowerCase())) {
-    return { primary: display, secondary: raw && raw !== display ? raw : "", isServiceAccount: false };
-  }
-  return { primary: raw || "Unknown principal", secondary: "", isServiceAccount: false };
+  const primary = principalDisplay(event);
+  const raw = actorTooltip(event);
+  const secondary = raw && raw !== primary ? raw : "";
+  return { primary, secondary, isServiceAccount: isServiceAccountActor(event) };
 }
 
 function displaySummary(event: AuditEvent) {

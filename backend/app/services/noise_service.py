@@ -64,6 +64,8 @@ audit_events_noise = Table(
     ),
     Column("timestamp", DateTime(timezone=True), nullable=False),
     Column("actor", String(255), nullable=True),
+    Column("actor_display_name", String(255), nullable=True),
+    Column("actor_email", String(255), nullable=True),
     Column("action", String(255), nullable=True),
     Column("result", String(32), nullable=True),
     Column("resource_name", String(512), nullable=True),

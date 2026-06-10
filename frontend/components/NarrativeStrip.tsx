@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import type { SummaryResponse } from "../lib/types";
+import { stripPrincipalPrefix } from "../lib/principal";
 import { isConfluentInternalActor } from "../lib/utils";
 
 function resolveProductionQualifier(summary: SummaryResponse): string | null {
@@ -33,10 +34,7 @@ function resolveTopActor(summary: SummaryResponse): { display: string; count: nu
     .sort((a, b) => b.count - a.count);
   const top = ranked.find(r => r.display && !r.display.startsWith("{") && !isConfluentInternalActor(r.subject, r.display));
   if (!top) return null;
-  const d = top.display.startsWith("User:") ? top.display.slice(5)
-    : top.display.startsWith("ServiceAccount:") ? top.display.slice(15)
-    : top.display;
-  return { display: d, count: top.count };
+  return { display: stripPrincipalPrefix(top.display), count: top.count };
 }
 
 export default function NarrativeStrip({

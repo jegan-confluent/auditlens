@@ -1,3 +1,5 @@
+import { DEFAULT_TIME_WINDOW } from "./timeWindows";
+
 export type EventFilters = {
   mode: "decision" | "audit_trail";
   time_window: string;
@@ -17,14 +19,12 @@ export type EventFilters = {
   action: string;
 };
 
-// Default landing state = "Needs attention": last 12h, decision-mode,
-// action_required + attention events. action_required alone was too narrow
-// and hid common review-worthy activity (topic creates, API key changes,
-// ACL edits) that surface as signal=attention. The user can widen further
-// via the filter chips or narrow to action_required via the signal pills.
+// Default landing state = "Needs attention" with decision-mode + the
+// action_required + attention signal mix. Time window is the global
+// DEFAULT_TIME_WINDOW so dashboard, events, and actor activity all agree.
 export const defaultFilters: EventFilters = {
   mode: "decision",
-  time_window: "12h",
+  time_window: DEFAULT_TIME_WINDOW,
   resource_type: "",
   resource: "",
   cluster_name: "",

@@ -1,18 +1,16 @@
 import { Fragment, useMemo, useState } from "react";
 import type React from "react";
 import type { AuditEvent } from "../lib/types";
+import {
+  displayActor as principalDisplay,
+  actorTooltip,
+  isEnrichedDisplay,
+  isPlatformActor,
+  isServiceAccountActor,
+} from "../lib/principal";
 import SignalBadge from "./SignalBadge";
 
-const UNKNOWN_PRINCIPAL_LABELS = new Set(["unknown actor", "unknown user", "unknown service account", "unknown principal"]);
-const SERVICE_ACCOUNT_TYPES = new Set(["service_account", "serviceaccount", "service-account"]);
 const REASON_MAX_CHARS = 60;
-
-function isServiceAccount(event: AuditEvent): boolean {
-  const type = (event.actor_type || event.subject_type || "").toLowerCase();
-  if (SERVICE_ACCOUNT_TYPES.has(type)) return true;
-  const raw = (event.actor_raw_id || event.actor || "").toLowerCase();
-  return raw.startsWith("sa-") || raw.startsWith("user:sa-");
-}
 
 function displayResource(event: AuditEvent) {
   if (event.resource_display_name && event.resource_display_name !== "-") return event.resource_display_name;
@@ -22,59 +20,29 @@ function displayResource(event: AuditEvent) {
 
 type ActorDisplay = { primary: string; secondary: string; isServiceAccount: boolean; unenriched: boolean; isPlatform: boolean };
 
-// True only when actor_display_name holds a real human-readable name —
-// distinct from the raw id and not one of the Unknown* placeholders.
-function isEnrichedDisplay(display: string, raw: string): boolean {
-  if (!display) return false;
-  if (display === raw) return false;
-  if (display.startsWith("{") || display.startsWith("[")) return false;
-  return !UNKNOWN_PRINCIPAL_LABELS.has(display.toLowerCase());
-}
-
-// Confluent's internal externalAccount actors arrive as raw JSON blobs in
-// display_name (e.g. {"externalAccount":{"subject":"Confluent"}}).
-function looksLikeJsonActor(value: string): boolean {
-  return value.startsWith("{") || value.startsWith("[");
-}
-
 function displayActor(event: AuditEvent): ActorDisplay {
-  const display = (event.actor_display_name || event.subject || event.actor || "").trim();
-  const raw = (event.actor_raw_id || event.subject || event.actor || "").trim();
-  const email = (event.actor_email || "").trim();
-
-  if (looksLikeJsonActor(display) || looksLikeJsonActor(raw)) {
+  const isPlatform = isPlatformActor(event);
+  if (isPlatform) {
     return { primary: "Confluent (platform)", secondary: "", isServiceAccount: false, unenriched: false, isPlatform: true };
   }
-
-  const isSA = isServiceAccount(event);
-  const enriched = isEnrichedDisplay(display, raw);
-
-  let primary: string;
-  let unenriched: boolean;
-  if (enriched) {
-    primary = display;
-    unenriched = false;
-  } else if (email) {
-    primary = email;
-    unenriched = false;
-  } else {
-    primary = raw || (isSA ? "Unknown service account" : "Unknown principal");
-    unenriched = true;
-  }
+  const primary = principalDisplay(event);
+  const display = (event.actor_display_name || "").trim();
+  const raw = actorTooltip(event);
+  const email = (event.actor_email || "").trim();
+  const enriched = isEnrichedDisplay(display, raw) || (email && primary === email);
   const secondary = raw && raw !== primary ? raw : "";
-
-  return { primary, secondary, isServiceAccount: isSA, unenriched, isPlatform: false };
+  return {
+    primary,
+    secondary,
+    isServiceAccount: isServiceAccountActor(event),
+    unenriched: !enriched,
+    isPlatform: false,
+  };
 }
 
 // Best label for prose contexts (the plain-English sentence in the table).
 function bestSentenceLabel(event: AuditEvent): string {
-  const display = (event.actor_display_name || "").trim();
-  const raw = (event.actor_raw_id || event.subject || event.actor || "").trim();
-  const email = (event.actor_email || "").trim();
-  if (looksLikeJsonActor(display) || looksLikeJsonActor(raw)) return "Confluent (platform)";
-  if (isEnrichedDisplay(display, raw)) return display;
-  if (email) return email;
-  return raw || event.actor || "Unknown actor";
+  return principalDisplay(event);
 }
 
 function displaySourceIp(event: AuditEvent) {

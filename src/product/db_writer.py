@@ -236,6 +236,8 @@ audit_events_noise = Table(
     ),
     Column("timestamp", DateTime(timezone=True), nullable=False),
     Column("actor", String(255), nullable=True),
+    Column("actor_display_name", String(255), nullable=True),
+    Column("actor_email", String(255), nullable=True),
     Column("action", String(255), nullable=True),
     Column("result", String(32), nullable=True),
     Column("resource_name", String(512), nullable=True),
@@ -526,6 +528,8 @@ class AuditEventDbWriter:
             rows.append({
                 "timestamp": normalized["timestamp"],
                 "actor": normalized["actor"],
+                "actor_display_name": normalized.get("actor_display_name"),
+                "actor_email": normalized.get("actor_email"),
                 "action": normalized["action"],
                 "result": normalized["result"],
                 "resource_name": normalized["resource_name"],

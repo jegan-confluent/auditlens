@@ -10,11 +10,11 @@ Reads from audit_events filtered on type — these events are persisted
 through the same pipeline as other CloudEvents, so the existing column
 schema + indexes already serve this query. NOT noise — never auto-purged.
 """
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel
-from sqlalchemy import desc, func, select
+from sqlalchemy import desc, func, select, text
 from sqlalchemy.orm import Session
 
 from backend.app.api.routes.patterns import _require_viewer
@@ -28,11 +28,19 @@ router = APIRouter(tags=["access_transparency"])
 
 _AT_EVENT_TYPE = "io.confluent.cloud/access-transparency"
 
+# Default window — AT events are stored alongside the rest of audit_events
+# but the route never needs to scan beyond compliance-relevant history.
+_DEFAULT_DAYS = 7
+_MAX_DAYS = 90
+_STMT_TIMEOUT_MS = 10_000
+
 
 class AccessTransparencyEventOut(BaseModel):
     id: int
     timestamp: datetime
     actor: str
+    actor_display_name: str | None = None
+    actor_email: str | None = None
     resource_name: str
     at_operator: str | None
     at_justification: str | None
@@ -73,10 +81,18 @@ def access_transparency(
     _auth: None = Depends(_require_viewer),
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
+    days: int = Query(default=_DEFAULT_DAYS, ge=1, le=_MAX_DAYS),
     db: Session = Depends(get_db),
 ) -> AccessTransparencyResponse:
     """Return paginated Access Transparency events for the org."""
-    where_clause = _is_at_event_clause()
+    # Dialect-guarded statement timeout — large `raw_payload_json LIKE`
+    # scans on legacy rows that pre-date the at_* columns can blow past
+    # the default budget; cap explicitly so a misuse can't tie up a worker.
+    if db.get_bind().dialect.name == "postgresql":
+        db.execute(text(f"SET LOCAL statement_timeout = {_STMT_TIMEOUT_MS}"))
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    where_clause = _is_at_event_clause() & (AuditEvent.timestamp >= cutoff)
     total = int(db.scalar(select(func.count(AuditEvent.id)).where(where_clause)) or 0)
     rows: list[AuditEvent] = list(
         db.scalars(
@@ -92,6 +108,8 @@ def access_transparency(
             id=row.id,
             timestamp=row.timestamp,
             actor=row.actor,
+            actor_display_name=row._actor_display_name,
+            actor_email=row._actor_email,
             resource_name=row.resource_name,
             at_operator=row.at_operator,
             at_justification=row.at_justification,

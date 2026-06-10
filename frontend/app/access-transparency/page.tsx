@@ -86,7 +86,13 @@ export default function AccessTransparencyPage() {
                   {data.items.map((row: AccessTransparencyEvent) => (
                     <tr key={row.id}>
                       <td style={{ whiteSpace: "nowrap" }}>{formatTimestamp(row.timestamp)}</td>
-                      <td>{row.at_operator || row.actor || "—"}</td>
+                      <td title={row.actor || undefined}>
+                        {row.at_operator
+                          || row.actor_display_name
+                          || row.actor_email
+                          || row.actor
+                          || "—"}
+                      </td>
                       <td>{row.resource_name || "—"}</td>
                       <td>{row.at_justification || <span className="muted">not provided</span>}</td>
                       <td>{row.result}</td>

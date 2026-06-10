@@ -1,5 +1,6 @@
 import Link from "next/link";
 import type { SummaryResponse } from "../lib/types";
+import { looksLikeJsonActor, stripPrincipalPrefix } from "../lib/principal";
 import { isConfluentInternalActor } from "../lib/utils";
 
 function formatAge(iso: string): string {
@@ -13,20 +14,10 @@ function formatAge(iso: string): string {
   return `${Math.round(ageH / 24)}d ago`;
 }
 
-function stripActorPrefix(subject: string): string {
-  if (subject.startsWith("User:")) return subject.slice(5);
-  if (subject.startsWith("ServiceAccount:")) return subject.slice(15);
-  return subject;
-}
-
-function looksLikeJson(v: string): boolean {
-  return v.startsWith("{") || v.startsWith("[");
-}
-
-function formatSubject(subject: string, displayName?: string | null): string {
-  if (!subject || looksLikeJson(subject)) return null as unknown as string;
+function formatSubject(subject: string, displayName?: string | null): string | null {
+  if (!subject || looksLikeJsonActor(subject)) return null;
   if (displayName) return displayName;
-  return stripActorPrefix(subject);
+  return stripPrincipalPrefix(subject);
 }
 
 export default function ActionAlertBanner({ summary }: { summary: SummaryResponse }) {

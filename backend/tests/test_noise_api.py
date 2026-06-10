@@ -112,6 +112,21 @@ def noise_client(monkeypatch):
                 "cluster_id": "lkc-bbb",
                 "is_denied": True,
             })
+        # One row that carries the Issue-2 actor enrichment fields, so the
+        # round-trip test for actor_display_name / actor_email has data.
+        rows.append({
+            "timestamp": now,
+            "actor": "sa-enriched-test",
+            "actor_display_name": "Enriched Service Account",
+            "actor_email": "ops@confluent.io",
+            "action": "kafka.Authentication",
+            "result": "Success",
+            "resource_name": None,
+            "source_ip": "10.0.0.99",
+            "environment_id": "env-aaa",
+            "cluster_id": "lkc-bbb",
+            "is_denied": False,
+        })
         _seed_noise(engine, rows)
 
         app = create_app()
@@ -183,7 +198,7 @@ def test_summary_methods_returns_unified_distribution(noise_client):
     assert "total_noise_events" in body
     assert "generated_at" in body
     # We seeded 50+15+7 = 72 noise events.
-    assert body["total_noise_events"] == 72
+    assert body["total_noise_events"] == 73
 
 
 def test_summary_methods_includes_noise_methods(noise_client):
@@ -265,8 +280,8 @@ def test_summary_include_noise_true_returns_block(noise_client):
     body = noise_client.get("/summary?include_noise=true").json()
     ns = body.get("noise_summary")
     assert ns is not None
-    assert ns["total_noise_events"] == 72
-    assert ns["noise_table_rows"] == 72
+    assert ns["total_noise_events"] == 73
+    assert ns["noise_table_rows"] == 73
     assert ns["noise_retention_days"] == 3  # BUG-004 fix: NOISE_RETENTION_DAYS default (3), not EVENT_RETENTION_DAYS (7)
 
 
@@ -298,7 +313,7 @@ def test_events_show_noise_returns_noise_response_shape(noise_client):
     body = noise_client.get("/events?show_noise=true&limit=10").json()
     assert body["source"] == "noise_table"
     assert body["limit"] == 10
-    assert body["total"] == 72
+    assert body["total"] == 73  # 50 fetch + 15 produce + 7 mds + 1 enriched-auth
     assert len(body["items"]) == 10
 
 
@@ -332,7 +347,7 @@ def test_events_show_noise_time_window_filter(noise_client):
     # inserted within seconds of "now"); window of 1m offset tests the
     # parser path. 1h is also accepted.
     body = noise_client.get("/events?show_noise=true&time_window=1h").json()
-    assert body["total"] == 72
+    assert body["total"] == 73
 
 
 def test_events_show_noise_limit_capped_at_500(noise_client):
@@ -386,3 +401,33 @@ def test_events_show_noise_pagination(noise_client):
     assert page1_ids.isdisjoint(page2_ids)
     assert len(page1["items"]) == 20
     assert len(page2["items"]) == 20
+
+
+# ─────────────────────── Issue 2 — noise actor enrichment ──────────────
+
+
+def test_noise_table_carries_actor_display_name(noise_client):
+    """Seeded actor_display_name + actor_email round-trip through
+    list_noise_events into the API response. Fixture pre-seeded one row
+    with both columns populated under actor='sa-enriched-test'."""
+    body = noise_client.get(
+        "/events?show_noise=true&actor=sa-enriched-test&limit=10"
+    ).json()
+    assert body["total"] == 1
+    item = body["items"][0]
+    assert item["actor"] == "sa-enriched-test"
+    assert item["actor_display_name"] == "Enriched Service Account"
+    assert item["actor_email"] == "ops@confluent.io"
+
+
+def test_noise_table_legacy_rows_have_none_for_enrichment(noise_client):
+    """Existing fixture rows (kafka.Fetch / kafka.Produce / mds.Authorize)
+    were inserted without the new columns — the API surfaces them as None
+    so the frontend has a uniform contract."""
+    body = noise_client.get(
+        "/events?show_noise=true&actor=sa-producer&limit=5"
+    ).json()
+    assert body["total"] == 15
+    for item in body["items"]:
+        assert item.get("actor_display_name") is None
+        assert item.get("actor_email") is None

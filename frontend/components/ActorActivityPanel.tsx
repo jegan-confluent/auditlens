@@ -4,15 +4,13 @@ import { useEffect, useMemo, useState } from "react";
 import { getActorIpBaseline, getActorNarrative, getEvents, getSummary, isAbortError } from "../lib/api";
 import type { ActorIpBaseline, ActorNarrative, AuditEvent, EventListResponse, NarrativeAnomaly, NarrativeChapter, SummaryResponse } from "../lib/types";
 
-const UNKNOWN_PRINCIPAL_LABELS = new Set(["unknown actor", "unknown user", "unknown service account", "unknown principal"]);
-const SERVICE_ACCOUNT_TYPES = new Set(["service_account", "serviceaccount", "service-account"]);
-
-function isServiceAccountActor(event: AuditEvent): boolean {
-  const type = (event.actor_type || event.subject_type || "").toLowerCase();
-  if (SERVICE_ACCOUNT_TYPES.has(type)) return true;
-  const raw = (event.actor_raw_id || event.actor || "").toLowerCase();
-  return raw.startsWith("sa-") || raw.startsWith("user:sa-");
-}
+import {
+  displayActor as principalDisplay,
+  actorTooltip,
+  isServiceAccountActor,
+  looksLikeJsonActor,
+} from "../lib/principal";
+import { DEFAULT_TIME_WINDOW } from "../lib/timeWindows";
 
 function actorTypeLabel(event: AuditEvent | null): string {
   if (!event) return "Actor";
@@ -23,25 +21,15 @@ function actorTypeLabel(event: AuditEvent | null): string {
   return "User";
 }
 
-function looksLikeJson(v: string): boolean {
-  return v.startsWith("{") || v.startsWith("[");
-}
-
 function actorPrimary(event: AuditEvent | null, fallback: string): string {
-  if (looksLikeJson(fallback)) return "Confluent (platform)";
+  if (looksLikeJsonActor(fallback)) return "Confluent (platform)";
   if (!event) return fallback;
-  const display = (event.actor_display_name || "").trim();
-  const raw = (event.actor_raw_id || event.subject || event.actor || "").trim();
-  const email = (event.actor_email || "").trim();
-  if (looksLikeJson(display) || looksLikeJson(raw)) return "Confluent (platform)";
-  if (display && display !== raw && !UNKNOWN_PRINCIPAL_LABELS.has(display.toLowerCase())) return display;
-  if (email) return email;
-  return raw || fallback;
+  return principalDisplay(event) || fallback;
 }
 
 function actorRawId(event: AuditEvent | null, fallback: string): string {
   if (!event) return fallback;
-  return (event.actor_raw_id || event.subject || event.actor || fallback).trim();
+  return actorTooltip(event) || fallback;
 }
 
 function distinctNonEmpty(values: Array<string | null | undefined>): string[] {
@@ -147,10 +135,10 @@ export default function ActorActivityPanel({ actorId, seedEvent, onClose, onAppl
     setIpBaseline(null);
     setNarrative(null);
 
-    const summaryParams = new URLSearchParams({ actor: actorId, time_window: "24h" });
+    const summaryParams = new URLSearchParams({ actor: actorId, time_window: DEFAULT_TIME_WINDOW });
     const eventsParams = new URLSearchParams({
       actor: actorId,
-      time_window: "24h",
+      time_window: DEFAULT_TIME_WINDOW,
       limit: "10",
       mode: "decision",
     });
@@ -159,7 +147,7 @@ export default function ActorActivityPanel({ actorId, seedEvent, onClose, onAppl
       getSummary(summaryParams, controller.signal),
       getEvents(eventsParams, controller.signal),
       getActorIpBaseline(actorId, controller.signal).catch(() => null),
-      getActorNarrative(actorId, "24h", controller.signal).catch(() => null),
+      getActorNarrative(actorId, DEFAULT_TIME_WINDOW, controller.signal).catch(() => null),
     ])
       .then(([sum, evs, ipb, narr]) => {
         setSummary(sum);
@@ -223,7 +211,7 @@ export default function ActorActivityPanel({ actorId, seedEvent, onClose, onAppl
             <h2>
               {primary} <span className={`actor-badge ${typeLabel === "Service Account" ? "sa" : ""}`}>{typeLabel}</span>
             </h2>
-            {raw && raw !== primary && !looksLikeJson(raw) ? <p className="muted">{raw}</p> : null}
+            {raw && raw !== primary && !looksLikeJsonActor(raw) ? <p className="muted">{raw}</p> : null}
           </div>
           <button onClick={onClose} aria-label="Close actor panel">×</button>
         </div>

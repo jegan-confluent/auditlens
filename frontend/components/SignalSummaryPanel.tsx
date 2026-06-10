@@ -1,5 +1,6 @@
 import type { SummaryResponse } from "../lib/types";
 import type { EventFilters } from "../lib/eventFilters";
+import { looksLikeJsonActor, stripPrincipalPrefix } from "../lib/principal";
 import ActionAlertBanner from "./ActionAlertBanner";
 import SignalBreakdown from "./SignalBreakdown";
 
@@ -108,21 +109,11 @@ function formatAge(iso: string): string {
   return `${Math.round(ageH / 24)}d ago`;
 }
 
-function looksLikeJson(v: string): boolean {
-  return v.startsWith("{") || v.startsWith("[");
-}
-
-function stripActorPrefix(subject: string): string {
-  if (subject.startsWith("User:")) return subject.slice(5);
-  if (subject.startsWith("ServiceAccount:")) return subject.slice(15);
-  return subject;
-}
-
 function formatSubject(subject: string, displayName?: string | null): string {
   if (!subject) return "—";
-  if (looksLikeJson(subject)) return "Confluent (platform)";
+  if (looksLikeJsonActor(subject)) return "Confluent (platform)";
   if (displayName) return displayName;
-  return stripActorPrefix(subject);
+  return stripPrincipalPrefix(subject);
 }
 
 export default function SignalSummaryPanel({ summary, onApplyFlow, currentSignal, onTierSelect }: {

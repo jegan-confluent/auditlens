@@ -11,6 +11,7 @@ import SystemStatusPanel from "../../components/SystemStatusPanel";
 import TopActors from "../../components/TopActors";
 import { getReadinessStatus, getSummary, getSystemStatus, isAbortError } from "../../lib/api";
 import { encodeTimeWindow, type EventFilters } from "../../lib/eventFilters";
+import { DEFAULT_TIME_WINDOW } from "../../lib/timeWindows";
 import type { SummaryResponse, SystemStatus } from "../../lib/types";
 
 type TimeWindow = "1h" | "6h" | "24h" | "7d";
@@ -129,10 +130,10 @@ export default function DashboardPage() {
   };
 
   const [timeWindow, setTimeWindow] = useState<TimeWindow>(() => {
-    if (typeof window === "undefined") return "24h";
+    if (typeof window === "undefined") return DEFAULT_TIME_WINDOW;
     const saved = localStorage.getItem("dashboard_time_window");
     if (saved === "1h" || saved === "6h" || saved === "24h" || saved === "7d") return saved;
-    return "24h";
+    return DEFAULT_TIME_WINDOW;
   });
   const [system, setSystem] = useState<Panel<SystemStatus>>(emptyPanel());
   const [newestEvent, setNewestEvent] = useState<string | null>(null);

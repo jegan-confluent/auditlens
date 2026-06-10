@@ -57,6 +57,8 @@ def is_bulk_noise(method_name: str | None) -> bool:
 NOISE_TABLE_FIELDS: tuple[str, ...] = (
     "timestamp",
     "actor",
+    "actor_display_name",
+    "actor_email",
     "action",
     "result",
     "resource_name",
@@ -252,9 +254,30 @@ def minimal_normalize(event: dict[str, Any]) -> dict[str, Any]:
 
     timestamp = parse_event_timestamp(event)
 
+    # Best-effort actor enrichment via the existing IAM cache. enrich_actor
+    # is a TTL-cached lookup (cachetools.TTLCache, thread-locked) and the
+    # forwarder bulk-prefetches every user + service account into that cache
+    # at startup, so the hot path is normally a dict lookup. On a cache miss
+    # we still get the raw ID back from the fallback path — surface that as
+    # actor_display_name=None so the UI/API can distinguish "resolved" from
+    # "raw" without re-checking the prefix. Never block: any exception
+    # collapses to (None, None).
+    actor_display_name: str | None = None
+    actor_email: str | None = None
+    if actor and actor != "unknown":
+        try:
+            enriched = enrich_actor(actor)
+        except Exception:  # pragma: no cover - defensive
+            enriched = None
+        if enriched and enriched.get("actor_source") != "fallback":
+            actor_display_name = enriched.get("actor_display_name") or None
+            actor_email = enriched.get("actor_email") or None
+
     return {
         "timestamp": timestamp,
         "actor": str(actor)[:255],
+        "actor_display_name": actor_display_name[:255] if actor_display_name else None,
+        "actor_email": actor_email[:255] if actor_email else None,
         "action": str(action)[:255] if action else "",
         "result": result,
         "resource_name": str(resource_name)[:512] if resource_name else None,

@@ -150,6 +150,8 @@ export type AccessTransparencyEvent = {
   id: number;
   timestamp: string;
   actor: string;
+  actor_display_name?: string | null;
+  actor_email?: string | null;
   resource_name: string;
   at_operator: string | null;
   at_justification: string | null;
