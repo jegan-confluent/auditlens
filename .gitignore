@@ -247,3 +247,14 @@ scratch/
 # Internal session docs
 docs/2025-*/
 docs/2026-*/
+
+# Internal Confluent AWS infra — not for public repo
+infra/aws/01_create_alb.sh
+infra/aws/02_request_cert.sh
+infra/aws/03_create_cognito.sh
+infra/aws/04_wire_google_idp.sh
+infra/aws/05_wire_alb_cognito.sh
+infra/aws/alb_outputs.env
+infra/aws/cert_outputs.env
+infra/aws/cognito_outputs.env
+infra/aws/lambda/
