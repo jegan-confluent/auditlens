@@ -146,18 +146,26 @@ Ports that may be proxied (with TLS and auth in front):
 
 ## Secrets management
 
-For evaluation/development, `.env` and `.secrets` files are sufficient.
+AuditLens supports a two-tier secrets model so the same image runs on any platform.
 
-For production deployments, consider:
+### Default — environment variables (platform-agnostic)
 
-| Method | Setup |
-|--------|-------|
-| Docker Secrets | Mount secrets as files under `/run/secrets/` |
-| AWS Secrets Manager | Use `SECRETS_BACKEND=aws_secrets_manager` |
-| HashiCorp Vault | Use `SECRETS_BACKEND=vault` |
-| Environment injection | Use your orchestrator's secret injection (K8s Secrets, ECS Task env) |
+All secrets are read from `.env` (non-sensitive) and `.secrets` (sensitive) on the host. This is the default and works on AWS, GCP, Azure, bare metal, or any Docker host. See `.env.example` for the full list of required values.
 
-Never commit `.env` or `.secrets` files. They are already in `.gitignore`.
+Never commit `.env` or `.secrets` — both are gitignored. Use Docker Secrets or your orchestrator's secret injection (Kubernetes Secrets, ECS Task env, etc.) to deliver them to the container.
+
+### Optional hardening — AWS Secrets Manager (AWS EC2 only)
+
+If you are running on AWS EC2, you can store secrets in AWS Secrets Manager instead of `.env`:
+
+1. Run `make secrets-create` to push `.env` values to ASM
+2. Set `AWS_SECRETS_MANAGER_ENABLED=true` in `.env`
+3. Set `AWS_REGION` to your EC2 region
+4. Attach an IAM role to your EC2 instance with `secretsmanager:GetSecretValue` on `auditlens/*` (see `infra/aws/setup_secrets_manager_role.sh`)
+
+Secrets are cached in memory for 15 minutes and auto-refreshed. No restart is needed after rotation — run `make secrets-rotate`.
+
+> GCP Secret Manager and Azure Key Vault are not yet supported. Contributions welcome.
 
 ---
 

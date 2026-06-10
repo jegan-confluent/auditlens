@@ -361,13 +361,26 @@ The most important variables in `.env`. The wizard writes all of these for you; 
 | `CONFLUENT_CLOUD_API_KEY` / `_SECRET` | — | Cloud-scoped key for IAM lookups + Tableflow + the wizard's cluster picker |
 | `SCHEMA_REGISTRY_URL` / `_API_KEY` / `_API_SECRET` | — | Schema Registry endpoint + credentials (required for Tableflow) |
 
-### Using AWS Secrets Manager (recommended for EC2)
+---
 
-- Set `AWS_SECRETS_MANAGER_ENABLED=true` in `.env` to overlay HIGH-sensitivity values from ASM (env stays the fallback).
-- Run `make secrets-create` once to push current `.env` + `notifications.yml` values into the `auditlens/prod/*` secret group.
-- Attach the EC2 IAM role (`bash infra/aws/setup_secrets_manager_role.sh` on the operator's Mac, then `aws ec2 associate-iam-instance-profile`).
-- Set `AWS_REGION` in `.env` (default `ap-southeast-1`).
-- Secrets auto-refresh every 15 minutes — no container restart needed after rotation in ASM.
+## Secrets Management
+
+### Default — environment variables
+
+All secrets are read from `.env` on the host. This works on any platform: AWS, GCP, Azure, bare metal, or any Docker host. See `.env.example` for all required values.
+
+### Optional hardening — AWS Secrets Manager
+
+If you are running on AWS EC2, you can store secrets in AWS Secrets Manager instead of `.env`:
+
+1. Run `make secrets-create` to push `.env` values to ASM
+2. Set `AWS_SECRETS_MANAGER_ENABLED=true` in `.env`
+3. Set `AWS_REGION` to your EC2 region
+4. Attach an IAM role to your EC2 instance with `secretsmanager:GetSecretValue` on `auditlens/*` (see `infra/aws/setup_secrets_manager_role.sh`)
+
+Secrets are cached in memory for 15 minutes and auto-refreshed. No restart needed after rotation — run `make secrets-rotate`.
+
+> Note: GCP Secret Manager and Azure Key Vault are not yet supported. Contributions welcome.
 
 ---
 
