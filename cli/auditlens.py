@@ -9,6 +9,7 @@ from __future__ import annotations
 import configparser
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -1018,6 +1019,230 @@ def _format_last_event_age(body: Any) -> str:
         return ""
 
 
+# ──────────── auto-diagnose helpers ────────────
+# When a per-service probe fails, doctor pulls 40 lines of container logs,
+# pattern-matches the joined text against known failure shapes, and prints
+# a single-line diagnosis + fix hint plus the last 5 log lines. Each
+# function is wrapped in try/except so a log-fetch failure never crashes
+# the doctor run.
+
+# Patterns are tried in order — first match wins. Casing is normalised
+# to lowercase before testing. Spec rules taken verbatim where possible.
+_DIAGNOSIS_PATTERNS: tuple[tuple[tuple[str, ...], str, str], ...] = (
+    (
+        ("address already in use",),
+        "Port conflict — another process is using the same port",
+        "Run: ss -tlnp | grep <port> to find the conflicting process",
+    ),
+    (
+        ("permission denied",),
+        "Permission error on file or socket",
+        "Check volume mounts and file ownership in docker-compose.prod.yml",
+    ),
+    (
+        ("no such file or directory",),
+        "Missing file — likely a missing config or volume mount",
+        "Check that all required config files exist and are mounted correctly",
+    ),
+    # Two-token rule: connection refused near a database hint.
+    (
+        ("connection refused", "database"),
+        "Cannot reach Postgres — DB may not be ready yet",
+        "Run: docker compose logs postgres --tail 20",
+    ),
+    (
+        ("connection refused", "postgres"),
+        "Cannot reach Postgres — DB may not be ready yet",
+        "Run: docker compose logs postgres --tail 20",
+    ),
+    (
+        ("invalid configuration",),
+        "Config file parse error",
+        "Check the config file mounted into this container",
+    ),
+    (
+        ("error parsing",),
+        "Config file parse error",
+        "Check the config file mounted into this container",
+    ),
+    (
+        ("yaml",),
+        "Config file parse error",
+        "Check the config file mounted into this container",
+    ),
+    (
+        ("bind: address already in use",),
+        "Port already bound by another process",
+        "Run: ss -tlnp | grep <port>",
+    ),
+    (
+        ("oomkilled",),
+        "Container was OOM killed",
+        "Increase memory limit in docker-compose.prod.yml",
+    ),
+    (
+        ("out of memory",),
+        "Container was OOM killed",
+        "Increase memory limit in docker-compose.prod.yml",
+    ),
+    (
+        ("killed",),
+        "Container was OOM killed",
+        "Increase memory limit in docker-compose.prod.yml",
+    ),
+    (
+        ("no route to host",),
+        "Network connectivity issue between containers",
+        "Check Docker network config and that dependent services are up",
+    ),
+    (
+        ("network unreachable",),
+        "Network connectivity issue between containers",
+        "Check Docker network config and that dependent services are up",
+    ),
+    (
+        ("authentication failed",),
+        "Auth failure — wrong credentials in env",
+        "Check env vars for this service in .env",
+    ),
+    (
+        ("password authentication",),
+        "Auth failure — wrong credentials in env",
+        "Check env vars for this service in .env",
+    ),
+    (
+        ("certificate",),
+        "TLS/cert issue",
+        "Check cert paths and expiry",
+    ),
+    (
+        ("tls",),
+        "TLS/cert issue",
+        "Check cert paths and expiry",
+    ),
+    (
+        ("ssl",),
+        "TLS/cert issue",
+        "Check cert paths and expiry",
+    ),
+)
+
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _strip_ansi(line: str) -> str:
+    return _ANSI_RE.sub("", line)
+
+
+def _pull_service_logs(
+    compose_file: str, service: str, container_name: str, *, lines: int = 40,
+) -> list[str]:
+    """Best-effort log fetch. Tries `docker compose logs` first; if that
+    returns empty (some compose versions emit nothing for restart-looping
+    containers), falls back to raw `docker logs <container>`. ANSI codes
+    are stripped before return. Never raises — failures yield `[]` so the
+    diagnose function still prints a useful default."""
+    try:
+        proc = _safe_run(
+            ["docker", "compose", "-f", compose_file, "logs",
+             "--tail", str(lines), "--no-color", service],
+            timeout=15,
+        )
+        combined = proc.stdout
+        if proc.stderr:
+            combined = combined + "\n" + proc.stderr
+        if not combined.strip():
+            # Fallback to `docker logs` keyed by container name.
+            proc2 = _safe_run(
+                ["docker", "logs", container_name, "--tail", str(lines)],
+                timeout=15,
+            )
+            combined = proc2.stdout
+            if proc2.stderr:
+                combined = combined + "\n" + proc2.stderr
+        return [_strip_ansi(line) for line in combined.splitlines() if line.strip()]
+    except Exception:  # pragma: no cover - defensive
+        return []
+
+
+def _match_diagnosis(joined_logs: str) -> tuple[str | None, str | None]:
+    """First-match wins over _DIAGNOSIS_PATTERNS. Returns (diagnosis, fix)
+    or (None, None) on no match. All matching is case-insensitive."""
+    text = joined_logs.lower()
+    for tokens, diagnosis, fix in _DIAGNOSIS_PATTERNS:
+        if all(tok in text for tok in tokens):
+            return diagnosis, fix
+    return None, None
+
+
+def _print_diagnosis_block(
+    diagnosis: str | None, fix: str | None, log_lines: list[str],
+) -> None:
+    """Print DIAGNOSIS / FIX / LOGS triplet under the service line.
+    Indent matches the existing `└─` notes (11 spaces + arrow)."""
+    indent = "           └─"
+    log_indent = "             "
+    if diagnosis:
+        click.echo(f"{indent} DIAGNOSIS: {diagnosis}")
+    else:
+        click.echo(f"{indent} DIAGNOSIS: Unknown failure — review logs below")
+    if fix:
+        click.echo(f"{indent} FIX: {fix}")
+    if not log_lines:
+        click.echo(f"{indent} LOGS: (none — process may be exiting before writing to stdout;"
+                   f" try: docker inspect <container> to check exit code and state)")
+        return
+    shown = log_lines[-5:]
+    if len(log_lines) > len(shown):
+        click.echo(f"{indent} LOGS ({len(log_lines)} lines total, showing last {len(shown)}):")
+    else:
+        click.echo(f"{indent} LOGS (last {len(shown)} lines):")
+    for line in shown:
+        # Trim very long log lines so a single noisy line doesn't dominate the screen.
+        click.echo(f"{log_indent}  {line[:200]}")
+
+
+def _doctor_diagnose_service(
+    compose_file: str, service: str, container_name: str, failure_detail: str,
+) -> None:
+    """CRITICAL-path diagnose: log fetch + pattern match + print."""
+    try:
+        log_lines = _pull_service_logs(compose_file, service, container_name)
+    except Exception as exc:  # pragma: no cover - defensive
+        click.echo(f"           └─ could not fetch logs: {type(exc).__name__}: {exc}")
+        return
+    joined = "\n".join(log_lines)
+    if not joined.strip():
+        # Empty-log special case — distinct diagnosis per spec.
+        _print_diagnosis_block(
+            "No logs available — process may be exiting before writing to stdout",
+            "Try: docker inspect <container> to check exit code and state",
+            [],
+        )
+        return
+    diagnosis, fix = _match_diagnosis(joined)
+    _print_diagnosis_block(diagnosis, fix, log_lines)
+
+
+def _doctor_diagnose_warning(
+    compose_file: str, service: str, container_name: str, warning_detail: str,
+) -> None:
+    """WARNING-path diagnose — lighter touch. Skips log fetch entirely for
+    the mcp-server stdio-mismatch case (the diagnosis is already known);
+    otherwise behaves like the critical-path diagnose."""
+    detail_lower = (warning_detail or "").lower()
+    if service == "mcp-server" and ("stdio" in detail_lower or "mismatch" in detail_lower):
+        indent = "           └─"
+        click.echo(f"{indent} DIAGNOSIS: stdio transport — HTTP healthcheck in compose will always fail")
+        click.echo(f"{indent} FIX: change compose healthcheck for mcp-server from curl to pgrep / inspect")
+        return
+    _doctor_diagnose_service(compose_file, service, container_name, warning_detail)
+
+
+_WARNING_TRIGGER_KEYWORDS = ("refused", "timeout", "unhealthy", "error", "fail")
+
+
 def _doctor_check_docker_services(
     compose_file: str, results: list[dict[str, str]]
 ) -> None:
@@ -1154,6 +1379,27 @@ def _doctor_check_docker_services(
         )
         for note in notes:
             click.echo(f"           └─ {note}")
+
+        # Auto-diagnose on failure (critical) or actionable warning. Each
+        # diagnose function is wrapped so a broken log fetch never crashes
+        # the surrounding doctor run.
+        diagnose_detail = " | ".join([probe_text] + notes).lower()
+        try:
+            if worst == "critical":
+                _doctor_diagnose_service(
+                    compose_file, service, container_name, " | ".join([probe_text] + notes)
+                )
+            elif worst == "warning":
+                is_mcp_stdio = service == "mcp-server" and (
+                    "stdio" in diagnose_detail or "mismatch" in diagnose_detail
+                )
+                if is_mcp_stdio or any(k in diagnose_detail for k in _WARNING_TRIGGER_KEYWORDS):
+                    _doctor_diagnose_warning(
+                        compose_file, service, container_name,
+                        " | ".join([probe_text] + notes),
+                    )
+        except Exception as exc:  # pragma: no cover - defensive
+            click.echo(f"           └─ (diagnose crashed: {type(exc).__name__}: {exc})")
 
         detail_parts = [probe_text, restart_detail] + notes
         results.append({
