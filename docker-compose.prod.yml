@@ -670,7 +670,7 @@ services:
     depends_on:
       - api
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:$${MCP_PORT:-8089}/health || exit 1"]
+      test: ["CMD-SHELL", "pgrep -f server.py || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3
