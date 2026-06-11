@@ -139,13 +139,56 @@ destination in `notifications.yml` gets a real message; per-destination
 pass/fail comes back as a summary table. Requires the `admin` role when
 auth is enabled.
 
+### doctor
+
+```bash
+python auditlens.py doctor      # or: make doctor
+```
+
+End-to-end deployment health check, designed to be the first thing you
+run when something looks off. Seven independent checks run sequentially;
+one failing check never aborts the others, and a summary table prints
+at the end with the worst severity driving the exit code.
+
+| Section | What it does |
+|---|---|
+| Docker services | `docker compose ps`; flags any container that is not `running` (critical), `unhealthy` (critical), `starting` (warn), or missing a healthcheck (warn). Tails the last 5 log lines on critical failures. |
+| Forwarder connectivity | `GET http://<host>:8003/health`; reports HTTP status + `last_event` freshness; warns if last event > 30 min. |
+| API health | `GET <AUDITLENS_URL>/health` (warns over 2 s) + `/api/events?limit=1` smoke test. |
+| Postgres connectivity | `docker compose exec -T postgres psql` for signal-row, noise-row, and last-hour counts; warns when zero events in the last hour. |
+| Dead-tuple bloat | `SELECT relname, n_dead_tup, n_live_tup FROM pg_stat_user_tables ORDER BY n_dead_tup DESC LIMIT 5`; warns when any table > 100 000 dead tuples. |
+| Config sanity | Parses `.env` next to the compose file; verifies `AUDIT_BOOTSTRAP`, `AUDIT_TOPIC`, `DEST_BOOTSTRAP`, `DATABASE_URL`, `CORS_ORIGINS`, `NEXT_PUBLIC_API_BASE_URL` are non-empty; warns if `CORS_ORIGINS` omits the live domain or `NEXT_PUBLIC_API_BASE_URL` doesn't end with `/api`. Values are never printed — only ✅ set / ❌ missing. |
+| Domain reachability | `GET https://auditlens.aws.cse.confluent.io/health` with a 5 s timeout. Reported as `skipped` (not critical) if the host has no internet. |
+
+Sample summary (live deploy):
+
+```
+Component                     Status        Detail
+─────────────────────────────────────────────────────────────────
+Docker: mcp-server            ❌ critical  state=restarting
+Docker: auditlens-forwarder   ✅ ok        healthy
+Docker: api                   ✅ ok        healthy
+Docker: postgres              ✅ ok        healthy
+Forwarder connectivity        ✅ ok        healthy
+API health                    ✅ ok        18ms
+Postgres rows                 ✅ ok        19,718 signal + 3,451,365 noise
+Pipeline freshness            ✅ ok        73 events in last hour
+Dead-tuple bloat              ✅ ok        no tables over threshold
+Config vars                   ✅ ok        all required vars set
+Domain reachability           ✅ ok        HTTP 200 (27ms)
+```
+
+`Makefile` exposes `make doctor` and `make cli-status` (compact pipeline
+freshness) so cron / CI can wire up health gates without touching Python
+directly.
+
 ## Exit codes
 
 | Code | Meaning |
 |---|---|
-| `0` | Success |
-| `1` | HTTP or auth error (printed in red on stderr) |
-| `2` | `alerts test` — endpoint missing (older AuditLens build) |
+| `0` | Success (all green; skipped checks don't fail) |
+| `1` | `doctor`: any warning. Other commands: HTTP or auth error |
+| `2` | `doctor`: any critical failure. `alerts test`: endpoint missing |
 
 ## Notes & limitations
 

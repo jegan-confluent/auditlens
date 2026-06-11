@@ -1,7 +1,7 @@
 # Makefile for Audit Forwarder
 # Production-ready build, test, and deployment tasks
 
-.PHONY: help build build-alpine build-distroless test scan clean deploy deploy-check migrate setup start stop restart status monitoring logs health ps sync backup backup-list backup-list-remote backup-restore update update-check repair diagnose diagnose-ai diagnose-ingest register-schemas check-schemas sync-schemas up down teardown catchup-status catchup-done
+.PHONY: help build build-alpine build-distroless test scan clean deploy deploy-check migrate setup start stop restart status monitoring logs health ps sync backup backup-list backup-list-remote backup-restore update update-check repair diagnose diagnose-ai diagnose-ingest doctor cli-status register-schemas check-schemas sync-schemas up down teardown catchup-status catchup-done
 
 ##############################################################################
 # Quickstart Lifecycle (Phase 3 — single-command install + service control)
@@ -183,6 +183,12 @@ diagnose-ai: ## Force AI-powered diagnosis (requires an LLM API key)
 
 diagnose-ingest: ## 60-second forwarder ingest sample — rate, lag trend, bottleneck
 	@python3 scripts/diagnose.py --ingest-only
+
+doctor: ## Run the unified deployment health check (Docker + API + Postgres + config)
+	@python3 cli/auditlens.py doctor
+
+cli-status: ## Compact pipeline-freshness summary via the CLI
+	@python3 cli/auditlens.py pipeline status
 
 ##############################################################################
 # Update flow for an already-running deployment

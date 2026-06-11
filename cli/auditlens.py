@@ -11,6 +11,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, NoReturn
@@ -534,6 +535,570 @@ def alerts_test() -> None:
         name = r_.get("name") or r_.get("destination") or "?"
         msg = r_.get("message") or r_.get("error") or ""
         click.echo(f"  {marker} {name}  {msg}")
+
+
+# ──────────── doctor ────────────
+# Severity levels for the doctor summary table + exit code derivation.
+#   "ok"       → ✅ green   (exit 0)
+#   "warning"  → ⚠️  yellow (exit 1)
+#   "critical" → ❌ red     (exit 2)
+#   "skipped"  → ⏭️  dim    (treated as ok for exit code; reachability check)
+SEVERITY_RANK = {"ok": 0, "skipped": 0, "warning": 1, "critical": 2}
+
+# Domain reachability target. Treated as best-effort: a missing DNS / non-2xx
+# response only ever produces a "skipped" or "warning", never "critical".
+REACHABILITY_DOMAIN = "auditlens.aws.cse.confluent.io"
+
+# Env vars the doctor check verifies are non-empty in the deploy host's .env.
+# Names match docker-compose.prod.yml's variable substitution surface. Note
+# that the historical AUDIT_BOOTSTRAP_SERVERS / DEST_BOOTSTRAP_SERVERS names
+# also accepted (in case an operator's .env predates the rename) — the check
+# treats either form as "set".
+REQUIRED_ENV_VARS = (
+    ("AUDIT_BOOTSTRAP", ("AUDIT_BOOTSTRAP_SERVERS",)),
+    ("AUDIT_TOPIC", ()),
+    ("DEST_BOOTSTRAP", ("DEST_BOOTSTRAP_SERVERS",)),
+    ("DATABASE_URL", ()),
+    ("CORS_ORIGINS", ()),
+    ("NEXT_PUBLIC_API_BASE_URL", ()),
+)
+
+
+def _doctor_compose_file(cfg: dict[str, str]) -> str:
+    """Resolve the docker-compose.prod.yml path, expanding ``~``."""
+    return os.path.expanduser(cfg.get("compose_file") or DEFAULT_COMPOSE)
+
+
+def _safe_run(cmd: list[str], *, timeout: int = 30) -> subprocess.CompletedProcess:
+    """subprocess.run that always returns a CompletedProcess. On failure
+    populates returncode=-1 and stderr with the exception message so the
+    caller can pattern-match without catching at every call site."""
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
+    except FileNotFoundError as exc:
+        return subprocess.CompletedProcess(cmd, -1, "", f"binary not found: {exc}")
+    except subprocess.TimeoutExpired as exc:
+        return subprocess.CompletedProcess(cmd, -1, "", f"timeout after {exc.timeout}s")
+    except Exception as exc:  # pragma: no cover - defensive
+        return subprocess.CompletedProcess(cmd, -1, "", f"{type(exc).__name__}: {exc}")
+
+
+def _parse_env_file(path: str) -> dict[str, str]:
+    """Lightweight .env parser — keys may be quoted, values may contain `=`.
+    Returns {} if the file is unreadable. Doesn't honour `export` prefixes
+    or shell escapes; matches what docker compose actually reads."""
+    out: dict[str, str] = {}
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            for raw in fh:
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                if key:
+                    out[key] = value
+    except OSError:
+        return {}
+    return out
+
+
+def _docker_compose_ps(compose_file: str) -> list[dict[str, str]]:
+    """Return one row per service from `docker compose ps`. Tries JSON
+    output first; falls back to parsing the human-readable table when the
+    installed docker compose doesn't support --format json."""
+    proc = _safe_run(
+        ["docker", "compose", "-f", compose_file, "ps", "--format", "json"],
+    )
+    if proc.returncode != 0:
+        return []
+    rows: list[dict[str, str]] = []
+    out = proc.stdout.strip()
+    if not out:
+        return []
+    # New docker compose: NDJSON (one object per line)
+    if out.startswith("{"):
+        for line in out.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+        return rows
+    # Older docker compose: JSON array
+    try:
+        parsed = json.loads(out)
+        if isinstance(parsed, list):
+            return parsed
+    except json.JSONDecodeError:
+        pass
+    return rows
+
+
+def _docker_service_status(row: dict[str, str]) -> tuple[str, str, str]:
+    """Pull (service_name, state, health) out of a compose-ps row tolerant
+    to the slightly different key shapes between compose versions."""
+    name = row.get("Service") or row.get("Name") or "?"
+    state = (row.get("State") or row.get("Status") or "").lower()
+    health = (row.get("Health") or "").lower()
+    if not health and "(" in (row.get("Status") or ""):
+        # Older format embeds "(healthy)" inside the Status string.
+        status = row.get("Status", "")
+        if "(healthy)" in status:
+            health = "healthy"
+        elif "(unhealthy)" in status:
+            health = "unhealthy"
+        elif "(starting)" in status:
+            health = "starting"
+    return name, state, health
+
+
+def _tail_logs(compose_file: str, service: str, lines: int = 20) -> list[str]:
+    proc = _safe_run(
+        ["docker", "compose", "-f", compose_file, "logs", "--tail", str(lines), service],
+        timeout=15,
+    )
+    if proc.returncode != 0:
+        return [f"(could not read logs: {proc.stderr.strip()[:120]})"]
+    return [line for line in proc.stdout.splitlines() if line.strip()][-5:]
+
+
+def _doctor_status_marker(severity: str) -> str:
+    if severity == "ok":
+        return click.style("✅", fg="green")
+    if severity == "warning":
+        return click.style("⚠️ ", fg="yellow")
+    if severity == "critical":
+        return click.style("❌", fg="red")
+    return click.style("⏭️ ", dim=True)
+
+
+def _doctor_check_docker_services(
+    compose_file: str, results: list[dict[str, str]]
+) -> None:
+    click.echo(click.style("→ Docker services", bold=True))
+    if not os.path.exists(compose_file):
+        click.echo(f"  compose file not found: {compose_file}")
+        results.append({
+            "component": "Docker compose",
+            "severity": "critical",
+            "detail": f"missing {compose_file}",
+        })
+        return
+
+    rows = _docker_compose_ps(compose_file)
+    if not rows:
+        click.echo("  docker compose ps returned no rows (daemon not running?)")
+        results.append({
+            "component": "Docker daemon",
+            "severity": "critical",
+            "detail": "no containers reported",
+        })
+        return
+
+    for row in rows:
+        name, state, health = _docker_service_status(row)
+        if state != "running":
+            severity = "critical"
+            detail = f"state={state or 'unknown'}"
+        elif health == "unhealthy":
+            severity = "critical"
+            detail = "unhealthy"
+        elif health == "starting":
+            severity = "warning"
+            detail = "starting"
+        elif health == "":
+            # Running with no healthcheck declared — not a failure but
+            # operators should know which services lack a probe.
+            severity = "warning"
+            detail = "running (no healthcheck)"
+        else:
+            severity = "ok"
+            detail = "healthy"
+        click.echo(f"  {_doctor_status_marker(severity)} {name.ljust(28)} {detail}")
+        if severity == "critical":
+            for line in _tail_logs(compose_file, name):
+                click.echo(f"      {line[:160]}")
+        results.append({
+            "component": f"Docker: {name}",
+            "severity": severity,
+            "detail": detail,
+        })
+
+
+def _doctor_check_forwarder(
+    cfg: dict[str, str], results: list[dict[str, str]]
+) -> None:
+    click.echo(click.style("→ Forwarder connectivity", bold=True))
+    base = cfg["url"].rstrip("/")
+    # The forwarder /health is on :8003 directly, not behind Caddy.
+    # Try the configured host (operator may have port-forwarded) first,
+    # then fall back to localhost:8003 for the in-container case.
+    forwarder_url_candidates = []
+    host = base.split("://", 1)[-1].split(":")[0].split("/")[0]
+    if host and host not in ("localhost", "127.0.0.1"):
+        forwarder_url_candidates.append(f"http://{host}:8003/health")
+    forwarder_url_candidates.append("http://localhost:8003/health")
+
+    last_err: str | None = None
+    response_text: str | None = None
+    for url in forwarder_url_candidates:
+        try:
+            r = httpx.get(url, timeout=5.0)
+            response_text = f"HTTP {r.status_code} ({url})"
+            if r.status_code < 500:
+                body: dict[str, Any] = {}
+                try:
+                    body = r.json()
+                except Exception:
+                    body = {}
+                last_event = body.get("last_event") or body.get("last_event_timestamp")
+                age_min: int | None = None
+                if isinstance(last_event, str):
+                    try:
+                        ts = datetime.fromisoformat(last_event.replace("Z", "+00:00"))
+                        age_min = int(
+                            (datetime.now(ts.tzinfo) - ts).total_seconds() // 60
+                        )
+                    except Exception:
+                        age_min = None
+                if r.status_code >= 400:
+                    severity = "critical"
+                    detail = response_text
+                elif age_min is not None and age_min > 30:
+                    severity = "warning"
+                    detail = f"last event {age_min} min ago"
+                else:
+                    severity = "ok"
+                    detail = f"healthy ({url})"
+                    if age_min is not None:
+                        detail = f"last event {age_min} min ago"
+                click.echo(f"  {_doctor_status_marker(severity)} {detail}")
+                results.append({
+                    "component": "Forwarder connectivity",
+                    "severity": severity,
+                    "detail": detail,
+                })
+                return
+        except httpx.HTTPError as exc:
+            last_err = f"{type(exc).__name__}: {exc}"
+            continue
+
+    detail = f"unreachable ({last_err or 'unknown'})"
+    click.echo(f"  {_doctor_status_marker('critical')} {detail}")
+    results.append({"component": "Forwarder connectivity", "severity": "critical", "detail": detail})
+
+
+def _doctor_check_api(cfg: dict[str, str], results: list[dict[str, str]]) -> None:
+    click.echo(click.style("→ API health", bold=True))
+    base = cfg["url"].rstrip("/")
+    # /health is exposed at the root (Caddy maps it directly).
+    start = time.perf_counter()
+    try:
+        r = httpx.get(f"{base}/health", timeout=10.0)
+        elapsed_ms = int((time.perf_counter() - start) * 1000)
+    except httpx.HTTPError as exc:
+        detail = f"unreachable ({type(exc).__name__}: {exc})"
+        click.echo(f"  {_doctor_status_marker('critical')} {detail}")
+        results.append({"component": "API health", "severity": "critical", "detail": detail})
+        return
+    if r.status_code >= 400:
+        detail = f"HTTP {r.status_code} ({elapsed_ms}ms)"
+        click.echo(f"  {_doctor_status_marker('critical')} {detail}")
+        results.append({"component": "API health", "severity": "critical", "detail": detail})
+        return
+    severity = "warning" if elapsed_ms > 2000 else "ok"
+    detail = f"{elapsed_ms}ms"
+    if severity == "warning":
+        detail = f"slow ({elapsed_ms}ms)"
+    click.echo(f"  {_doctor_status_marker(severity)} /health {detail}")
+    results.append({"component": "API health", "severity": severity, "detail": detail})
+
+    # Smoke test /api/events to make sure the database path is working
+    # end-to-end (not just the lightweight /health check).
+    with make_client(cfg) as client:
+        try:
+            r = client.get("/events", params={"limit": 1, "time_window": "24h"})
+            if r.status_code >= 500:
+                detail = f"/api/events {r.status_code}"
+                click.echo(f"  {_doctor_status_marker('critical')} {detail}")
+                results.append({
+                    "component": "API /events smoke",
+                    "severity": "critical",
+                    "detail": detail,
+                })
+            else:
+                items = r.json().get("items") if r.headers.get("content-type", "").startswith("application/json") else None
+                detail = f"OK ({len(items)} item(s) returned)" if isinstance(items, list) else f"HTTP {r.status_code}"
+                click.echo(f"  {_doctor_status_marker('ok')} /api/events {detail}")
+                results.append({
+                    "component": "API /events smoke",
+                    "severity": "ok",
+                    "detail": detail,
+                })
+        except httpx.HTTPError as exc:
+            detail = f"smoke failed: {exc}"
+            click.echo(f"  {_doctor_status_marker('warning')} {detail}")
+            results.append({
+                "component": "API /events smoke",
+                "severity": "warning",
+                "detail": detail,
+            })
+
+
+def _doctor_check_postgres(
+    cfg: dict[str, str], compose_file: str, results: list[dict[str, str]]
+) -> None:
+    click.echo(click.style("→ Postgres connectivity", bold=True))
+    if not os.path.exists(compose_file):
+        click.echo("  skipping — compose file not available")
+        results.append({"component": "Postgres rows", "severity": "skipped", "detail": "no compose file"})
+        return
+    pg_user = cfg.get("pg_user") or DEFAULT_PG_USER
+    pg_db = cfg.get("pg_db") or DEFAULT_PG_DB
+    query = (
+        "SELECT 'signal' AS tbl, COUNT(*) FROM audit_events "
+        "UNION ALL "
+        "SELECT 'noise', COUNT(*) FROM audit_events_noise "
+        "UNION ALL "
+        "SELECT 'recent_1h', COUNT(*) FROM audit_events "
+        "WHERE timestamp >= NOW() - INTERVAL '1 hour';"
+    )
+    cmd = [
+        "docker", "compose", "-f", compose_file, "exec", "-T", "postgres",
+        "psql", "-U", pg_user, "-d", pg_db, "-At", "-F", "|", "-c", query,
+    ]
+    proc = _safe_run(cmd, timeout=30)
+    if proc.returncode != 0:
+        detail = f"psql failed: {(proc.stderr or proc.stdout).strip()[:140]}"
+        click.echo(f"  {_doctor_status_marker('critical')} {detail}")
+        results.append({"component": "Postgres rows", "severity": "critical", "detail": detail})
+        return
+    counts: dict[str, int] = {}
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if "|" not in line:
+            continue
+        label, _, n = line.partition("|")
+        try:
+            counts[label.strip()] = int(n.strip())
+        except ValueError:
+            continue
+    sig = counts.get("signal", 0)
+    noi = counts.get("noise", 0)
+    last_hour = counts.get("recent_1h", 0)
+    click.echo(f"  {_doctor_status_marker('ok')} signal rows  : {sig:,}")
+    click.echo(f"  {_doctor_status_marker('ok')} noise rows   : {noi:,}")
+    severity = "warning" if last_hour == 0 else "ok"
+    line = f"last hour    : {last_hour:,} events"
+    if severity == "warning":
+        line += "  (possible pipeline stall)"
+    click.echo(f"  {_doctor_status_marker(severity)} {line}")
+    results.append({
+        "component": "Postgres rows",
+        "severity": "ok",
+        "detail": f"{sig:,} signal + {noi:,} noise",
+    })
+    results.append({
+        "component": "Pipeline freshness",
+        "severity": severity,
+        "detail": f"{last_hour:,} events in last hour",
+    })
+
+
+def _doctor_check_dead_tuples(
+    cfg: dict[str, str], compose_file: str, results: list[dict[str, str]]
+) -> None:
+    click.echo(click.style("→ Dead-tuple bloat", bold=True))
+    if not os.path.exists(compose_file):
+        click.echo("  skipping — no compose file")
+        results.append({"component": "Dead-tuple bloat", "severity": "skipped", "detail": "no compose file"})
+        return
+    pg_user = cfg.get("pg_user") or DEFAULT_PG_USER
+    pg_db = cfg.get("pg_db") or DEFAULT_PG_DB
+    query = (
+        "SELECT relname, n_dead_tup, n_live_tup "
+        "FROM pg_stat_user_tables ORDER BY n_dead_tup DESC LIMIT 5;"
+    )
+    cmd = [
+        "docker", "compose", "-f", compose_file, "exec", "-T", "postgres",
+        "psql", "-U", pg_user, "-d", pg_db, "-At", "-F", "|", "-c", query,
+    ]
+    proc = _safe_run(cmd, timeout=30)
+    if proc.returncode != 0:
+        detail = f"psql failed: {(proc.stderr or proc.stdout).strip()[:140]}"
+        click.echo(f"  {_doctor_status_marker('warning')} {detail}")
+        results.append({"component": "Dead-tuple bloat", "severity": "warning", "detail": detail})
+        return
+    worst_severity = "ok"
+    worst_detail = "no tables over threshold"
+    for line in proc.stdout.splitlines():
+        parts = [p.strip() for p in line.split("|")]
+        if len(parts) < 3:
+            continue
+        relname = parts[0]
+        try:
+            dead = int(parts[1])
+            live = int(parts[2])
+        except ValueError:
+            continue
+        severity = "warning" if dead > 100_000 else "ok"
+        marker = _doctor_status_marker(severity)
+        click.echo(f"  {marker} {relname.ljust(36)} dead={dead:>10,} live={live:>10,}")
+        if severity == "warning" and worst_severity != "warning":
+            worst_severity = "warning"
+            worst_detail = f"{relname} has {dead:,} dead tuples"
+    results.append({
+        "component": "Dead-tuple bloat",
+        "severity": worst_severity,
+        "detail": worst_detail,
+    })
+
+
+def _doctor_check_config_vars(
+    compose_file: str, results: list[dict[str, str]]
+) -> None:
+    click.echo(click.style("→ Config sanity", bold=True))
+    env_path = os.path.join(os.path.dirname(compose_file), ".env")
+    env = _parse_env_file(env_path)
+    if not env:
+        detail = f"no .env at {env_path}"
+        click.echo(f"  {_doctor_status_marker('warning')} {detail}")
+        results.append({"component": "Config vars", "severity": "warning", "detail": detail})
+        return
+
+    missing: list[str] = []
+    for primary, aliases in REQUIRED_ENV_VARS:
+        if (env.get(primary) or "").strip():
+            click.echo(f"  {_doctor_status_marker('ok')} {primary}")
+            continue
+        alias_hit = next((a for a in aliases if (env.get(a) or "").strip()), None)
+        if alias_hit:
+            click.echo(f"  {_doctor_status_marker('ok')} {primary} (via {alias_hit})")
+            continue
+        click.echo(f"  {_doctor_status_marker('critical')} {primary} missing")
+        missing.append(primary)
+
+    # Reachability-domain ↔ CORS check (best effort).
+    cors_origins = env.get("CORS_ORIGINS", "")
+    if REACHABILITY_DOMAIN and REACHABILITY_DOMAIN not in cors_origins:
+        click.echo(
+            f"  {_doctor_status_marker('warning')} "
+            f"CORS_ORIGINS does not include https://{REACHABILITY_DOMAIN}"
+        )
+        results.append({
+            "component": "Config: CORS_ORIGINS",
+            "severity": "warning",
+            "detail": f"missing {REACHABILITY_DOMAIN}",
+        })
+
+    api_base = env.get("NEXT_PUBLIC_API_BASE_URL", "")
+    if api_base and not api_base.rstrip("/").endswith("/api"):
+        click.echo(
+            f"  {_doctor_status_marker('warning')} "
+            f"NEXT_PUBLIC_API_BASE_URL={api_base!r} does not end with /api"
+        )
+        results.append({
+            "component": "Config: NEXT_PUBLIC_API_BASE_URL",
+            "severity": "warning",
+            "detail": f"value {api_base!r}",
+        })
+
+    if missing:
+        results.append({
+            "component": "Config vars",
+            "severity": "critical",
+            "detail": f"missing: {', '.join(missing)}",
+        })
+    else:
+        results.append({"component": "Config vars", "severity": "ok", "detail": "all required vars set"})
+
+
+def _doctor_check_domain(results: list[dict[str, str]]) -> None:
+    click.echo(click.style("→ Domain reachability", bold=True))
+    if not REACHABILITY_DOMAIN:
+        click.echo("  skipping — no domain configured")
+        results.append({"component": "Domain reachability", "severity": "skipped", "detail": "no domain"})
+        return
+    start = time.perf_counter()
+    try:
+        r = httpx.get(f"https://{REACHABILITY_DOMAIN}/health", timeout=5.0)
+        elapsed_ms = int((time.perf_counter() - start) * 1000)
+    except httpx.HTTPError as exc:
+        detail = f"unreachable ({type(exc).__name__})"
+        click.echo(f"  {_doctor_status_marker('skipped')} {detail}")
+        results.append({"component": "Domain reachability", "severity": "skipped", "detail": detail})
+        return
+    severity = "ok" if 200 <= r.status_code < 400 else "warning"
+    detail = f"HTTP {r.status_code} ({elapsed_ms}ms)"
+    click.echo(f"  {_doctor_status_marker(severity)} {detail}")
+    results.append({"component": "Domain reachability", "severity": severity, "detail": detail})
+
+
+def _doctor_print_summary(results: list[dict[str, str]]) -> int:
+    click.echo()
+    click.echo(click.style("Summary", bold=True))
+    name_w = max(28, max((len(r["component"]) for r in results), default=10))
+    status_w = 12
+    click.echo(f"{'Component'.ljust(name_w)}  {'Status'.ljust(status_w)}  Detail")
+    click.echo("─" * (name_w + status_w + 40))
+    for r in results:
+        sev = r.get("severity", "ok")
+        label = {
+            "ok": click.style("✅ ok", fg="green"),
+            "warning": click.style("⚠️  warn", fg="yellow"),
+            "critical": click.style("❌ critical", fg="red"),
+            "skipped": click.style("⏭️  skipped", dim=True),
+        }.get(sev, sev)
+        click.echo(f"{r['component'].ljust(name_w)}  {label.ljust(status_w)}  {r.get('detail', '')}")
+
+    worst = max((SEVERITY_RANK.get(r.get("severity", "ok"), 0) for r in results), default=0)
+    if worst >= 2:
+        return 2
+    if worst >= 1:
+        return 1
+    return 0
+
+
+@cli.command("doctor")
+def doctor() -> None:
+    """End-to-end deployment health check (Docker + API + Postgres + config).
+
+    Each check runs independently and prints inline status; a final summary
+    table aggregates everything. Exit code: 0 = all green, 1 = any warning,
+    2 = any critical failure. Safe to run in cron / CI.
+    """
+    cfg = load_config()
+    compose_file = _doctor_compose_file(cfg)
+    click.echo(click.style(f"AuditLens doctor — {cfg['url']}", bold=True))
+    click.echo(f"Compose file: {compose_file}")
+    click.echo()
+
+    results: list[dict[str, str]] = []
+
+    # Each check is wrapped — one failure must never crash the run.
+    for label, fn in (
+        ("docker_services", lambda: _doctor_check_docker_services(compose_file, results)),
+        ("forwarder", lambda: _doctor_check_forwarder(cfg, results)),
+        ("api", lambda: _doctor_check_api(cfg, results)),
+        ("postgres", lambda: _doctor_check_postgres(cfg, compose_file, results)),
+        ("dead_tuples", lambda: _doctor_check_dead_tuples(cfg, compose_file, results)),
+        ("config_vars", lambda: _doctor_check_config_vars(compose_file, results)),
+        ("domain", lambda: _doctor_check_domain(results)),
+    ):
+        try:
+            fn()
+        except Exception as exc:  # pragma: no cover - defensive
+            detail = f"{type(exc).__name__}: {exc}"
+            click.echo(click.style(f"  ! check {label!r} crashed: {detail}", fg="red"))
+            results.append({"component": label, "severity": "warning", "detail": detail})
+        click.echo()
+
+    code = _doctor_print_summary(results)
+    sys.exit(code)
 
 
 if __name__ == "__main__":
