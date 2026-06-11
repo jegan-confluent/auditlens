@@ -12,6 +12,8 @@ import asyncio
 import json
 import logging
 import os
+import signal
+import sys
 import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
@@ -1181,3 +1183,176 @@ class AuditForwarderMCP:
             self._alerts_cache[cache_key] = alerts
 
         return alerts
+
+
+# ──────────────────────────── MCP stdio entrypoint ───────────────────────────
+# This module used to define AuditForwarderMCP without ever instantiating
+# it. `python server.py` ran imports + class definition + EOF → exit 0.
+# Docker saw a clean exit + restart: always → 25+ restarts/minute crash
+# loop. Adding the JSON-RPC stdio loop below fixes that.
+#
+# Protocol: JSON-RPC 2.0, one message per line on stdin/stdout. Logging
+# MUST go to stderr only — stdout is the response channel and any stray
+# write would corrupt the wire format.
+
+# JSON-RPC 2.0 error codes (subset of https://www.jsonrpc.org/specification).
+_RPC_PARSE_ERROR = -32700
+_RPC_INVALID_REQUEST = -32600
+_RPC_METHOD_NOT_FOUND = -32601
+_RPC_INTERNAL_ERROR = -32603
+
+
+def _rpc_response(request_id: Any, result: Any) -> Dict[str, Any]:
+    return {"jsonrpc": "2.0", "id": request_id, "result": result}
+
+
+def _rpc_error(request_id: Any, code: int, message: str) -> Dict[str, Any]:
+    return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
+
+
+def _write_line(payload: Dict[str, Any]) -> None:
+    """Emit a single JSON-RPC message to stdout, newline-delimited.
+    Flushed every time so the client (which reads line-by-line) gets
+    the response without buffering."""
+    sys.stdout.write(json.dumps(payload, separators=(",", ":")) + "\n")
+    sys.stdout.flush()
+
+
+async def _dispatch(
+    server: "AuditForwarderMCP", request: Dict[str, Any]
+) -> Optional[Dict[str, Any]]:
+    """Handle one JSON-RPC request. Returns the response dict, or None
+    for JSON-RPC notifications (requests with no ``id``, which by spec
+    do not get a response)."""
+    method = request.get("method")
+    request_id = request.get("id")
+    params = request.get("params") or {}
+    is_notification = "id" not in request
+
+    try:
+        if method == "initialize":
+            return _rpc_response(request_id, server.get_server_info())
+
+        if method == "notifications/initialized":
+            # Standard MCP handshake notification — acknowledge silently.
+            return None
+
+        if method == "tools/list":
+            return _rpc_response(request_id, {"tools": server.list_tools()})
+
+        if method == "tools/call":
+            name = params.get("name")
+            arguments = params.get("arguments") or {}
+            if not name:
+                return _rpc_error(request_id, _RPC_INVALID_REQUEST, "missing tools/call name")
+            result = await server.call_tool(name, arguments)
+            return _rpc_response(request_id, result)
+
+        if method == "resources/list":
+            return _rpc_response(request_id, {"resources": server.list_resources()})
+
+        if method == "resources/read":
+            uri = params.get("uri")
+            if not uri:
+                return _rpc_error(request_id, _RPC_INVALID_REQUEST, "missing resources/read uri")
+            result = await server.read_resource(uri)
+            return _rpc_response(request_id, result)
+
+        if is_notification:
+            # Unknown notifications are silently dropped per JSON-RPC.
+            logger.info("Ignoring unknown notification: %s", method)
+            return None
+        return _rpc_error(request_id, _RPC_METHOD_NOT_FOUND, f"method not found: {method}")
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.exception("Dispatch failed for method %s", method)
+        if is_notification:
+            return None
+        return _rpc_error(request_id, _RPC_INTERNAL_ERROR, str(exc))
+
+
+async def main() -> None:
+    """Run the MCP server over stdio until SIGTERM / SIGINT."""
+    # Logging to STDERR only — any stdout write corrupts the JSON-RPC channel.
+    logging.basicConfig(
+        level=os.getenv("LOG_LEVEL", "INFO").upper(),
+        stream=sys.stderr,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+
+    server = AuditForwarderMCP()
+    logger.info(
+        "MCP server starting (%s v%s) — stdio transport, pid=%d",
+        server.name, server.version, os.getpid(),
+    )
+
+    loop = asyncio.get_running_loop()
+    shutdown_event = asyncio.Event()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(sig, shutdown_event.set)
+        except (NotImplementedError, RuntimeError):
+            # Windows or restricted environments — fall through to the
+            # asyncio.CancelledError path on Ctrl+C.
+            pass
+
+    # Wire an asyncio reader to stdin. If stdin isn't a readable pipe
+    # (e.g., closed in detached docker), connect_read_pipe still works on
+    # the underlying fd but readline() will return b"" — we keep the
+    # process alive across EOF rather than crash-looping the container.
+    reader = asyncio.StreamReader()
+    protocol = asyncio.StreamReaderProtocol(reader)
+    try:
+        await loop.connect_read_pipe(lambda: protocol, sys.stdin)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("Could not attach to stdin (%s); idling until SIGTERM", exc)
+        await shutdown_event.wait()
+        return
+
+    while not shutdown_event.is_set():
+        # Race readline against the shutdown signal so SIGTERM exits
+        # promptly even when the client never sends another message.
+        read_task = asyncio.create_task(reader.readline())
+        shutdown_task = asyncio.create_task(shutdown_event.wait())
+        done, _pending = await asyncio.wait(
+            {read_task, shutdown_task}, return_when=asyncio.FIRST_COMPLETED,
+        )
+        if shutdown_event.is_set():
+            read_task.cancel()
+            break
+        shutdown_task.cancel()
+
+        try:
+            line_bytes = read_task.result()
+        except asyncio.CancelledError:
+            break
+
+        if not line_bytes:
+            # Real EOF — parent process closed stdin. Per spec we never
+            # exit on EOF; sleep so the container stays alive (idle) and
+            # SIGTERM remains the only way out. The 60 s back-off avoids
+            # a tight busy-loop on a permanently closed pipe.
+            await asyncio.sleep(60)
+            continue
+
+        line = line_bytes.decode("utf-8", errors="replace").strip()
+        if not line:
+            continue
+
+        try:
+            request = json.loads(line)
+        except json.JSONDecodeError as exc:
+            _write_line(_rpc_error(None, _RPC_PARSE_ERROR, f"parse error: {exc}"))
+            continue
+        if not isinstance(request, dict):
+            _write_line(_rpc_error(None, _RPC_INVALID_REQUEST, "request must be a JSON object"))
+            continue
+
+        response = await _dispatch(server, request)
+        if response is not None:
+            _write_line(response)
+
+    logger.info("MCP server shutdown clean")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

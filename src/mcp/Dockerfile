@@ -101,10 +101,14 @@ ENV MCP_PORT=8080 \
 # Expose MCP API port
 EXPOSE 8080
 
-# Health check using HTTP endpoint
-# Check every 30s, timeout after 5s, start checking after 15s, retry 3 times before unhealthy
+# Health check: the MCP server speaks JSON-RPC over stdio, so there is
+# no HTTP /health endpoint to probe. We confirm liveness by checking the
+# python process running server.py is still alive in the container's PID
+# namespace. NOTE: docker-compose.prod.yml declares its own healthcheck
+# which takes precedence over this one — keep them in sync if you change
+# either.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD curl -f http://localhost:8080/health || exit 1
+    CMD pgrep -f server.py || exit 1
 
 # Switch to non-root user
 USER mcp
