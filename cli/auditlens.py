@@ -810,7 +810,11 @@ def _http_probe(
         with _ur.urlopen(req, timeout=timeout) as resp:
             elapsed_ms = int((time.perf_counter() - start) * 1000)
             status = resp.status
-            raw = resp.read(8192)
+            # 64 KB is enough for any reasonable health JSON; reading
+            # too little (8 KB) silently failed JSON parsing on the
+            # forwarder's verbose /health body which carries queue
+            # depths + last_event + per-partition lag.
+            raw = resp.read(65536)
     except _ue.HTTPError as exc:
         elapsed_ms = int((time.perf_counter() - start) * 1000)
         ok = (exc.code == expect_status)
@@ -885,20 +889,39 @@ def _tcp_probe(host: str, port: int, *, timeout: float = 3.0) -> dict[str, Any]:
         }
 
 
-def _process_probe(compose_file: str, service: str, pattern: str) -> dict[str, Any]:
-    """`docker compose exec <svc> pgrep -f <pattern>` — returns {ok, pid, detail}.
-    For services that ship their own pgrep (almost all linux containers)."""
+def _process_probe(container_name: str) -> dict[str, Any]:
+    """Check the container's PID 1 is alive via `docker inspect`.
+
+    Earlier versions used `docker compose exec <svc> pgrep -f <pattern>`
+    but `pgrep` is not present in python-slim base images (the mcp-server
+    image), nor in any minimal/distroless image. `docker inspect` reads
+    the container state without entering the container, so it works
+    regardless of what tools were baked in. A container with
+    State.Status=="running" has, by Docker's own definition, a live
+    PID 1 — for the stdio MCP server that IS the python server.py
+    process."""
     proc = _safe_run(
-        ["docker", "compose", "-f", compose_file, "exec", "-T", service,
-         "pgrep", "-f", pattern],
+        ["docker", "inspect", container_name,
+         "--format", "{{.State.Status}}|{{.State.Pid}}|{{.Path}} {{join .Args \" \"}}"],
         timeout=5,
     )
     if proc.returncode != 0:
-        msg = (proc.stderr or proc.stdout).strip()[:80] or "not found"
-        return {"ok": False, "pid": None, "detail": f"pgrep miss: {msg}"}
-    out = proc.stdout.strip().splitlines()
-    pid = out[0] if out else "?"
-    return {"ok": True, "pid": pid, "detail": f"pid {pid} alive"}
+        return {"ok": False, "pid": None,
+                "detail": f"inspect failed: {(proc.stderr or '').strip()[:80]}"}
+    parts = proc.stdout.strip().split("|")
+    if len(parts) < 3:
+        return {"ok": False, "pid": None, "detail": "inspect malformed"}
+    status = parts[0].strip().lower()
+    try:
+        pid = int(parts[1].strip())
+    except ValueError:
+        pid = 0
+    cmdline = parts[2].strip()
+    if status == "running" and pid > 0:
+        return {"ok": True, "pid": str(pid),
+                "detail": f"pid {pid} running ({cmdline[:60]})"}
+    return {"ok": False, "pid": str(pid),
+            "detail": f"status={status} pid={pid}"}
 
 
 def _restart_loop_probe(container_name: str) -> dict[str, Any]:
@@ -1094,10 +1117,7 @@ def _doctor_check_docker_services(
                 probe_text = p["detail"]
                 probe_severity = "ok" if p["ok"] else "critical"
             elif strategy == "process_alive":
-                p = _process_probe(
-                    compose_file, service,
-                    spec.get("process_pattern", "server.py"),
-                )
+                p = _process_probe(container_name)
                 probe_text = f"stdio/no-HTTP ({p['detail']})"
                 probe_severity = "ok" if p["ok"] else "critical"
                 # When the compose-level HTTP healthcheck reports unhealthy
