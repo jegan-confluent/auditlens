@@ -1,5 +1,8 @@
 alembic==1.18.4
 altair==5.5.0
+# anthropic: Claude SDK for the optional AI summary layer. Pulled in only
+# when AI_ENABLED=true; the rest of the API never imports it.
+anthropic>=0.40.0
 annotated-doc==0.0.4
 annotated-types==0.7.0
 anyio==4.13.0

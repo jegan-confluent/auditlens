@@ -926,3 +926,248 @@ work only.
 - Migrations applied: 0027 (auth_role) → 0028 (ipfilter) → 0029 (AT)
   → 0030 (auth_mechanism). All idempotent.
 - 9 commits pushed to github.com:jegan-confluent/auditlens.git main.
+
+## [2026-06-11] Session 17
+
+### Fixed
+- Auth Analytics rendering raw User:8893428 MDS numeric IDs instead of
+  display names → now shows real IAM names (Neeraj Bhasme, Scott Stokes,
+  Luis Alberto Pimentel, etc.)
+  Why: kafka.Authentication noise events ingested the raw "User:N"
+  principal because minimal_normalize never consulted
+  authenticationInfo.principalResourceId. /auth/analytics route also
+  ignored the noise table's own actor_display_name column (added in
+  migration 0031) and relied on a cross-join into audit_events that
+  couldn't match the User:N → u-xxx key spaces.
+  Files: src/product/event_normalization.py (minimal_normalize swap),
+         src/product/db_writer.py + backend/app/services/noise_service.py
+         (column add), backend/app/api/routes/auth_analytics.py (noise
+         display read-through), tests/test_minimal_normalize.py (+4),
+         backend/tests/test_noise_api.py (+2),
+         backend/alembic/versions/0031_add_actor_enrichment_to_noise.py
+  Commits: ee44cc2, 3f35a58, 0ed6533
+
+- mcp-server crash-loop (25+ restarts/min) → process now stays up
+  cleanly.
+  Why: src/mcp/server.py defined AuditForwarderMCP but had no
+  `if __name__ == "__main__"` block. `python server.py` exited 0
+  immediately on import + EOF; restart: always then put the container
+  in a flap loop.
+  Files: src/mcp/server.py (+175 lines for JSON-RPC stdio entrypoint
+         covering initialize / tools/list / tools/call / resources/list
+         / resources/read / notifications/initialized + SIGTERM/SIGINT
+         handlers), src/mcp/Dockerfile (HEALTHCHECK curl → pgrep),
+         docker-compose.prod.yml (compose-level healthcheck swap)
+  Commits: b2bca20, abf7cd0
+
+- Doctor probe falsely flagged forwarder as "JSON missing key 'status'"
+  → now reads up to 64 KB and parses correctly.
+  Why: _http_probe was reading 8 KB of body. The forwarder /health JSON
+  is bigger (queue depths + last_event + per-partition lag), so
+  json.loads silently failed and the expect_json_key check fired.
+  Files: cli/auditlens.py
+  Commits: 8c68ffa
+
+- Doctor process_alive used `pgrep` which isn't in python:3.11-slim →
+  now uses `docker inspect`.
+  Why: mcp-server's slim base image doesn't ship procps. Switched to
+  `docker inspect <name> --format '{{.State.Status}}|{{.State.Pid}}|
+  {{.Path}} {{.Args}}'` which works regardless of which tools are baked
+  into the image.
+  Files: cli/auditlens.py
+  Commits: 8c68ffa
+
+- Doctor over-matched "TLS/cert issue" on benign lines like
+  `caller=tls_config.go ... msg="TLS is disabled."` → now requires
+  same-line co-occurrence of an error keyword.
+  Why: the original pattern was a bare substring match. Tightened to
+  `tls|ssl|certificate` AND (`error|fail|invalid|expired|refused|cannot
+  |unable`) on the same line.
+  Files: cli/auditlens.py
+  Commits: 57f09de
+
+- Doctor flagged alertmanager as CRITICAL "connect refused" → now
+  process_alive (correctly reflects state of host-bound 127.0.0.1:9093).
+  Why: probe ran from inside the API container's network, where
+  host-bound ports aren't reachable. Switched to process_alive +
+  comment in SERVICE_PROBES.
+  Files: cli/auditlens.py
+  Commits: 57f09de
+
+- `make doctor` returned non-zero on warnings, breaking CI → suppressed
+  in the Makefile target.
+  Why: doctor's exit code 1 (warning) was correct semantics but Make
+  treated it as failure. Operator decision: warnings shouldn't gate.
+  Files: Makefile (user-applied)
+  Commits: 975d3f2 (user)
+
+### Added
+- `auditlens doctor` — unified deployment health check at
+  `cli/auditlens.py`. Seven independent checks (Docker services,
+  forwarder, API, postgres, dead-tuples, config, domain), each wrapped
+  so a broken check never aborts the run. Summary table with severity
+  ranking drives exit code (0 ok, 1 warn, 2 critical) for cron/CI use.
+  Why: prior tooling (`make status`, `scripts/diagnose.py`) covered
+  narrower slices; nothing pulled it all into one opinionated report.
+  Files: cli/auditlens.py (+1258 lines net), cli/README.md (+49),
+         cli/__init__.py (new), Makefile (`doctor`, `cli-status` targets)
+  Commits: c546949
+
+- Per-service deep probing in doctor — SERVICE_PROBES dict with 10
+  entries declaring container_name / host_port / probe_strategy
+  (http / tcp_connect / process_alive). Three stdlib-only probe
+  functions: _http_probe (urllib), _tcp_probe (socket), _process_probe
+  (docker inspect), plus _restart_loop_probe and _parse_compose_ports.
+  Per-service line now shows probe result + restart count; summary
+  table adds a "Probe" column.
+  Why: the previous one-liner ("running" / "healthy" / "starting") hid
+  real issues — e.g., alertmanager looked fine to `docker compose ps`
+  but the port wasn't reachable.
+  Files: cli/auditlens.py
+  Commits: a45a142
+
+- Auto-diagnose on failure — when a per-service probe is CRITICAL or
+  an actionable WARNING, doctor pulls 40 lines via `docker compose
+  logs --no-color`, falls back to `docker logs <container>` on empty,
+  pattern-matches against 13 known failure shapes, and prints
+  DIAGNOSIS + FIX + last 5 log lines inline under the service.
+  mcp-server stdio mismatch has a special-case no-log path.
+  Why: turning a "❌ alertmanager connection refused" line into a
+  named diagnosis with a copy-pasteable fix is the difference between
+  "doctor reports a problem" and "doctor helps you fix it".
+  Files: cli/auditlens.py
+  Commits: 2b28c00
+
+- Frontend canonical principal helper at `frontend/lib/principal.ts` —
+  displayActor / actorTooltip / isServiceAccountActor / isPlatformActor
+  / looksLikeJsonActor / stripPrincipalPrefix / isEnrichedDisplay /
+  isUnknownLabel. Replaces inline prefix-stripping and unknown-label
+  logic that was duplicated across 5+ components.
+  Why: Issue 5 of the 7-issue batch — divergent display logic was
+  rendering "User:" prefixes on some pages and stripping them on
+  others. Single source of truth now.
+  Files: frontend/lib/principal.ts (new), AuditEventTable.tsx,
+         EventDetailDrawer.tsx, ActorActivityPanel.tsx,
+         NarrativeStrip.tsx, ActionAlertBanner.tsx,
+         SignalSummaryPanel.tsx, RecurringPatterns.tsx
+  Commits: ee44cc2
+
+- Frontend canonical time-window default at `frontend/lib/timeWindows.ts`
+  — DEFAULT_TIME_WINDOW = "24h", TIME_WINDOW_OPTIONS. Replaces hardcoded
+  "12h"/"24h"/"7d" defaults across dashboard, events, actor activity.
+  Why: Issue 9 — pages disagreed on what "default" meant; UX
+  inconsistency.
+  Files: frontend/lib/timeWindows.ts (new), eventFilters.ts,
+         dashboard/page.tsx, ActorActivityPanel.tsx
+  Commits: ee44cc2
+
+- Pydantic response_model for /auth/analytics — AuthAnalyticsResponse +
+  sub-models. Schema drift risk closed.
+  Files: backend/app/api/routes/auth_analytics.py,
+         backend/tests/test_auth_analytics_api.py (new, +4 tests)
+  Commits: ee44cc2
+
+- statement_timeout dialect guards on 3 previously-unbounded endpoints
+  (access_transparency, actors/{id}/ip-baseline, auth_analytics
+  cross-query); time-window bounds added where missing.
+  Files: backend/app/api/routes/{access_transparency,actors,
+         auth_analytics}.py
+  Commits: ee44cc2
+
+- Access Transparency response now projects actor_display_name +
+  actor_email; frontend renders with raw-actor tooltip.
+  Files: backend/app/api/routes/access_transparency.py,
+         frontend/lib/api.ts, frontend/app/access-transparency/page.tsx
+  Commits: ee44cc2
+
+- Migration 0031 — actor_display_name + actor_email columns on
+  audit_events_noise.
+  Files: backend/alembic/versions/0031_add_actor_enrichment_to_noise.py
+  Commits: ee44cc2
+
+### Removed
+- Misleading "Actor IDs cannot be resolved to email addresses"
+  disclaimer in frontend/app/auth-analytics/page.tsx. The API DID
+  return them; the disclaimer contradicted the contract.
+  Files: frontend/app/auth-analytics/page.tsx
+  Commits: ee44cc2
+
+### Architecture Decisions
+- Probe strategy enum: http / tcp_connect / process_alive. Stdlib-only
+  (urllib.request, socket, subprocess). Doctor must have zero non-stdlib
+  deps beyond click + httpx — adding `requests` or similar would defeat
+  the purpose of a quick-running ops tool.
+  Impact: every new service added to SERVICE_PROBES must pick one of
+  these three; HTTP-but-host-bound services use process_alive.
+
+- TLS diagnosis tightened to per-line co-occurrence. Bare substring
+  matches over the full joined log text caused false positives on
+  benign mentions (e.g. `tls_config.go`). The trade-off: a real TLS
+  failure split across two log lines won't match. Acceptable because
+  the operator still sees the last 5 log lines.
+  Impact: pattern dict now has 13 entries (was 16); the TLS rule lives
+  inside _match_diagnosis as a special pre-check.
+
+- mcp-server transport stays stdio. Switching to HTTP/SSE would be a
+  separate refactor; for now both Dockerfile and compose healthchecks
+  use `pgrep -f server.py` (compose override wins, so the Dockerfile
+  change was belt-and-braces).
+  Impact: doctor can never use HTTP probe for mcp-server; the SERVICE
+  _PROBES entry pins probe_strategy=process_alive.
+
+- Backfill quality filter for User:N → display_name: only accept
+  audit_events rows where actor_display_name is NOT a raw u-/sa- ID
+  AND NOT a literal numeric. Prevents junk display names (e.g. literal
+  "8893428") from propagating into audit_events_noise.
+  Impact: ~5.2M auth-only User:N rows that have NO mapping in
+  audit_events remain unresolved (only 56,680 + 2,244 rows resolved).
+  Going forward the principalResourceId swap in minimal_normalize
+  handles new events directly.
+
+### Known Issues / Not Done
+- Alertmanager :9093 is not externally reachable on EC2 despite the
+  container running and binding [::]:9093 internally. Doctor now
+  reports it correctly (process_alive=ok with "no healthcheck in
+  compose" warning) but the underlying networking issue is a separate
+  investigation. Likely IPv6 vs Docker user-bridge interaction.
+
+- ~5.2M historical kafka.Authentication noise rows still carry raw
+  User:N actors because the corresponding IAM principal never appeared
+  in audit_events.raw_payload for cross-extraction. Mining external
+  sources (e.g. Confluent Cloud confluent_user_id field if it exists
+  in the v2 API response, which this codebase doesn't currently consume)
+  is the only way to resolve them retroactively.
+
+- README.md got a major rewrite in this session (Architecture, Features
+  per subsection, Internal Deployment, CLI Reference, make doctor,
+  Operations, Testing, Roadmap) but is uncommitted on disk. User
+  reverted my git add -A on the new doctor commit to keep that diff
+  scoped; the README rewrite is staged separately and waits for a
+  follow-up commit.
+
+- Pre-signup Lambda for @confluent.io enforcement (infra/aws/04_wire_
+  google_idp.sh) still deferred — needs Google OAuth credentials to
+  run.
+
+- Frontend has no Vitest/Playwright harness; `principal.ts` and
+  `timeWindows.ts` would benefit from unit tests but the framework
+  isn't set up.
+
+- mcp-server inside a detached docker compose has /dev/null stdin, so
+  the new JSON-RPC stdio loop logs an asyncio PermissionError from
+  selectors.register on epoll → falls through to "idle until SIGTERM".
+  Process stays up but can't actually serve MCP traffic in this
+  deployment mode. Acceptable for now since no client connects;
+  proper fix is an HTTP/SSE transport.
+
+### Test status
+- Baseline at session start: 768 passed, 5 skipped.
+- After Issues 1/2/4/5/6/7/9 batch: 777 passed (+9 new tests across
+  minimal_normalize, noise_api, auth_analytics_api).
+- After User:XXXXXXX MDS swap fix: 781 passed (+4 swap tests).
+- After auth_analytics noise-display-name routing: 782 passed (+1).
+- After doctor work (3 commits): 782 passed (CLI is not unit-tested).
+- Final: 782 passed, 5 skipped, 0 failures.
+- Migrations applied on EC2: 0031_add_actor_enrichment_to_noise.
+- 13 commits pushed to github.com:jegan-confluent/auditlens.git main
+  via git push-external (Confluent's external-push wrapper).

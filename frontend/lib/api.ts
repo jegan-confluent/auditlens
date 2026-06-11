@@ -434,6 +434,64 @@ export function getAuthAnalytics(timeWindow: "1d" | "7d" = "1d", signal?: AbortS
   return request<AuthAnalyticsResponse>(`/auth/analytics?time_window=${timeWindow}`, signal);
 }
 
+// ── AI Summary ────────────────────────────────────────────────────────
+// Optional Claude-powered narrative layer. Health probe is cheap (no AI
+// call); POST /ai/summary makes the actual call. The frontend uses the
+// health probe to decide whether to render the panel at all.
+
+export type AISummaryStatus = "ok" | "disabled" | "error" | "empty";
+
+export type AuditSummaryAI = {
+  status: AISummaryStatus;
+  generated_at: string;
+  window_hours: number;
+  headline?: string | null;
+  health?: "healthy" | "elevated" | "critical" | null;
+  summary?: string | null;
+  anomalies?: string[];
+  top_risk?: string | null;
+  recommended_actions?: string[];
+  confidence?: "high" | "medium" | "low" | null;
+  context_used?: Record<string, unknown>;
+  model_used?: string | null;
+  latency_ms?: number | null;
+  message?: string | null;
+};
+
+export type AISummaryHealth = {
+  enabled: boolean;
+  configured: boolean;
+  model: string;
+  cache_ttl_seconds: number;
+  reachable: boolean | null;
+  message?: string | null;
+};
+
+export async function getAISummaryHealth(signal?: AbortSignal): Promise<AISummaryHealth> {
+  return request<AISummaryHealth>("/ai/summary/health", signal);
+}
+
+export async function generateAISummary(
+  windowHours: number = 24,
+  force: boolean = false,
+  signal?: AbortSignal,
+): Promise<AuditSummaryAI> {
+  const params = new URLSearchParams();
+  if (force) params.set("force", "true");
+  const qs = params.toString();
+  const response = await fetch(`${API_BASE}/ai/summary${qs ? `?${qs}` : ""}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    cache: "no-store",
+    signal,
+    body: JSON.stringify({ window_hours: windowHours, force }),
+  });
+  if (!response.ok) {
+    throw new Error(`${response.status} ${response.statusText}`);
+  }
+  return response.json() as Promise<AuditSummaryAI>;
+}
+
 export async function getReadinessStatus(signal?: AbortSignal): Promise<ReadinessSnapshot> {
   try {
     const response = await fetch(`${API_BASE}/ready`, { cache: "no-store", signal });

@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import ActionFeed from "../../components/ActionFeed";
+import AISummaryPanel from "../../components/AISummaryPanel";
 import ErrorState from "../../components/ErrorState";
 import LoadingState from "../../components/LoadingState";
 import NarrativeStrip from "../../components/NarrativeStrip";
@@ -183,8 +184,11 @@ export default function DashboardPage() {
 
   const lag = classifyLag(newestEvent);
 
+  const aiWindowHours = timeWindow === "1h" ? 1 : timeWindow === "6h" ? 6 : timeWindow === "7d" ? 168 : 24;
+
   return (
     <main className="page">
+      <AISummaryPanel windowHours={aiWindowHours} />
       {summary ? <NarrativeStrip summary={summary} timeWindow={timeWindow} /> : null}
       {lag && lag.tone === "critical" ? (
         <div className="lag-banner critical" role="status">
