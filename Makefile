@@ -185,7 +185,7 @@ diagnose-ingest: ## 60-second forwarder ingest sample — rate, lag trend, bottl
 	@python3 scripts/diagnose.py --ingest-only
 
 doctor: ## Run the unified deployment health check (Docker + API + Postgres + config)
-	@python3 cli/auditlens.py doctor
+	-@python3 cli/auditlens.py doctor
 
 cli-status: ## Compact pipeline-freshness summary via the CLI
 	@python3 cli/auditlens.py pipeline status
