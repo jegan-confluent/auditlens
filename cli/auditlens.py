@@ -676,15 +676,335 @@ def _doctor_status_marker(severity: str) -> str:
     return click.style("⏭️ ", dim=True)
 
 
+# ──────────── per-service deep probes ────────────
+# SERVICE_PROBES is the doctor's view of every service that ships in
+# docker-compose.prod.yml. Each entry says: which container holds it,
+# which port to hit, and which probe strategy to use. Ports are an
+# overridable default — _parse_compose_ports() reads the live compose
+# file at runtime and replaces these when it can.
+#
+# probe_strategy:
+#   "http"           — urllib.request GET (or method=…); checks status
+#                      code and optionally a top-level JSON key.
+#   "tcp_connect"    — socket.create_connection only. Cheapest probe; use
+#                      it for services where opening the port without
+#                      authentication is enough proof of life.
+#   "process_alive"  — docker compose exec <svc> pgrep -f <pattern>.
+#                      Required for stdio MCP / any service that has no
+#                      HTTP endpoint to probe.
+SERVICE_PROBES: dict[str, dict[str, Any]] = {
+    "api": {
+        "container_name": "auditlens-api",
+        "host_port": 8080,
+        "probe_strategy": "http",
+        "probe_path": "/health",
+        "expect_status": 200,
+        "expect_json_key": "status",
+        "timeout": 5,
+    },
+    "frontend": {
+        "container_name": "auditlens-frontend",
+        "host_port": 3000,
+        "probe_strategy": "http",
+        # Matches the compose healthcheck (Next.js root may redirect).
+        "probe_path": "/dashboard",
+        "expect_status": 200,
+        "timeout": 5,
+    },
+    "auditlens-forwarder": {
+        "container_name": "auditlens-forwarder",
+        "host_port": 8003,
+        "probe_strategy": "http",
+        "probe_path": "/health",
+        "expect_status": 200,
+        "expect_json_key": "status",
+        "timeout": 5,
+        # When the probe returns JSON, doctor also surfaces last_event age.
+        "include_last_event": True,
+    },
+    "mcp-server": {
+        "container_name": "audit-mcp-server",
+        "host_port": 8089,
+        # MCP speaks JSON-RPC over stdin/stdout — there is no HTTP endpoint.
+        # The compose healthcheck (curl :8089/health) is misconfigured for
+        # this transport and will always fail; doctor flags the mismatch
+        # explicitly when the container reports unhealthy.
+        "probe_strategy": "process_alive",
+        "process_pattern": "server.py",
+        "transport": "stdio",
+        "timeout": 5,
+    },
+    "postgres": {
+        "container_name": "auditlens-postgres",
+        "host_port": 5432,
+        # pg_isready needs the right auth context; a TCP connect plus the
+        # downstream Postgres-rows check together prove the database path
+        # without doctor having to know the password.
+        "probe_strategy": "tcp_connect",
+        "timeout": 3,
+    },
+    "prometheus": {
+        "container_name": "audit-prometheus",
+        "host_port": 9090,
+        "probe_strategy": "http",
+        "probe_path": "/-/healthy",
+        "expect_status": 200,
+        "timeout": 5,
+    },
+    "grafana": {
+        "container_name": "audit-grafana",
+        "host_port": 3001,
+        "probe_strategy": "http",
+        "probe_path": "/api/health",
+        "expect_status": 200,
+        "timeout": 5,
+    },
+    "alertmanager": {
+        "container_name": "audit-alertmanager",
+        "host_port": 9093,
+        "probe_strategy": "http",
+        "probe_path": "/-/healthy",
+        "expect_status": 200,
+        "timeout": 5,
+        "no_compose_healthcheck": True,
+    },
+    "postgres-exporter": {
+        "container_name": "auditlens-postgres-exporter",
+        "host_port": 9187,
+        "probe_strategy": "http",
+        "probe_path": "/metrics",
+        "expect_status": 200,
+        "timeout": 5,
+        "no_compose_healthcheck": True,
+    },
+    "caddy": {
+        "container_name": "auditlens-caddy",
+        "host_port": 80,
+        "probe_strategy": "http",
+        "probe_path": "/health",
+        "expect_status": 200,
+        "timeout": 5,
+    },
+}
+
+
+def _http_probe(
+    host: str,
+    port: int,
+    path: str,
+    *,
+    method: str = "GET",
+    expect_status: int = 200,
+    expect_json_key: str | None = None,
+    timeout: float = 5.0,
+) -> dict[str, Any]:
+    """stdlib-only HTTP probe. Returns
+        {ok, status_code, response_ms, detail, body}
+    The body is parsed JSON when the response looks JSON-shaped, else None."""
+    import urllib.request as _ur
+    import urllib.error as _ue
+    url = f"http://{host}:{port}{path}"
+    req = _ur.Request(url, method=method)
+    start = time.perf_counter()
+    try:
+        with _ur.urlopen(req, timeout=timeout) as resp:
+            elapsed_ms = int((time.perf_counter() - start) * 1000)
+            status = resp.status
+            raw = resp.read(8192)
+    except _ue.HTTPError as exc:
+        elapsed_ms = int((time.perf_counter() - start) * 1000)
+        ok = (exc.code == expect_status)
+        return {
+            "ok": ok,
+            "status_code": exc.code,
+            "response_ms": elapsed_ms,
+            "detail": f"HTTP {exc.code} {elapsed_ms}ms",
+            "body": None,
+        }
+    except _ue.URLError as exc:
+        elapsed_ms = int((time.perf_counter() - start) * 1000)
+        reason = getattr(exc, "reason", exc)
+        return {
+            "ok": False,
+            "status_code": None,
+            "response_ms": elapsed_ms,
+            "detail": f"connect refused: {reason}",
+            "body": None,
+        }
+    except Exception as exc:  # pragma: no cover - defensive
+        elapsed_ms = int((time.perf_counter() - start) * 1000)
+        return {
+            "ok": False,
+            "status_code": None,
+            "response_ms": elapsed_ms,
+            "detail": f"{type(exc).__name__}: {exc}",
+            "body": None,
+        }
+
+    body: Any = None
+    if raw and raw.lstrip()[:1] in (b"{", b"["):
+        try:
+            body = json.loads(raw)
+        except Exception:
+            body = None
+
+    if status != expect_status:
+        return {
+            "ok": False, "status_code": status, "response_ms": elapsed_ms,
+            "detail": f"HTTP {status} (expected {expect_status})", "body": body,
+        }
+    if expect_json_key:
+        if not isinstance(body, dict) or expect_json_key not in body:
+            return {
+                "ok": False, "status_code": status, "response_ms": elapsed_ms,
+                "detail": f"HTTP {status} {elapsed_ms}ms — JSON missing key '{expect_json_key}'",
+                "body": body,
+            }
+    return {
+        "ok": True, "status_code": status, "response_ms": elapsed_ms,
+        "detail": f"HTTP {status} {elapsed_ms}ms", "body": body,
+    }
+
+
+def _tcp_probe(host: str, port: int, *, timeout: float = 3.0) -> dict[str, Any]:
+    """stdlib-only TCP connect probe. Returns {ok, response_ms, detail}."""
+    import socket as _sock
+    start = time.perf_counter()
+    try:
+        with _sock.create_connection((host, port), timeout=timeout):
+            elapsed_ms = int((time.perf_counter() - start) * 1000)
+            return {
+                "ok": True, "response_ms": elapsed_ms,
+                "detail": f"TCP open {elapsed_ms}ms",
+            }
+    except Exception as exc:
+        elapsed_ms = int((time.perf_counter() - start) * 1000)
+        return {
+            "ok": False, "response_ms": elapsed_ms,
+            "detail": f"TCP probe failed: {type(exc).__name__}",
+        }
+
+
+def _process_probe(compose_file: str, service: str, pattern: str) -> dict[str, Any]:
+    """`docker compose exec <svc> pgrep -f <pattern>` — returns {ok, pid, detail}.
+    For services that ship their own pgrep (almost all linux containers)."""
+    proc = _safe_run(
+        ["docker", "compose", "-f", compose_file, "exec", "-T", service,
+         "pgrep", "-f", pattern],
+        timeout=5,
+    )
+    if proc.returncode != 0:
+        msg = (proc.stderr or proc.stdout).strip()[:80] or "not found"
+        return {"ok": False, "pid": None, "detail": f"pgrep miss: {msg}"}
+    out = proc.stdout.strip().splitlines()
+    pid = out[0] if out else "?"
+    return {"ok": True, "pid": pid, "detail": f"pid {pid} alive"}
+
+
+def _restart_loop_probe(container_name: str) -> dict[str, Any]:
+    """Read RestartCount + last ExitCode from `docker inspect`. Categorises:
+
+      restarts > 5  + exit=0   → critical (clean-exit loop, e.g. missing
+                                  entrypoint — the mcp-server bug pattern)
+      restarts > 5  + exit!=0  → critical (crash loop)
+      0 < restarts ≤ 5         → warning  (recent recovery)
+      restarts == 0            → ok
+    """
+    proc = _safe_run(
+        ["docker", "inspect", container_name,
+         "--format", "{{.RestartCount}}|{{.State.ExitCode}}|{{.State.Status}}"],
+        timeout=5,
+    )
+    if proc.returncode != 0:
+        return {"ok": False, "severity": "warning", "detail": "inspect failed",
+                "restart_count": -1}
+    parts = proc.stdout.strip().split("|")
+    if len(parts) < 3:
+        return {"ok": False, "severity": "warning", "detail": "inspect malformed",
+                "restart_count": -1}
+    try:
+        restart_count = int(parts[0])
+        exit_code = int(parts[1])
+    except ValueError:
+        return {"ok": False, "severity": "warning", "detail": "inspect non-numeric",
+                "restart_count": -1}
+    if restart_count > 5:
+        if exit_code == 0:
+            return {"ok": False, "severity": "critical",
+                    "detail": f"{restart_count} restarts (clean-exit loop)",
+                    "restart_count": restart_count}
+        return {"ok": False, "severity": "critical",
+                "detail": f"{restart_count} restarts (crash loop, exit {exit_code})",
+                "restart_count": restart_count}
+    if restart_count > 0:
+        return {"ok": False, "severity": "warning",
+                "detail": f"{restart_count} recent restarts",
+                "restart_count": restart_count}
+    return {"ok": True, "severity": "ok", "detail": "0 restarts",
+            "restart_count": 0}
+
+
+def _parse_compose_ports(compose_file: str) -> dict[str, int]:
+    """Best-effort: pull the host-side port for each service from
+    docker-compose.prod.yml. Returns {service_name: host_port}. Substitutes
+    `${VAR:-default}` patterns. Silently returns {} on parse failure — the
+    SERVICE_PROBES defaults always win as the fallback."""
+    try:
+        with open(compose_file, "r", encoding="utf-8") as fh:
+            content = fh.read()
+    except OSError:
+        return {}
+    import re as _re
+    out: dict[str, int] = {}
+    parts = _re.split(r"^  ([a-z][a-z0-9-]*):\s*$", content, flags=_re.M)
+    # parts = [pre, name1, body1, name2, body2, ...]
+    for i in range(1, len(parts) - 1, 2):
+        name = parts[i]
+        body = parts[i + 1]
+        ports_block = _re.search(r"ports:\s*\n((?:\s{6,}-.*\n)+)", body)
+        if not ports_block:
+            continue
+        for line in ports_block.group(1).splitlines():
+            m = _re.search(r'"\s*(?:[\d.]+:)?([^":\s]+):([^":\s]+)\s*"', line)
+            if not m:
+                continue
+            host_part = m.group(1).strip()
+            sub = _re.search(r"\$\{[^:}]+:-([^}]+)\}", host_part)
+            if sub:
+                host_part = sub.group(1)
+            try:
+                out[name] = int(host_part)
+                break
+            except ValueError:
+                continue
+    return out
+
+
+def _format_last_event_age(body: Any) -> str:
+    """Pull last_event timestamp out of /health body and render Nm ago."""
+    if not isinstance(body, dict):
+        return ""
+    last_event = body.get("last_event") or body.get("last_event_timestamp")
+    if not isinstance(last_event, str) or not last_event:
+        return ""
+    try:
+        ts = datetime.fromisoformat(last_event.replace("Z", "+00:00"))
+        age_min = int((datetime.now(ts.tzinfo) - ts).total_seconds() // 60)
+        return f"last event {age_min}m ago"
+    except Exception:
+        return ""
+
+
 def _doctor_check_docker_services(
     compose_file: str, results: list[dict[str, str]]
 ) -> None:
-    click.echo(click.style("→ Docker services", bold=True))
+    click.echo(click.style("→ Docker services (deep probe)", bold=True))
     if not os.path.exists(compose_file):
         click.echo(f"  compose file not found: {compose_file}")
         results.append({
             "component": "Docker compose",
             "severity": "critical",
+            "probe": "—",
             "detail": f"missing {compose_file}",
         })
         return
@@ -695,37 +1015,132 @@ def _doctor_check_docker_services(
         results.append({
             "component": "Docker daemon",
             "severity": "critical",
+            "probe": "—",
             "detail": "no containers reported",
         })
         return
 
+    parsed_ports = _parse_compose_ports(compose_file)
+    by_service: dict[str, tuple[dict[str, str], str, str]] = {}
     for row in rows:
         name, state, health = _docker_service_status(row)
+        by_service[name] = (row, state, health)
+
+    name_w = max(len(s) for s in SERVICE_PROBES)
+
+    for service, spec in SERVICE_PROBES.items():
+        row_data = by_service.get(service)
+        if row_data is None:
+            click.echo(f"  {_doctor_status_marker('warning')} "
+                       f"{service.ljust(name_w)} not deployed")
+            results.append({
+                "component": f"Docker: {service}",
+                "severity": "warning",
+                "probe": "—",
+                "detail": "not in `docker compose ps`",
+            })
+            continue
+        _row, state, health = row_data
+        container_name = spec.get("container_name", service)
+
+        # 1. Restart-loop probe (independent of the deep probe).
+        rl = _restart_loop_probe(container_name)
+        restart_severity = rl.get("severity", "ok")
+        restart_detail = rl.get("detail", "—")
+
+        # 2. Docker state.
         if state != "running":
             severity = "critical"
-            detail = f"state={state or 'unknown'}"
-        elif health == "unhealthy":
-            severity = "critical"
-            detail = "unhealthy"
-        elif health == "starting":
-            severity = "warning"
-            detail = "starting"
-        elif health == "":
-            # Running with no healthcheck declared — not a failure but
-            # operators should know which services lack a probe.
-            severity = "warning"
-            detail = "running (no healthcheck)"
-        else:
-            severity = "ok"
-            detail = "healthy"
-        click.echo(f"  {_doctor_status_marker(severity)} {name.ljust(28)} {detail}")
-        if severity == "critical":
-            for line in _tail_logs(compose_file, name):
-                click.echo(f"      {line[:160]}")
+            probe_text = "—"
+            detail_text = f"state={state or 'unknown'}"
+            click.echo(f"  {_doctor_status_marker(severity)} "
+                       f"{service.ljust(name_w)} {state or 'down':<8} | {probe_text:<32} | {restart_detail}")
+            if state in ("exited", "stopped", "dead"):
+                for line in _tail_logs(compose_file, service):
+                    click.echo(f"      {line[:160]}")
+            results.append({
+                "component": f"Docker: {service}",
+                "severity": severity,
+                "probe": probe_text,
+                "detail": f"{detail_text} | {restart_detail}",
+            })
+            continue
+
+        # 3. Per-service deep probe.
+        strategy = spec.get("probe_strategy", "http")
+        port = parsed_ports.get(service) or spec.get("host_port") or 0
+        probe_text = "—"
+        probe_severity = "ok"
+        notes: list[str] = []
+
+        try:
+            if strategy == "http":
+                p = _http_probe(
+                    "127.0.0.1", int(port), spec.get("probe_path", "/"),
+                    method=spec.get("method", "GET"),
+                    expect_status=spec.get("expect_status", 200),
+                    expect_json_key=spec.get("expect_json_key"),
+                    timeout=spec.get("timeout", 5),
+                )
+                probe_text = p["detail"]
+                probe_severity = "ok" if p["ok"] else "critical"
+                if spec.get("include_last_event"):
+                    age = _format_last_event_age(p.get("body"))
+                    if age:
+                        notes.append(age)
+            elif strategy == "tcp_connect":
+                p = _tcp_probe("127.0.0.1", int(port),
+                               timeout=spec.get("timeout", 3))
+                probe_text = p["detail"]
+                probe_severity = "ok" if p["ok"] else "critical"
+            elif strategy == "process_alive":
+                p = _process_probe(
+                    compose_file, service,
+                    spec.get("process_pattern", "server.py"),
+                )
+                probe_text = f"stdio/no-HTTP ({p['detail']})"
+                probe_severity = "ok" if p["ok"] else "critical"
+                # When the compose-level HTTP healthcheck reports unhealthy
+                # against a stdio server, surface the configuration mismatch
+                # rather than silently letting it look like a real failure.
+                if health in ("unhealthy", "starting"):
+                    notes.append(
+                        "compose HTTP healthcheck mismatched stdio transport — "
+                        "fix: change compose to pgrep")
+                    if probe_severity == "ok":
+                        probe_severity = "warning"
+            else:
+                probe_text = f"strategy={strategy}"
+                probe_severity = "warning"
+        except Exception as exc:  # pragma: no cover - defensive
+            probe_text = f"probe crashed: {type(exc).__name__}"
+            probe_severity = "warning"
+
+        # 4. Services that ship without a compose-level healthcheck are
+        #    flagged so operators know which signals are deliberately
+        #    missing from `docker compose ps`.
+        if spec.get("no_compose_healthcheck"):
+            notes.append("no healthcheck in compose")
+            if probe_severity == "ok":
+                probe_severity = "warning"
+
+        worst = max(
+            (restart_severity, probe_severity),
+            key=lambda s: SEVERITY_RANK.get(s, 0),
+        )
+        click.echo(
+            f"  {_doctor_status_marker(worst)} {service.ljust(name_w)} "
+            f"{state:<8} | {probe_text:<40} | {restart_detail}"
+        )
+        for note in notes:
+            click.echo(f"           └─ {note}")
+
+        detail_parts = [probe_text, restart_detail] + notes
         results.append({
-            "component": f"Docker: {name}",
-            "severity": severity,
-            "detail": detail,
+            "component": f"Docker: {service}",
+            "severity": worst,
+            "probe": probe_text,
+            "detail": " | ".join(detail_parts),
         })
 
 
@@ -1043,8 +1458,12 @@ def _doctor_print_summary(results: list[dict[str, str]]) -> int:
     click.echo(click.style("Summary", bold=True))
     name_w = max(28, max((len(r["component"]) for r in results), default=10))
     status_w = 12
-    click.echo(f"{'Component'.ljust(name_w)}  {'Status'.ljust(status_w)}  Detail")
-    click.echo("─" * (name_w + status_w + 40))
+    probe_w = max(20, max((len(r.get("probe", "—")) for r in results), default=10))
+    click.echo(
+        f"{'Component'.ljust(name_w)}  {'Status'.ljust(status_w)}  "
+        f"{'Probe'.ljust(probe_w)}  Detail"
+    )
+    click.echo("─" * (name_w + status_w + probe_w + 40))
     for r in results:
         sev = r.get("severity", "ok")
         label = {
@@ -1053,7 +1472,11 @@ def _doctor_print_summary(results: list[dict[str, str]]) -> int:
             "critical": click.style("❌ critical", fg="red"),
             "skipped": click.style("⏭️  skipped", dim=True),
         }.get(sev, sev)
-        click.echo(f"{r['component'].ljust(name_w)}  {label.ljust(status_w)}  {r.get('detail', '')}")
+        probe = (r.get("probe") or "—")
+        click.echo(
+            f"{r['component'].ljust(name_w)}  {label.ljust(status_w)}  "
+            f"{probe.ljust(probe_w)}  {r.get('detail', '')}"
+        )
 
     worst = max((SEVERITY_RANK.get(r.get("severity", "ok"), 0) for r in results), default=0)
     if worst >= 2:
