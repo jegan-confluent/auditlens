@@ -137,3 +137,118 @@ def test_auth_analytics_pct_and_trend_keys_present(auth_client):
         assert "pct_of_total" in row
         assert "trend" in row
         assert row["trend"] in ("up", "down", "stable")
+
+
+# ─────────────── noise-table display_name read-through ──────────────────
+
+
+@pytest.fixture()
+def auth_client_with_noise_display(monkeypatch):
+    """Variant fixture — seeds two enriched kafka.Authentication rows
+    (actor_display_name + actor_email populated on the noise row) and
+    one User:N row that's only resolvable via the noise-row column."""
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = Path(tmp) / "auditlens.db"
+        monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path}")
+        monkeypatch.setenv("FORWARDER_HEALTH_URL", "http://127.0.0.1:9/health")
+        monkeypatch.setenv("API_AUTH_ENABLED", "false")
+        monkeypatch.setattr("backend.app.main.init_db", lambda: None)
+        get_settings.cache_clear()
+
+        from backend.app.core.limiter import limiter
+        from backend.app.services.system_service import reset_forwarder_health_cache
+
+        reset_forwarder_health_cache()
+        noise_service.reset_noise_table_existence_cache()
+        limiter.enabled = False
+        limiter.reset()
+
+        engine = build_engine(f"sqlite:///{db_path}")
+        TestingSessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+        init_db(engine)
+        _create_noise_table(engine)
+
+        now = datetime.now(timezone.utc)
+        rows = [
+            # Enriched at ingest — has both columns populated.
+            {
+                "timestamp": now - timedelta(minutes=1),
+                "actor": "u-resolved",
+                "actor_display_name": "Resolved User",
+                "actor_email": "ru@confluent.io",
+                "action": "kafka.Authentication",
+                "result": "Success",
+                "resource_name": None,
+                "source_ip": "10.0.0.1",
+                "environment_id": "env-aaa",
+                "cluster_id": "lkc-bbb",
+                "is_denied": False,
+            },
+            # Backfilled — noise row has display_name and email but no u-xxx exists.
+            {
+                "timestamp": now - timedelta(minutes=2),
+                "actor": "User:8893428",
+                "actor_display_name": "Backfilled MDS User",
+                "actor_email": "mds@confluent.io",
+                "action": "kafka.Authentication",
+                "result": "Success",
+                "resource_name": None,
+                "source_ip": "10.0.0.2",
+                "environment_id": "env-aaa",
+                "cluster_id": "lkc-bbb",
+                "is_denied": False,
+            },
+            # Unresolved — neither noise-row enrichment nor any other source.
+            {
+                "timestamp": now - timedelta(minutes=3),
+                "actor": "User:99999999",
+                "actor_display_name": None,
+                "actor_email": None,
+                "action": "kafka.Authentication",
+                "result": "Success",
+                "resource_name": None,
+                "source_ip": "10.0.0.3",
+                "environment_id": "env-aaa",
+                "cluster_id": "lkc-bbb",
+                "is_denied": False,
+            },
+        ]
+        with engine.begin() as conn:
+            for row in rows:
+                conn.execute(noise_service.audit_events_noise.insert(), row)
+
+        app = create_app()
+
+        def override_db():
+            db = TestingSessionLocal()
+            try:
+                yield db
+            finally:
+                db.close()
+
+        app.dependency_overrides[get_db] = override_db
+        yield TestClient(app)
+
+
+def test_auth_analytics_uses_noise_row_display_name(auth_client_with_noise_display):
+    """The route must surface actor_display_name / actor_email straight
+    from the noise row when populated — no audit_events cross-join
+    required. Covers both newly-ingested rows (via principalResourceId
+    swap) and offline-backfilled User:N rows."""
+    body = auth_client_with_noise_display.get("/auth/analytics?time_window=1d").json()
+    by_actor = {row["actor"]: row for row in body["top_actors"]}
+
+    # u-resolved → enriched at ingest
+    resolved = by_actor["u-resolved"]
+    assert resolved["actor_display_name"] == "Resolved User"
+    assert resolved["actor_email"] == "ru@confluent.io"
+
+    # User:8893428 → resolved via the backfilled noise-row column
+    backfilled = by_actor["User:8893428"]
+    assert backfilled["actor_display_name"] == "Backfilled MDS User"
+    assert backfilled["actor_email"] == "mds@confluent.io"
+
+    # User:99999999 → no source resolves it; falls through to raw.
+    unresolved = by_actor["User:99999999"]
+    assert unresolved["actor_display_name"] == "User:99999999"
+    assert unresolved["actor_email"] is None

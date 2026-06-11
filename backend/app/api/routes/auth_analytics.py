@@ -1,8 +1,19 @@
 """GET /auth/analytics — top API keys + source IPs by kafka.Authentication volume.
 
-Reads audit_events_noise (auth events are bulk-noise). Display names come from
-actor_mappings.yml at response time because audit_events_noise has no
-actor_display_name column. Two windows supported: 1d, 7d.
+Reads audit_events_noise (auth events are bulk-noise). Resolution chain for
+the actor display name, in order:
+
+  1. audit_events_noise.actor_display_name on the row itself
+     (populated at ingest via the principalResourceId swap in
+     minimal_normalize, and via the offline backfill script that mines
+     audit_events.raw_payload_json for User:N → u-xxx mappings).
+  2. audit_events.actor_display_name cross-join — covers actors that
+     appear in the enriched table but not yet on the noise row (e.g.,
+     legacy rows ingested before migration 0031).
+  3. actor_mappings.yml manual override.
+  4. Raw actor as the last resort.
+
+Two windows supported: 1d, 7d.
 """
 import logging
 from datetime import datetime, timedelta, timezone
@@ -114,13 +125,20 @@ def auth_analytics(
     ), {"cutoff": cutoff}).one()
     total = int(total_row.n or 0)
 
+    # Also pull the noise table's own actor_display_name + actor_email so
+    # the route can render them without a cross-join when the row already
+    # carries the enrichment (migration 0031 + minimal_normalize swap).
+    # MAX() works on string columns under both Postgres and SQLite and
+    # picks any non-NULL value within the group.
     actor_rows = db.execute(text(
         """
         SELECT actor,
                COUNT(*) AS auth_count,
                COUNT(DISTINCT source_ip) AS unique_ips,
                SUM(CASE WHEN timestamp < :half THEN 1 ELSE 0 END) AS first_half,
-               SUM(CASE WHEN timestamp >= :half THEN 1 ELSE 0 END) AS second_half
+               SUM(CASE WHEN timestamp >= :half THEN 1 ELSE 0 END) AS second_half,
+               MAX(actor_display_name) AS noise_display_name,
+               MAX(actor_email) AS noise_email
         FROM audit_events_noise
         WHERE LOWER(action) = 'kafka.authentication'
           AND timestamp >= :cutoff
@@ -134,14 +152,13 @@ def auth_analytics(
 
     mapping = get_actor_mapping_file()
 
-    # Resolve display names from the enriched audit_events table for the
-    # top-10 actors. audit_events_noise carries no actor_display_name; the
-    # enriched copy in audit_events does. DISTINCT ON keeps one row per
-    # actor (Postgres-specific). On SQLite (test runs only) skip this step
-    # and fall through to actor_mappings.yml — the route is exercised live
-    # only against Postgres.
+    # Fallback resolution: cross-join into the enriched audit_events table.
+    # Only used when the noise row itself has no actor_display_name.
+    # DISTINCT ON keeps one row per actor (Postgres-specific). On SQLite
+    # (test runs only) skip this step and fall through to actor_mappings.yml.
     actor_list = [row.actor for row in actor_rows if row.actor]
     display_map: dict[str, str] = {}
+    email_map: dict[str, str] = {}
     if actor_list and db.get_bind().dialect.name == "postgresql":
         # Bound the cross-table lookup by the same time window the noise
         # query used — keeps the scan index-friendly and consistent with
@@ -159,6 +176,8 @@ def auth_analytics(
         for r in display_rows:
             if r.actor_display_name:
                 display_map[r.actor] = r.actor_display_name
+            if r.actor_email:
+                email_map[r.actor] = r.actor_email
 
     def _trend(first: int, second: int) -> str:
         if first == 0 and second == 0:
@@ -171,31 +190,42 @@ def auth_analytics(
             return "down"
         return "stable"
 
-    def _display_name(actor_value: str) -> str:
-        # 1. audit_events enrichment (preferred — populated by IAM cache).
+    def _display_name(actor_value: str, noise_display: str | None) -> str:
+        # 1. Noise row's own actor_display_name (populated at ingest time).
+        if noise_display:
+            return noise_display
+        # 2. audit_events cross-join (legacy rows / pre-0031 backfill).
         hit = display_map.get(actor_value)
         if hit:
             return hit
-        # 2. actor_mappings.yml manual override.
+        # 3. actor_mappings.yml manual override.
         name = mapping.get(actor_value)
         if name:
             return name
-        # 3. "User:" prefix strip + retry the mapping lookup.
+        # 4. "User:" prefix strip + retry the mapping lookup.
         if actor_value.startswith("User:"):
             stripped = actor_value[5:]
             name = mapping.get(stripped)
             if name:
                 return name
-        # 4. Raw actor as last resort.
+        # 5. Raw actor as last resort.
         return actor_value
+
+    def _email(actor_value: str, noise_email: str | None) -> str | None:
+        if noise_email:
+            return noise_email
+        return email_map.get(actor_value)
 
     top_actors = []
     for row in actor_rows:
         actor_value = row.actor or ""
         auth_count = int(row.auth_count or 0)
+        noise_display = getattr(row, "noise_display_name", None)
+        noise_email = getattr(row, "noise_email", None)
         top_actors.append({
             "actor": actor_value,
-            "actor_display_name": _display_name(actor_value),
+            "actor_display_name": _display_name(actor_value, noise_display),
+            "actor_email": _email(actor_value, noise_email),
             "auth_count": auth_count,
             "unique_ips": int(row.unique_ips or 0),
             "pct_of_total": round(100.0 * auth_count / total, 2) if total else 0.0,
