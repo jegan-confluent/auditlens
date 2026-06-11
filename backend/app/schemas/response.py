@@ -157,3 +157,4 @@ class SystemStatusResponse(BaseModel):
     confluent_configured: bool = False
     effective_retention: dict[str, int] | None = None
     schema_registry: dict[str, Any] | None = None
+    audit_topic: str | None = None

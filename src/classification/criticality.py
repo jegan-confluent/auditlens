@@ -52,9 +52,18 @@ def calculate_criticality(event: Dict[str, Any]) -> ClassificationResult:
     """
     Calculate the criticality level of an audit event.
 
+    Auth-signal methods return LOW. Routine denials return LOW.
+    Denied access on sensitive methods returns HIGH. No path returns CRITICAL
+    from the failure/denial branches — only an explicit CRITICAL_METHODS
+    match in the method-based step (priority 3) produces CRITICAL.
+
     The classification follows this priority order:
-    1. Security failures (UNAUTHENTICATED, PERMISSION_DENIED) → CRITICAL
-    2. Explicit denied access (granted=False) → CRITICAL
+    1. Security failures (UNAUTHENTICATED, PERMISSION_DENIED) on auth-signal
+       methods → LOW (signal-driven, not high-risk per event); other security
+       failures → MEDIUM
+    2. Explicit denied access (granted=False): authorization-check methods →
+       LOW; sensitive methods (CRITICAL_METHODS / HIGH_METHODS) → HIGH;
+       everything else → LOW
     3. Method-based classification (CRITICAL_METHODS, HIGH_METHODS, etc.)
     4. Pattern-based classification (Delete, Create, Update patterns)
     5. Default to LOW for read operations and unknown methods
@@ -121,7 +130,7 @@ def calculate_criticality(event: Dict[str, Any]) -> ClassificationResult:
     # and should NOT be elevated to CRITICAL when denied - denials are normal
     if granted is False:
         if method_name in AUTHORIZATION_CHECK_METHODS:
-            # Routine authorization check denial - classify as MEDIUM
+            # Routine authorization check denial - classify as LOW
             return ClassificationResult(
                 criticality=CriticalityLevel.LOW,
                 reason=f"Authorization check denied: {method_name}",
@@ -135,7 +144,7 @@ def calculate_criticality(event: Dict[str, Any]) -> ClassificationResult:
                 signal_type="authz_denial",
             )
         elif method_name in CRITICAL_METHODS or method_name in HIGH_METHODS:
-            # Denied access on important methods is CRITICAL
+            # Denied access on important methods is HIGH
             return ClassificationResult(
                 criticality=CriticalityLevel.HIGH,
                 reason=f"Access denied on sensitive operation: {method_name}",

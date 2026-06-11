@@ -521,6 +521,10 @@ def get_system_status(db: Session) -> dict[str, Any]:
     _cf_key = _s.confluent_cloud_api_key or _s.confluent_api_key
     _cf_secret = _s.confluent_cloud_api_secret or _s.confluent_api_secret
     status["confluent_configured"] = bool(_cf_key and _cf_secret)
+    # Surface the configured source topic so the System page can render
+    # it without hardcoding a string. Falls back to the Confluent Cloud
+    # default — matches src/forwarder/config.py:72.
+    status["audit_topic"] = os.getenv("AUDIT_TOPIC", "confluent-audit-log-events")
     try:
         from backend.app.services.settings_service import get_effective_retention
         status["effective_retention"] = get_effective_retention(db)

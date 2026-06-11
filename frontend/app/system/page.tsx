@@ -127,7 +127,7 @@ export default function SystemPage() {
   if (!health || !ready) return <main className="page"><LoadingState /></main>;
 
   const apiOk = ready.ok;
-  const dbOk = apiOk;
+  const dbOk = (ready?.db?.can_connect === true) && (ready?.db?.can_query === true);
   const consumerLag = typeof health.consumer_lag === "number" ? health.consumer_lag : null;
   const processingRate = typeof health.processing_rate === "number" ? health.processing_rate : 0;
   const consumerState = health.observability?.consumer_runtime?.consumer_state ?? "unknown";
@@ -209,9 +209,9 @@ export default function SystemPage() {
       <section id="forwarder-pipeline" className="panel system-section">
         <h2>Forwarder pipeline</h2>
         <div className="system-pipeline">
-          <PipelineRow tone="ok" stage="Kafka" metric="Source topic" detail="confluent-audit-log-events" />
+          <PipelineRow tone="ok" stage="Kafka" metric="Source topic" detail={systemStatus?.audit_topic ?? "—"} />
           <PipelineRow
-            tone={fwLagTone === "ok" ? "ok" : fwLagTone}
+            tone={fwLagTone}
             stage="Consumer"
             metric={`${formatNumber(consumerLag)} lag`}
             detail={`${processingRate.toFixed(1)} msg/s · ${formatNumber(recordsConsumed)} processed · last poll ${formatRelative(lastPoll)}`}

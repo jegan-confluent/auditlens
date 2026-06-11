@@ -206,6 +206,7 @@ export type SystemStatus = {
     serialization_mode?: "avro" | "json" | "unknown";
     error?: string;
   } | null;
+  audit_topic?: string | null;
 };
 
 // Shape of GET /system/forwarder-health (proxies the forwarder's /health).

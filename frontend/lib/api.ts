@@ -399,6 +399,11 @@ export type ReadinessSnapshot = {
   status: number;
   newest_event?: string | null;
   oldest_event?: string | null;
+  db?: {
+    can_connect?: boolean;
+    can_query?: boolean;
+    error?: string | null;
+  } | null;
 };
 
 export type AuthAnalyticsActor = {
@@ -432,18 +437,37 @@ export function getAuthAnalytics(timeWindow: "1d" | "7d" = "1d", signal?: AbortS
 export async function getReadinessStatus(signal?: AbortSignal): Promise<ReadinessSnapshot> {
   try {
     const response = await fetch(`${API_BASE}/ready`, { cache: "no-store", signal });
-    if (!response.ok) {
-      return { ok: false, status: response.status };
+    // /ready returns JSON with a `db` block even on 503 — parse it so the
+    // System page can distinguish API-down from DB-down.
+    let body: {
+      db?: {
+        can_connect?: boolean;
+        can_query?: boolean;
+        newest_event?: string | null;
+        oldest_event?: string | null;
+        error?: string | null;
+      };
+    } = {};
+    try {
+      body = await response.json();
+    } catch {
+      // non-JSON body (rare) — fall through with body as {}
     }
-    const body = (await response.json()) as { db?: { newest_event?: string | null; oldest_event?: string | null } };
     return {
-      ok: true,
+      ok: response.ok,
       status: response.status,
       newest_event: body.db?.newest_event ?? null,
-      oldest_event: body.db?.oldest_event ?? null
+      oldest_event: body.db?.oldest_event ?? null,
+      db: body.db
+        ? {
+            can_connect: body.db.can_connect,
+            can_query: body.db.can_query,
+            error: body.db.error ?? null,
+          }
+        : null,
     };
   } catch (err) {
     if (isAbortError(err)) throw err;
-    return { ok: false, status: 0 };
+    return { ok: false, status: 0, db: null };
   }
 }

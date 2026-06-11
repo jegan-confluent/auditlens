@@ -1,6 +1,7 @@
-"""Public feedback submission endpoint.
+"""Feedback submission endpoint.
 
-POST /feedback  — unauthenticated, rate-limited (5/IP/hour, in-memory)
+POST /feedback  — viewer-protected when API_AUTH_ENABLED=true (open in
+                  local dev only), rate-limited (5/IP/hour, in-memory)
 GET  /feedback  — viewer-protected, for future admin review
 """
 
@@ -11,6 +12,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
+from cachetools import TTLCache
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
@@ -23,12 +25,15 @@ from backend.app.api.routes.patterns import _require_viewer
 router = APIRouter(tags=["feedback"])
 
 # ---------------------------------------------------------------------------
-# Simple in-memory rate limiter — approximate, per IP, 5 requests/hour max.
-# Uses a sliding list of timestamps; old entries are pruned on each check.
+# In-memory rate limiter — per IP, 5 requests/hour max. TTLCache evicts
+# IP keys automatically after _RATE_WINDOW_S seconds, so the dict can no
+# longer grow unbounded with one entry per unique source IP. The per-IP
+# list is still pruned on each check so an IP that hits within the
+# window but below the limit doesn't keep stale timestamps until eviction.
 # ---------------------------------------------------------------------------
 _RATE_WINDOW_S = 3600
 _RATE_MAX = 5
-_rate_store: dict[str, list[float]] = {}
+_rate_store: TTLCache = TTLCache(maxsize=10_000, ttl=_RATE_WINDOW_S)
 
 
 def _check_rate_limit(ip: str) -> None:
