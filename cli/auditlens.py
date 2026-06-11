@@ -762,10 +762,9 @@ SERVICE_PROBES: dict[str, dict[str, Any]] = {
     },
     "alertmanager": {
         "container_name": "audit-alertmanager",
+        # host-bound 127.0.0.1:9093 — not reachable from container network
         "host_port": 9093,
-        "probe_strategy": "http",
-        "probe_path": "/-/healthy",
-        "expect_status": 200,
+        "probe_strategy": "process_alive",
         "timeout": 5,
         "no_compose_healthcheck": True,
     },
@@ -1110,21 +1109,11 @@ _DIAGNOSIS_PATTERNS: tuple[tuple[tuple[str, ...], str, str], ...] = (
         "Auth failure — wrong credentials in env",
         "Check env vars for this service in .env",
     ),
-    (
-        ("certificate",),
-        "TLS/cert issue",
-        "Check cert paths and expiry",
-    ),
-    (
-        ("tls",),
-        "TLS/cert issue",
-        "Check cert paths and expiry",
-    ),
-    (
-        ("ssl",),
-        "TLS/cert issue",
-        "Check cert paths and expiry",
-    ),
+    # NOTE: the certificate / tls / ssl rule is handled separately inside
+    # _match_diagnosis with a per-line co-occurrence check (it requires
+    # an actual error keyword on the same line) to stop benign mentions
+    # like `caller=tls_config.go ... msg="TLS is disabled."` from
+    # over-matching as a TLS failure.
 )
 
 
@@ -1166,12 +1155,28 @@ def _pull_service_logs(
         return []
 
 
-def _match_diagnosis(joined_logs: str) -> tuple[str | None, str | None]:
-    """First-match wins over _DIAGNOSIS_PATTERNS. Returns (diagnosis, fix)
-    or (None, None) on no match. All matching is case-insensitive."""
-    text = joined_logs.lower()
+_TLS_KEYWORDS = ("certificate", "tls", "ssl")
+_TLS_COOCCURRENCE = ("error", "fail", "invalid", "expired", "refused", "cannot", "unable")
+
+
+def _match_diagnosis(log_lines: list[str]) -> tuple[str | None, str | None]:
+    """First-match wins. Returns (diagnosis, fix) or (None, None) on no
+    match. All matching is case-insensitive.
+
+    The TLS / cert / SSL rule is special: it only fires when a line
+    mentions a TLS keyword AND an error keyword on the SAME line. Bare
+    mentions like `caller=tls_config.go` or `msg="TLS is disabled."` no
+    longer over-match. Every other rule still matches against the
+    joined log text per the original behaviour."""
+    for line in log_lines:
+        lowered = line.lower()
+        if any(tok in lowered for tok in _TLS_KEYWORDS) and \
+           any(kw in lowered for kw in _TLS_COOCCURRENCE):
+            return "TLS/cert issue", "Check cert paths and expiry"
+
+    joined = "\n".join(log_lines).lower()
     for tokens, diagnosis, fix in _DIAGNOSIS_PATTERNS:
-        if all(tok in text for tok in tokens):
+        if all(tok in joined for tok in tokens):
             return diagnosis, fix
     return None, None
 
@@ -1212,8 +1217,7 @@ def _doctor_diagnose_service(
     except Exception as exc:  # pragma: no cover - defensive
         click.echo(f"           └─ could not fetch logs: {type(exc).__name__}: {exc}")
         return
-    joined = "\n".join(log_lines)
-    if not joined.strip():
+    if not log_lines:
         # Empty-log special case — distinct diagnosis per spec.
         _print_diagnosis_block(
             "No logs available — process may be exiting before writing to stdout",
@@ -1221,7 +1225,7 @@ def _doctor_diagnose_service(
             [],
         )
         return
-    diagnosis, fix = _match_diagnosis(joined)
+    diagnosis, fix = _match_diagnosis(log_lines)
     _print_diagnosis_block(diagnosis, fix, log_lines)
 
 
