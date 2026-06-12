@@ -27,10 +27,10 @@ const quickFilters: Array<{ label: string; patch: Partial<EventFilters> }> = [
 
 const SIGNAL_OPTIONS: Array<{ value: string; label: string }> = [
   { value: "", label: "All" },
-  { value: "action_required", label: "🔴 Action Required" },
-  { value: "attention", label: "🟡 Review" },
-  { value: "informational", label: "ℹ️ Info" },
-  { value: "noise", label: "🔇 Noise" }
+  { value: "action_required", label: "🔴 Critical" },
+  { value: "attention", label: "🟡 High" },
+  { value: "informational", label: "ℹ️ Medium" },
+  { value: "noise", label: "🔇 Info" }
 ];
 
 // Dropdown values are sent verbatim to paramsFromFilters which routes them to

@@ -3,10 +3,10 @@
 import { useEffect, useRef, useState } from "react";
 
 export const BREAKDOWN_TIERS = [
-  { name: "noise",            label: "Noise",  color: "#888780", description: "routine, expected activity", subtitle: "all clear" },
-  { name: "informational",    label: "Info",   color: "#0F6E56", description: "informational events",       subtitle: "informational" },
-  { name: "attention",        label: "Review", color: "#BA7517", description: "events needing monitoring",  subtitle: "monitored" },
-  { name: "action_required",  label: "Action", color: "#E24B4A", description: "needs immediate action",     subtitle: "needs review" },
+  { name: "noise",            label: "Info",     color: "#888780", description: "routine, expected activity", subtitle: "all clear" },
+  { name: "informational",    label: "Medium",   color: "#0F6E56", description: "informational events",       subtitle: "informational" },
+  { name: "attention",        label: "High",     color: "#BA7517", description: "events needing monitoring",  subtitle: "monitored" },
+  { name: "action_required",  label: "Critical", color: "#E24B4A", description: "needs immediate action",     subtitle: "needs review" },
 ] as const;
 
 export type BreakdownTierName = (typeof BREAKDOWN_TIERS)[number]["name"];

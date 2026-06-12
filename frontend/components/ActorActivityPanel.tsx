@@ -46,10 +46,10 @@ function formatTime(iso: string): string {
 }
 
 const SIGNAL_LABELS: Record<string, string> = {
-  action_required: "🔴 action required",
-  attention: "🟡 attention",
-  informational: "🟢 informational",
-  noise: "⚪ noise",
+  action_required: "🔴 Critical",
+  attention: "🟡 High",
+  informational: "🟢 Medium",
+  noise: "⚪ Info",
 };
 
 const ANOMALY_SEVERITY_CLASS: Record<string, string> = {
@@ -283,9 +283,9 @@ export default function ActorActivityPanel({ actorId, seedEvent, onClose, onAppl
                 <section className="actor-panel-section">
                   <div className="eyebrow">Signal breakdown</div>
                   <ul className="actor-signal-list">
-                    <li><span>🔴 Action required</span><strong>{summary.action_required_count.toLocaleString()}</strong></li>
-                    <li><span>🟡 Attention</span><strong>{summary.attention_count.toLocaleString()}</strong></li>
-                    <li><span>🟢 Informational</span><strong>{summary.informational_count.toLocaleString()}</strong></li>
+                    <li><span>🔴 Critical</span><strong>{summary.action_required_count.toLocaleString()}</strong></li>
+                    <li><span>🟡 High</span><strong>{summary.attention_count.toLocaleString()}</strong></li>
+                    <li><span>🟢 Medium</span><strong>{summary.informational_count.toLocaleString()}</strong></li>
                   </ul>
                 </section>
 

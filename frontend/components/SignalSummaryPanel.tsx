@@ -18,10 +18,10 @@ const SIGNAL_CARDS: ReadonlyArray<{
   contextLabel: string | ((count: number) => string);
   alertClass?: (count: number) => string;
 }> = [
-  { fieldKey: "noise_count", className: "noise", icon: "🔇", label: "Noise", contextLabel: "all clear" },
-  { fieldKey: "informational_count", className: "info", icon: "ℹ️", label: "Info", contextLabel: "informational" },
-  { fieldKey: "attention_count", className: "review", icon: "👀", label: "Review", contextLabel: "monitored", alertClass: (c) => c > 0 ? "amber" : "" },
-  { fieldKey: "action_required_count", className: "action", icon: "🔴", label: "Action", contextLabel: (c) => c > 0 ? "needs review" : "all clear", alertClass: (c) => c > 0 ? "red" : "" },
+  { fieldKey: "noise_count", className: "noise", icon: "🔇", label: "Info", contextLabel: "all clear" },
+  { fieldKey: "informational_count", className: "info", icon: "ℹ️", label: "Medium", contextLabel: "informational" },
+  { fieldKey: "attention_count", className: "review", icon: "👀", label: "High", contextLabel: "monitored", alertClass: (c) => c > 0 ? "amber" : "" },
+  { fieldKey: "action_required_count", className: "action", icon: "🔴", label: "Critical", contextLabel: (c) => c > 0 ? "needs review" : "all clear", alertClass: (c) => c > 0 ? "red" : "" },
 ];
 
 

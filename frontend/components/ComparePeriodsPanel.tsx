@@ -43,7 +43,7 @@ function PeriodCard({ label, stats }: { label: string; stats: PeriodStats }) {
       <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", rowGap: 4, columnGap: 12 }}>
         <span className="muted">Total</span>
         <span><strong>{stats.total.toLocaleString()}</strong></span>
-        <span className="muted">Action required</span>
+        <span className="muted">Critical</span>
         <span><strong>{actionRequiredCount(stats).toLocaleString()}</strong></span>
         <span className="muted">Top actor</span>
         <span>{formatTopActor(stats)}</span>

@@ -1,6 +1,13 @@
-# AuditLens
+## AuditLens
 
-Kafka-native audit intelligence for Confluent Cloud. AuditLens consumes your organisation's audit-log topic, classifies every event into four signal tiers (`action_required` / `attention` / `informational` / `noise`), enriches actors with real IAM display names, and surfaces the results through a real-time dashboard, a typed REST API, and a single-file CLI. Self-hosted: no data leaves your deployment, no telemetry, no phone-home. Built for security and operations teams that need DORA / SOX / GDPR / FCA-grade audit visibility over Confluent without sending raw logs to a SaaS vendor.
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](./LICENSE)
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://python.org)
+[![Docker](https://img.shields.io/badge/docker-compose-blue.svg)](./docker-compose.prod.yml)
+[![Kafka](https://img.shields.io/badge/confluent-cloud-blue.svg)](https://confluent.cloud)
+
+Your Confluent Cloud organisation generates millions of audit events every day. Most are noise. AuditLens finds what matters.
+
+AuditLens is a self-hosted, Kafka-native audit intelligence platform for Confluent Cloud. It consumes your audit-log topic, separates signal from noise in real time, enriches actors with IAM identity, and surfaces security-relevant patterns — auth failures, privilege escalation, IP-filter denials, Access Transparency operator access — through a real-time dashboard, REST API, and CLI. No data leaves your deployment. No telemetry. No SaaS vendor. Built for security and operations teams with DORA / SOX / GDPR / FCA audit obligations.
 
 ## Architecture
 
@@ -482,3 +489,9 @@ Branch naming: `feat/<short>`, `fix/<short>`, `chore/<short>`. PRs that touch in
 ## License
 
 Apache 2.0 — see [LICENSE](./LICENSE).
+
+---
+
+**GitHub topics:** `kafka` `confluent` `audit-logs` `security` `compliance` `dora` `sox` `gdpr` `self-hosted` `docker`
+
+> Set these in the GitHub repo Settings → About → Topics panel.
