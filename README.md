@@ -481,4 +481,4 @@ Branch naming: `feat/<short>`, `fix/<short>`, `chore/<short>`. PRs that touch in
 
 ## License
 
-No license file is present in this repository. All rights reserved until a license is added.
+Apache 2.0 — see [LICENSE](./LICENSE).
